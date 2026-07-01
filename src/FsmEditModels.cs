@@ -1,0 +1,79 @@
+using System;
+using System.Collections.Generic;
+
+namespace FsmMaster;
+
+// Plain, flat DTOs for UnityEngine.JsonUtility, which is the only JSON serializer available under this
+// project's fixed dependency list (see CLAUDE.md - no Newtonsoft/System.Text.Json package reference).
+// JsonUtility cannot serialize Dictionary<> or polymorphic fields, so every value - regardless of the
+// underlying PlayMaker variable/field CLR type - is round-tripped as an invariant-culture string and parsed
+// back against the recorded type tag on load, instead of modelling one field per possible PlayMaker type.
+
+// The JSON root - one of these is stored per scene (see FsmSaveDataStore), rather than one file covering
+// every scene, so a scene's edits can be loaded/cleared without touching data for any other scene.
+[Serializable]
+internal sealed class SceneEdits
+{
+    public string SceneName = "";
+    public List<FsmEditSet> FsmEdits = new();
+}
+
+// One instance of this is applied to every live PlayMakerFSM instance sharing FsmKey (see FsmIdentity), and
+// also doubles as the in-memory shape of a pristine snapshot (see FsmPristineSnapshot) - "the values to
+// restore" has the exact same shape as "the values to apply".
+[Serializable]
+internal sealed class FsmEditSet
+{
+    public string FsmKey = "";
+    public List<VariableOverride> VariableOverrides = new();
+    public List<ActionFieldOverride> ActionFieldOverrides = new();
+    public List<string> DisabledStates = new();
+    public List<TransitionRetarget> TransitionRetargets = new();
+    public List<SequencerOverride> SequencerOverrides = new();
+}
+
+[Serializable]
+internal sealed class VariableOverride
+{
+    public string VariableType = "";
+    public string Name = "";
+    public string StringValue = "";
+}
+
+[Serializable]
+internal sealed class ActionFieldOverride
+{
+    public string StateName = "";
+    public int ActionIndex;
+    public string ExpectedActionTypeName = "";
+    public string FieldName = "";
+    public string StringValue = "";
+}
+
+// Covers both retargeting where a transition leads (its to-state) and relocating which state it leads
+// from - a transition can be moved from one origin state to another (or to/from being a global transition,
+// via "" = global) and stays relocated until undone. Disabling an event is expressed as a TransitionRetarget
+// with NewToState == DisabledMarker rather than as its own edit kind - a disable, a pure retarget, and a
+// full relocation all reduce to the same "this (state, event) transition now originates at NewStateName and
+// leads to NewToState, and originally originated at StateName leading to Y" shape, so reset can restore any
+// of them the same way.
+[Serializable]
+internal sealed class TransitionRetarget
+{
+    public const string DisabledMarker = "\0DISABLED";
+
+    public string StateName = "";    // where the transition originates before this edit ("" = global)
+    public string EventName = "";
+    public string NewStateName = ""; // where it should originate after this edit ("" = global); same as
+                                      // StateName for a pure retarget/disable that doesn't relocate it
+    public string NewToState = "";
+}
+
+[Serializable]
+internal sealed class SequencerOverride
+{
+    public string StateName = "";
+    public int ActionIndex;
+    public List<string> Pattern = new();
+    public int RepeatCount; // 0 = unlimited
+}
