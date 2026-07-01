@@ -46,6 +46,11 @@
     <None Include="README.md" Pack="True" PackagePath="README.md" />
   </ItemGroup>
 
+  <PropertyGroup>
+    <CopyDestinationFolder Condition="'$(HotReload)' == 'true'">$(SilksongPluginsFolder)/</CopyDestinationFolder>
+    <CopyDestinationFolder Condition="'$(HotReload)' != 'true'">$(SilksongPluginsFolder)/ace9653-$(AssemblyTitle)/</CopyDestinationFolder>
+  </PropertyGroup>
+
   <Target Name="CopyToPluginsFolder" AfterTargets="PostBuildEvent">
     <ItemGroup>
       <Binaries Include="$(TargetPath)" />
@@ -53,7 +58,7 @@
     </ItemGroup>
     <Copy
       SourceFiles="@(Binaries)"
-      DestinationFolder="$(SilksongPluginsFolder)/ace9653-$(AssemblyTitle)/"
+      DestinationFolder="$(CopyDestinationFolder)"
       Condition="'$(SilksongPluginsFolder)' != '' And Exists('$(SilksongPluginsFolder)')"
     />
   </Target>

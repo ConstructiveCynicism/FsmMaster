@@ -1,4 +1,5 @@
 using System;
+using System.Reflection;
 using BepInEx;
 using HutongGames.PlayMaker;
 using UnityEngine;
@@ -36,6 +37,7 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
         foreach (FsmState state in fsm.States)
         {
             Logger.LogInfo($"[FsmMaster]       State \"{state.Name}\"");
+            LogStateActions(state);
             foreach (FsmTransition transition in state.Transitions)
             {
                 Logger.LogInfo($"[FsmMaster]         \"{transition.EventName}\" -> \"{transition.ToState}\"");
@@ -52,6 +54,112 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
         }
 
         LogFsmVariables(fsm.Variables);
+    }
+
+    private void LogStateActions(FsmState state)
+    {
+        FsmStateAction[] actions = state.Actions;
+        Logger.LogInfo($"[FsmMaster]         {actions.Length} action(s)");
+
+        for (int i = 0; i < actions.Length; i++)
+        {
+            FsmStateAction action = actions[i];
+            Type actionType = action.GetType();
+            Logger.LogInfo($"[FsmMaster]           [{i}] {actionType.Name}");
+
+            foreach (FieldInfo field in actionType.GetFields(BindingFlags.Instance | BindingFlags.Public))
+            {
+                if (field.DeclaringType == typeof(FsmStateAction))
+                {
+                    continue;
+                }
+
+                LogActionField(action, field.Name, field.GetValue(action));
+            }
+        }
+    }
+
+    private void LogActionField(FsmStateAction action, string fieldName, object? fieldValue)
+    {
+        switch (fieldValue)
+        {
+            case FsmArray fsmArray:
+                LogActionFieldArray(action, WithVariableName(fieldName, fsmArray.Name), fsmArray.Length, i => fsmArray.Values[i]);
+                break;
+            case Array array:
+                LogActionFieldArray(action, fieldName, array.Length, i => array.GetValue(i));
+                break;
+            default:
+                Logger.LogInfo($"[FsmMaster]             {fieldName}: {FormatActionFieldValue(action, fieldValue)}");
+                break;
+        }
+    }
+
+    private static string WithVariableName(string fieldName, string variableName)
+    {
+        return !string.IsNullOrEmpty(variableName) ? $"{fieldName} (\"{variableName}\")" : fieldName;
+    }
+
+    private void LogActionFieldArray(FsmStateAction action, string fieldName, int length, Func<int, object?> getElement)
+    {
+        Logger.LogInfo($"[FsmMaster]             {fieldName}: {length} element(s)");
+
+        for (int i = 0; i < length; i++)
+        {
+            object? element = getElement(i);
+            Logger.LogInfo($"[FsmMaster]               [{i}]: {FormatActionFieldValue(action, element)}");
+        }
+    }
+
+    private string FormatActionFieldValue(FsmStateAction action, object? fieldValue)
+    {
+        switch (fieldValue)
+        {
+            case null:
+                return "null";
+            case NamedVariable namedVariable:
+                string value = namedVariable.RawValue?.ToString() ?? "null";
+                return !string.IsNullOrEmpty(namedVariable.Name) ? $"\"{namedVariable.Name}\": {value}" : value;
+            case FsmEvent fsmEvent:
+                return fsmEvent.Name;
+            case FsmOwnerDefault fsmOwnerDefault:
+                return FormatOwnerDefault(action.Fsm, fsmOwnerDefault);
+            case FsmEventTarget fsmEventTarget:
+                return FormatEventTarget(action.Fsm, fsmEventTarget);
+            default:
+                return fieldValue.ToString();
+        }
+    }
+
+    // FsmOwnerDefault only carries the "use owner" / "specify object" *option*, not an
+    // identity on its own - Fsm.GetOwnerDefaultTarget resolves it to the actual GameObject
+    // PlayMaker would target at runtime, which is far more useful to log than the option name.
+    private string FormatOwnerDefault(Fsm fsm, FsmOwnerDefault ownerDefault)
+    {
+        GameObject resolvedGameObject = fsm.GetOwnerDefaultTarget(ownerDefault);
+        return resolvedGameObject != null ? $"[{resolvedGameObject.name}]" : "[none]";
+    }
+
+    private string FormatEventTarget(Fsm fsm, FsmEventTarget eventTarget)
+    {
+        switch (eventTarget.target)
+        {
+            case FsmEventTarget.EventTarget.Self:
+                return "EventTarget(Self)";
+            case FsmEventTarget.EventTarget.GameObject:
+                return $"EventTarget(GameObject): {FormatOwnerDefault(fsm, eventTarget.gameObject)}";
+            case FsmEventTarget.EventTarget.GameObjectFSM:
+                string fsmName = eventTarget.fsmName.Value ?? "";
+                return $"EventTarget(GameObjectFSM): {FormatOwnerDefault(fsm, eventTarget.gameObject)}.{fsmName}";
+            case FsmEventTarget.EventTarget.FSMComponent:
+                PlayMakerFSM targetFsmComponent = eventTarget.fsmComponent;
+                string fsmComponentDesc = targetFsmComponent != null
+                    ? $"{targetFsmComponent.gameObject.name}.{targetFsmComponent.FsmName}"
+                    : "none";
+                return $"EventTarget(FSMComponent): [{fsmComponentDesc}]";
+            default:
+                return $"EventTarget({eventTarget.target})";
+        }
     }
 
     private void LogFsmVariables(FsmVariables variables)
