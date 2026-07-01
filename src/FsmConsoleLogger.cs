@@ -22,9 +22,17 @@ internal sealed class FsmConsoleLogger
 
         foreach (FsmInfo fsm in snapshot.Fsms)
         {
-            _logger.LogInfo($"[FsmMaster]   FSM \"{fsm.FsmName}\" on \"{fsm.GameObjectName}\" - state \"{fsm.ActiveStateName}\"");
-            LogFsmDetails(fsm);
+            LogFsm(fsm);
         }
+    }
+
+    // Logs everything about a single FSM - states, actions (including nested/wrapped variable fields),
+    // transitions, global transitions, and FSM variables. LogSnapshot uses this per FSM in a full-scene
+    // dump; it's also a standalone entry point for logging just one already-known FSM on demand.
+    public void LogFsm(FsmInfo fsm)
+    {
+        _logger.LogInfo($"[FsmMaster]   FSM \"{fsm.FsmName}\" on \"{fsm.GameObjectName}\" - state \"{fsm.ActiveStateName}\"");
+        LogFsmDetails(fsm);
     }
 
     private void LogFsmDetails(FsmInfo fsm)

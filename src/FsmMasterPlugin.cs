@@ -65,8 +65,7 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
             _editManager.RegisterLiveInstances(group.Key, group.Value.Select(c => c.Fsm));
         }
 
-        SceneEdits sceneEdits = FsmSaveDataStore.Load(sceneName);
-        foreach (FsmEditSet editSet in sceneEdits.FsmEdits)
+        foreach (FsmEditSet editSet in FsmSaveDataStore.LoadAllForScene(sceneName))
         {
             if (groups.ContainsKey(editSet.FsmKey))
             {

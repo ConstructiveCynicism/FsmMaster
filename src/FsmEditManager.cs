@@ -14,7 +14,7 @@ namespace FsmMaster;
 // field overrides, state neutering, transition retargeting/disabling, and sequencer installs. Each FsmKey
 // (see FsmIdentity) gets its pristine values captured lazily on first touch, so ResetFsm can restore a live
 // FSM without a scene reload. All mutation is done via Silksong.FsmUtil's existing extension methods
-// (agent-context/Silksong.FsmUtil-main/src/FsmUtil.cs) rather than re-implementing state/transition/action
+// rather than re-implementing state/transition/action
 // bookkeeping FsmUtil already provides.
 internal sealed class FsmEditManager
 {
@@ -31,6 +31,10 @@ internal sealed class FsmEditManager
     private readonly Dictionary<string, List<Fsm>> _liveInstances = new();
     private readonly Dictionary<string, FsmPristineSnapshot> _pristine = new();
 
+    // The edits currently in effect per FsmKey, as opposed to _pristine's "what to restore" - this is what a
+    // caller (e.g. a "save all changes" action) serializes to FsmSaveDataStore.
+    private readonly Dictionary<string, FsmEditSet> _activeEdits = new();
+
     public FsmEditManager(ManualLogSource logger)
     {
         _logger = logger;
@@ -45,6 +49,12 @@ internal sealed class FsmEditManager
 
     public IReadOnlyList<Fsm> GetLiveInstances(string fsmKey) =>
         _liveInstances.TryGetValue(fsmKey, out List<Fsm>? instances) ? instances : Array.Empty<Fsm>();
+
+    // Every FsmKey with at least one edit currently in effect this session.
+    public IReadOnlyCollection<string> GetEditedFsmKeys() => _activeEdits.Keys;
+
+    public FsmEditSet? GetActiveEditSet(string fsmKey) =>
+        _activeEdits.TryGetValue(fsmKey, out FsmEditSet? set) ? set : null;
 
     public void ApplyEditSet(FsmEditSet editSet)
     {
@@ -93,6 +103,7 @@ internal sealed class FsmEditManager
         _liveInstances.TryGetValue(fsmKey, out List<Fsm>? instances);
         RestoreSnapshot(snapshot, instances ?? new List<Fsm>());
         _pristine.Remove(fsmKey);
+        _activeEdits.Remove(fsmKey);
     }
 
     // Reverts every edit applied this session without touching persisted JSON, so a ScriptEngine hot-reload
@@ -107,6 +118,7 @@ internal sealed class FsmEditManager
 
         _pristine.Clear();
         _liveInstances.Clear();
+        _activeEdits.Clear();
     }
 
     // ---- Variables ----
@@ -144,6 +156,10 @@ internal sealed class FsmEditManager
         }
 
         AssignNamedVariable(variable, ov.StringValue);
+
+        FsmEditSet active = GetOrCreateActiveEditSet(fsmKey);
+        active.VariableOverrides.RemoveAll(v => v.Name == ov.Name);
+        active.VariableOverrides.Add(ov);
     }
 
     // ---- Action fields ----
@@ -193,6 +209,11 @@ internal sealed class FsmEditManager
         }
 
         TryAssignFieldValue(action, field, currentValue, ov.StringValue);
+
+        FsmEditSet active = GetOrCreateActiveEditSet(fsmKey);
+        active.ActionFieldOverrides.RemoveAll(f =>
+            f.StateName == ov.StateName && f.ActionIndex == ov.ActionIndex && f.FieldName == ov.FieldName);
+        active.ActionFieldOverrides.Add(ov);
     }
 
     private static void RestoreActionField(Fsm fsm, ActionFieldOverride ov)
@@ -253,6 +274,12 @@ internal sealed class FsmEditManager
         else
         {
             _logger.LogWarning($"[FsmMaster] State '{stateName}' on fsm '{fsm.Name}' has no CANCEL/FINISHED/NEXT transition and no FsmEvent-valued action field to fall back on; leaving it inert with no exit.");
+        }
+
+        FsmEditSet active = GetOrCreateActiveEditSet(fsmKey);
+        if (!active.DisabledStates.Contains(stateName))
+        {
+            active.DisabledStates.Add(stateName);
         }
     }
 
@@ -339,6 +366,10 @@ internal sealed class FsmEditManager
                 NewToState = transition.ToState,
             });
         }
+
+        FsmEditSet active = GetOrCreateActiveEditSet(fsmKey);
+        active.TransitionRetargets.RemoveAll(t => t.StateName == retarget.StateName && t.EventName == retarget.EventName);
+        active.TransitionRetargets.Add(retarget);
 
         if (retarget.NewToState == TransitionRetarget.DisabledMarker)
         {
@@ -442,6 +473,10 @@ internal sealed class FsmEditManager
 
         FsmPristineSnapshot snapshot = GetOrCreateSnapshot(fsmKey);
         snapshot.InstalledSequencers.Add((original, sequencer));
+
+        FsmEditSet active = GetOrCreateActiveEditSet(fsmKey);
+        active.SequencerOverrides.RemoveAll(s => s.StateName == seq.StateName);
+        active.SequencerOverrides.Add(seq);
     }
 
     // ---- Snapshot plumbing ----
@@ -455,6 +490,17 @@ internal sealed class FsmEditManager
         }
 
         return snapshot;
+    }
+
+    private FsmEditSet GetOrCreateActiveEditSet(string fsmKey)
+    {
+        if (!_activeEdits.TryGetValue(fsmKey, out FsmEditSet? set))
+        {
+            set = new FsmEditSet { FsmKey = fsmKey };
+            _activeEdits[fsmKey] = set;
+        }
+
+        return set;
     }
 
     private static void RestoreSnapshot(FsmPristineSnapshot snapshot, List<Fsm> instances)
