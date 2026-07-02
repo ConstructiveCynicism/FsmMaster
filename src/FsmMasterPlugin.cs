@@ -13,6 +13,7 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
 {
     private FsmEditManager? _editManager;
     private FsmVariableTracker? _variableTracker;
+    private FsmGraphOverlay? _graphOverlay;
 
     internal FsmVariableTracker? VariableTracker => _variableTracker;
 
@@ -22,6 +23,7 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
 
         _editManager = new FsmEditManager(Logger);
         _variableTracker = new FsmVariableTracker(fsmKey => _editManager.GetLiveInstances(fsmKey));
+        _graphOverlay = new FsmGraphOverlay(Logger);
 
         string sceneName = SceneManager.GetActiveScene().name;
         PlayMakerFSM[] fsms = Object.FindObjectsByType<PlayMakerFSM>(FindObjectsSortMode.None);
@@ -41,6 +43,19 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
         _editManager?.RevertAllForUnload();
         _editManager = null;
         _variableTracker = null;
+
+        _graphOverlay?.Shutdown();
+        _graphOverlay = null;
+    }
+
+    private void Update()
+    {
+        _graphOverlay?.Update();
+    }
+
+    private void OnGUI()
+    {
+        _graphOverlay?.OnGUI();
     }
 
     private void OnSceneLoaded(Scene scene, LoadSceneMode mode)

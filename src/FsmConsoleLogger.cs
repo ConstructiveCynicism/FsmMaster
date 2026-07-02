@@ -41,6 +41,9 @@ internal sealed class FsmConsoleLogger
         foreach (FsmStateInfo state in fsm.States)
         {
             _logger.LogInfo($"[FsmMaster]       State \"{state.Name}\"");
+            Rect position = state.State.Position;
+            _logger.LogInfo(FormattableString.Invariant(
+                $"[FsmMaster]         Position=({position.x:F1}, {position.y:F1}, {position.width:F1}, {position.height:F1}) ColorIndex={state.State.ColorIndex}"));
             LogActions(state.Actions);
             foreach (FsmTransitionInfo transition in state.Transitions)
             {
@@ -108,7 +111,7 @@ internal sealed class FsmConsoleLogger
         }
     }
 
-    private string FormatActionFieldValue(FsmStateAction action, object? fieldValue)
+    internal static string FormatActionFieldValue(FsmStateAction action, object? fieldValue)
     {
         switch (fieldValue)
         {
@@ -131,13 +134,13 @@ internal sealed class FsmConsoleLogger
     // FsmOwnerDefault only carries the "use owner" / "specify object" *option*, not an
     // identity on its own - Fsm.GetOwnerDefaultTarget resolves it to the actual GameObject
     // PlayMaker would target at runtime, which is far more useful to log than the option name.
-    private string FormatOwnerDefault(Fsm fsm, FsmOwnerDefault ownerDefault)
+    internal static string FormatOwnerDefault(Fsm fsm, FsmOwnerDefault ownerDefault)
     {
         GameObject resolvedGameObject = fsm.GetOwnerDefaultTarget(ownerDefault);
         return resolvedGameObject != null ? $"[{resolvedGameObject.name}]" : "[none]";
     }
 
-    private string FormatEventTarget(Fsm fsm, FsmEventTarget eventTarget)
+    internal static string FormatEventTarget(Fsm fsm, FsmEventTarget eventTarget)
     {
         switch (eventTarget.target)
         {
