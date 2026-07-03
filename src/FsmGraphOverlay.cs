@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using BepInEx.Logging;
 using HutongGames.PlayMaker;
 using UnityEngine;
@@ -9,9 +8,12 @@ using UnityEngine.SceneManagement;
 namespace FsmMaster;
 
 // In-game IMGUI overlay for browsing live FSMs and their state graphs, toggled by the "0" key.
-// Fully self-contained: collects its own FsmSnapshot on demand (toggle-on) rather than sharing
-// FsmMasterPlugin's, so it owns no scene-load subscription of its own - the only teardown it
-// needs is releasing the small texture it draws colored rects/lines with.
+// Collects its own FsmSnapshot (see RefreshSnapshot) rather than sharing FsmMasterPlugin's -
+// FsmMasterPlugin calls RefreshSnapshot for it on initial Awake and on every scene load (it
+// already owns the SceneManager.sceneLoaded subscription for its own persisted-edit reapplication,
+// so this reuses that rather than adding a second one here). The "0" key itself only flips
+// visibility - it must never rebuild the snapshot or reset the current selection, since scene load
+// is the only point PlayMakerFSM references can actually go stale.
 internal sealed class FsmGraphOverlay
 {
     private const float MinZoom = 0.1f;
@@ -37,12 +39,19 @@ internal sealed class FsmGraphOverlay
     private const int MaxBezierSegments = 40;
     private const float DynamicFontPointSize = 12f;
     private const float TransitionLineThickness = 3f;
+    private const float ActiveTransitionLineThickness = 6f;
 
-    // Translated from FSMExpress's own state-color palette, indexed by FsmState.ColorIndex.
+    // Translated from FSMExpress's own state-color palette, indexed by FsmState.ColorIndex - EXCEPT
+    // index 1: FSMExpress's original blue (116,143,201) collided visually with the active state's own
+    // blue/cyan highlighting (see ActiveStateColor/ActiveTitleBackgroundColor below), so it's rotated
+    // to an otherwise-unused magenta/pink hue instead, keeping the same saturation and value
+    // (brightness) as the original blue - same "weight" in the palette, just a hue none of the other
+    // 7 entries (or the active-state colors) already use. The active-state colors themselves are
+    // unchanged.
     private static readonly Color[] StateColors =
     {
         new(128f / 255f, 128f / 255f, 128f / 255f),
-        new(116f / 255f, 143f / 255f, 201f / 255f),
+        new(201f / 255f, 116f / 255f, 173f / 255f),
         new(58f / 255f, 182f / 255f, 166f / 255f),
         new(93f / 255f, 164f / 255f, 53f / 255f),
         new(225f / 255f, 254f / 255f, 50f / 255f),
@@ -52,11 +61,13 @@ internal sealed class FsmGraphOverlay
     };
 
     // FSMExpress's paired lighter palette for the same colorIndex - used for a state's own
-    // transition rows/lines so they read as visually associated with that state's node color.
+    // transition names/lines by default, so they read as visually associated with that state's node
+    // color while staying less saturated than the node itself. Index 0 (PlayMaker's "no color set"
+    // default, plain grey in StateColors) pairs with plain white rather than a tinted entry.
     private static readonly Color[] TransitionColors =
     {
-        new(222f / 255f, 222f / 255f, 222f / 255f),
-        new(197f / 255f, 213f / 255f, 248f / 255f),
+        Color.white,
+        new(248f / 255f, 197f / 255f, 231f / 255f),
         new(159f / 255f, 225f / 255f, 216f / 255f),
         new(183f / 255f, 225f / 255f, 159f / 255f),
         new(225f / 255f, 254f / 255f, 102f / 255f),
@@ -67,15 +78,49 @@ internal sealed class FsmGraphOverlay
 
     private static readonly Color GlobalTransitionColor = new(0.6f, 0.6f, 0.6f);
 
-    // Fixed literal colors for the node chrome - these take priority over the per-colorIndex
-    // StateColors/TransitionColors palette above, which is kept computed (NodeLayout.FillColor/
-    // ColorIndex) but is otherwise dormant at draw time now that title/row/outline/line colors
-    // are all fixed rather than state-identity-driven.
+    // Global-transition pseudo nodes are always a light grey with a black outline and black text,
+    // regardless of which state they target - visually distinct from state nodes since a global
+    // transition isn't "owned" by any one colorIndex.
+    private static readonly Color GlobalPseudoNodeColor = new(0.82f, 0.82f, 0.82f);
+    private static readonly Color GlobalPseudoNodeOutlineColor = Color.black;
+    private static readonly Color GlobalPseudoNodeTextColor = Color.black;
+
+    // A node's INNER ring - the one always present, drawn immediately around the node - and its
+    // internal separator lines (title/row divider, dividers between transition rows) are this same
+    // fixed white by default. While the state is active they switch to its own theme color instead
+    // (or the ActiveStateColor fallback if it has none) - see GetActiveOutlineColor and the chrome
+    // pass in DrawCachedGraph. The global-transition pseudo nodes always use a different (black)
+    // outline color regardless of activity - see GlobalPseudoNodeOutlineColor above.
     private static readonly Color NodeOutlineColor = Color.white;
-    private static readonly Color TitleBackgroundColor = Color.black;
+
+    // Title band background is driven by each state's own StateColors entry (see
+    // NodeLayout.FillColor/ColorIndex below) - EXCEPT colorIndex 0, PlayMaker's "no color set"
+    // default, which is baked to plain black there instead of its literal (grey) StateColors entry.
+    // This is the DEFAULT (non-active) background only - see ActiveTitleBackgroundColor below for
+    // what the active state's own title band uses instead. Transition name/line colors are driven by
+    // TransitionColors instead - see their own use sites below. Only the transition-row body stays a
+    // neutral fixed color, since it's just a background surface for the (already color-driven) event
+    // text.
     private static readonly Color TransitionRowBackgroundColor = new(0.2f, 0.2f, 0.2f);
-    private static readonly Color TransitionLineColor = new(0.85f, 0.85f, 0.85f);
-    private static readonly Color ActiveStateOutlineColor = new(0f, 0.75f, 1f);
+
+    // The OUTER "chrome" ring - the extra halo drawn further out than the inner ring, only for the
+    // active state - is always this fixed cyan, regardless of the state's own theme; it's a generic
+    // "this is active" signal, not a color-identity one (compare the inner ring/separators above,
+    // which DO pick up the state's own theme color). Also the fallback inner-ring/transition-line
+    // color for a state with no colored theme of its own (colorIndex 0) - see GetActiveOutlineColor,
+    // which uses the state's own StateColors entry instead for a genuinely themed state (colorIndex
+    // 1-7).
+    private static readonly Color ActiveStateColor = new(0f, 1f, 1f);
+
+    // The active state's own title band (state name) always uses this background - the same cyan hue
+    // as ActiveStateColor above, just less saturated (lerped toward white, which is mathematically
+    // equivalent to desaturating a fully-saturated color that's already at full brightness) so it
+    // reads as "the same active color, softened for a background fill" rather than an unrelated blue.
+    // Paired with black text (ActiveTitleTextColor) - regardless of the state's own colorIndex - so
+    // the active state's name is unambiguous and easy to read at a glance. This does NOT apply to
+    // event/transition text, which stays TransitionColors regardless of activity.
+    private static readonly Color ActiveTitleBackgroundColor = Color.Lerp(ActiveStateColor, Color.white, 0.5f);
+    private static readonly Color ActiveTitleTextColor = Color.black;
 
     private readonly ManualLogSource _logger;
 
@@ -90,6 +135,7 @@ internal sealed class FsmGraphOverlay
     private Font? _dynamicFont;
     private GUIStyle? _titleStyle;
     private GUIStyle? _eventStyle;
+    private GUIStyle? _globalEventStyle;
     private float _textStyleBuiltForZoom = -1f;
 
     private bool _isVisible;
@@ -152,14 +198,12 @@ internal sealed class FsmGraphOverlay
     private float _layoutCacheZoom;
     private Rect _layoutCacheCanvasRect;
 
-    // Pure topology (which states point at a given target, sorted by source world-X) - independent
-    // of screen space, so this only needs recomputing when the selected FSM changes, not the camera.
-    private Dictionary<string, List<IncomingTransition>>? _incomingTransitionsByTarget;
-
-    // Reused per-Repaint scratch buffer of (already-tessellated polyline, color) pairs - filled while
-    // walking pseudo-nodes/edges (which still draw their labels via GUI as before) and then drawn as
-    // a single GL batch (see DrawLineBufferGL), instead of allocating a new list every frame.
-    private readonly List<(Vector2[] Points, Color Color)> _lineDrawBuffer = new();
+    // Reused per-Repaint scratch buffer of (already-tessellated polyline, color, base thickness)
+    // triples - filled while walking pseudo-nodes/edges (which still draw their labels via GUI as
+    // before) and then drawn as a single GL batch (see DrawLineBufferGL), instead of allocating a new
+    // list every frame. Thickness is stored per-line (not a single shared value) so the active
+    // state's outgoing transitions can draw thicker than the rest of the graph.
+    private readonly List<(Vector2[] Points, Color Color, float Thickness)> _lineDrawBuffer = new();
 
     // Reused per-Repaint scratch buffer of (vertex position, color) pairs, 3 entries per triangle -
     // holds every node/pseudo-node chrome shape (backgrounds, outline rings, rounded corners) for the
@@ -173,34 +217,6 @@ internal sealed class FsmGraphOverlay
     private List<(string Header, List<(string Label, string Value)> Fields)>? _sidePanelActionCache;
     private List<(string Label, string Value)>? _sidePanelVariableCache;
     private List<string>? _sidePanelEventCache;
-
-    // ---- TEMPORARY PERF DIAGNOSTICS: delete this block after profiling ----
-    // Buckets the Repaint draw path in DrawCachedGraph into line drawing, label drawing, and node
-    // "chrome" (rounded rects/outlines/dividers), plus off-screen cull counts, so a slow-graph
-    // report can be traced to an actual cause instead of guessed at. Logs an averaged summary every
-    // DiagnosticLogIntervalFrames Repaint frames rather than every frame, so the logging call itself
-    // doesn't skew the measurement.
-    private const int DiagnosticLogIntervalFrames = 60;
-    private readonly Stopwatch _diagnosticLineTimer = new();
-    private readonly Stopwatch _diagnosticLabelTimer = new();
-    private readonly Stopwatch _diagnosticChromeTimer = new();
-    private int _diagnosticFrameCount;
-    private int _diagnosticNodesTotal;
-    private int _diagnosticNodesDrawn;
-    private int _diagnosticEdgesTotal;
-    private int _diagnosticEdgesDrawn;
-    // ---- END TEMPORARY PERF DIAGNOSTICS ----
-
-    // ---- TEMPORARY PERF DIAGNOSTICS: FSM list UI - delete this block after profiling ----
-    // Times the whole DrawFsmList call (scene/object/FSM drill-down list panel) on every OnGUI
-    // event - deliberately not Repaint-gated like the graph diagnostics above, since GUILayout
-    // controls run their full layout/hit-test logic on every event type (Layout, Repaint, once per
-    // queued input event), not just Repaint. Logs an averaged summary every
-    // DiagnosticLogIntervalFrames calls rather than every one, so the logging call itself doesn't
-    // skew the measurement.
-    private readonly Stopwatch _diagnosticFsmListTimer = new();
-    private int _diagnosticFsmListCallCount;
-    // ---- END TEMPORARY PERF DIAGNOSTICS: FSM list UI ----
 
     // Thin GL.LINES render when the selection UI is hidden (see the "1" key in Update) - thick
     // quads with a soft antialiased edge are the default, full-selection-UI style.
@@ -230,6 +246,7 @@ internal sealed class FsmGraphOverlay
         // drop the references so a ScriptEngine reload rebuilds them cleanly on next use.
         _titleStyle = null;
         _eventStyle = null;
+        _globalEventStyle = null;
         _textStyleBuiltForZoom = -1f;
     }
 
@@ -247,13 +264,12 @@ internal sealed class FsmGraphOverlay
             _pendingFsmListLevel = null;
         }
 
+        // Purely a visibility flip - RefreshSnapshot runs only off scene load (see FsmMasterPlugin),
+        // never here, so toggling the overlay off and back on never discards the current FSM
+        // selection, graph pan/zoom, or list drill-down position.
         if (Input.GetKeyDown(KeyCode.Alpha0))
         {
             _isVisible = !_isVisible;
-            if (_isVisible)
-            {
-                RefreshSnapshot();
-            }
         }
 
         // Toggles the FSM list, side panel, and their box backgrounds off, leaving just the graph
@@ -267,8 +283,14 @@ internal sealed class FsmGraphOverlay
         }
     }
 
-    // Only runs once per toggle-on (see Update).
-    private void RefreshSnapshot()
+    // Called by FsmMasterPlugin on initial Awake and on every scene load - never from the "0" key
+    // itself (see Update). Resets the current FSM/state selection along with the snapshot, since
+    // _selectedFsmIndex is just an index into _snapshot.Fsms and PlayMakerFSM discovery order isn't
+    // guaranteed stable across a scene reload. The graph/side-panel caches are invalidated as the very
+    // last step, after the new snapshot has been fully captured and logged - not interleaved with that
+    // work - so nothing here can observe a state where the new snapshot exists but the caches built
+    // from the previous scene's snapshot haven't been torn down yet.
+    internal void RefreshSnapshot()
     {
         string sceneName = SceneManager.GetActiveScene().name;
         PlayMakerFSM[] allComponents = UnityEngine.Object.FindObjectsByType<PlayMakerFSM>(FindObjectsSortMode.None);
@@ -282,13 +304,14 @@ internal sealed class FsmGraphOverlay
         _selectedObjectIndex = -1;
         _fsmListScrollPosition = Vector2.zero;
         _pendingFsmListLevel = null;
-        InvalidateGraphCaches();
-        InvalidateSidePanelCache();
 
         if (_snapshot.Fsms.Count == 0)
         {
             _logger.LogInfo("[FsmMaster] Graph overlay: no live PlayMakerFSM instances found in this scene.");
         }
+
+        InvalidateGraphCaches();
+        InvalidateSidePanelCache();
     }
 
     // Groups the flat snapshot into scene -> object -> FSM for the drill-down list panel, sorted
@@ -359,26 +382,6 @@ internal sealed class FsmGraphOverlay
         _sceneGroups = sceneGroups;
     }
 
-    // ---- TEMPORARY PERF DIAGNOSTICS: FSM list UI - delete this method after profiling ----
-    // Logs an averaged ms/call summary every DiagnosticLogIntervalFrames OnGUI calls, then resets
-    // the accumulator for the next window - see _diagnosticFsmListTimer's declaration comment.
-    private void LogFsmListDiagnosticSummaryIfDue()
-    {
-        _diagnosticFsmListCallCount++;
-        if (_diagnosticFsmListCallCount < DiagnosticLogIntervalFrames)
-        {
-            return;
-        }
-
-        double avgMs = _diagnosticFsmListTimer.Elapsed.TotalMilliseconds / _diagnosticFsmListCallCount;
-        _logger.LogInfo(FormattableString.Invariant(
-            $"[FsmMaster] PERF FsmList UI avg/call over {_diagnosticFsmListCallCount} OnGUI calls: {avgMs:F3}ms (level={_fsmListLevel})"));
-
-        _diagnosticFsmListTimer.Reset();
-        _diagnosticFsmListCallCount = 0;
-    }
-    // ---- END TEMPORARY PERF DIAGNOSTICS: FSM list UI ----
-
     public void OnGUI()
     {
         if (!_isVisible || _snapshot == null)
@@ -386,25 +389,23 @@ internal sealed class FsmGraphOverlay
             return;
         }
 
-        // With the selection UI hidden (see the "1" key in Update), the list/side-panel rects - and
-        // their GUI.skin.box backgrounds - collapse to zero width entirely, rather than just having
-        // their contents skipped, so the graph canvas expands to fill the freed screen space.
+        // The graph canvas always spans the full screen, regardless of whether the FSM list / side
+        // panel are shown. WorldToScreen's mapping is derived entirely from the canvas rect's size
+        // (see RebuildNodeLayoutCache/WorldToScreen), so previously shrinking that rect whenever a
+        // panel appeared or disappeared re-centered every node on screen. Keeping it fixed means
+        // toggling the panels with "1" never shifts the graph.
+        var canvasRect = new Rect(0f, 0f, Screen.width, Screen.height);
+
         float listWidth = _selectionUiVisible ? ListWidth : 0f;
         var listRect = new Rect(0f, 0f, listWidth, Screen.height);
         bool showSidePanel = _selectionUiVisible && _selectedStateName != null;
         float sidePanelWidth = showSidePanel ? SidePanelWidth : 0f;
-        var canvasRect = new Rect(listRect.width, 0f, Screen.width - listRect.width - sidePanelWidth, Screen.height);
-        var sidePanelRect = new Rect(canvasRect.xMax, 0f, sidePanelWidth, Screen.height);
+        var sidePanelRect = new Rect(Screen.width - sidePanelWidth, 0f, sidePanelWidth, Screen.height);
 
-        if (_selectionUiVisible)
-        {
-            GUILayout.BeginArea(listRect, GUI.skin.box);
-            _diagnosticFsmListTimer.Start();
-            DrawFsmList(listRect.height);
-            _diagnosticFsmListTimer.Stop();
-            LogFsmListDiagnosticSummaryIfDue();
-            GUILayout.EndArea();
-        }
+        // Mouse-input region for panning/zoom/node-selection - excludes whatever screen space the
+        // list/side panel currently occupy, independent of the (now fixed) canvasRect above, so a
+        // click on a panel button never also pans the graph or selects a node underneath it.
+        var interactiveRect = new Rect(listWidth, 0f, Mathf.Max(Screen.width - listWidth - sidePanelWidth, 0f), Screen.height);
 
         if (_selectedFsmIndex >= 0 && _selectedFsmIndex < _snapshot.Fsms.Count)
         {
@@ -420,7 +421,7 @@ internal sealed class FsmGraphOverlay
             }
             else
             {
-                DrawGraph(selectedFsm, canvasRect);
+                DrawGraph(selectedFsm, canvasRect, interactiveRect);
 
                 if (showSidePanel)
                 {
@@ -429,6 +430,15 @@ internal sealed class FsmGraphOverlay
                     GUILayout.EndArea();
                 }
             }
+        }
+
+        // Drawn last (on top of the graph, which now spans the full screen underneath it) so its
+        // buttons/background aren't painted over by the graph's own node chrome.
+        if (_selectionUiVisible)
+        {
+            GUILayout.BeginArea(listRect, GUI.skin.box);
+            DrawFsmList(listRect.height);
+            GUILayout.EndArea();
         }
     }
 
@@ -458,9 +468,16 @@ internal sealed class FsmGraphOverlay
             clipping = TextClipping.Clip,
             wordWrap = false,
         };
+        // Actual text color is set per-node right before each label draw (see the label pass in
+        // DrawCachedGraph) - state nodes use their own StateColors[ColorIndex] entry, so this default
+        // is never what actually renders for them; it only matters for _globalEventStyle below,
+        // which never gets overridden per-node.
         _titleStyle.normal.textColor = Color.white;
 
         _eventStyle = new GUIStyle(_titleStyle) { fontStyle = FontStyle.Normal };
+
+        _globalEventStyle = new GUIStyle(_eventStyle);
+        _globalEventStyle.normal.textColor = GlobalPseudoNodeTextColor;
 
         _textStyleBuiltForZoom = _zoom;
     }
@@ -642,7 +659,6 @@ internal sealed class FsmGraphOverlay
 
         FsmInfo fsm = _snapshot!.Fsms[index];
         FitViewToFsm(fsm);
-        BuildIncomingTransitionsByTarget(fsm);
         LogNodePositionDiagnostics(fsm);
     }
 
@@ -650,7 +666,6 @@ internal sealed class FsmGraphOverlay
     {
         _nodeLayoutCache = null;
         _globalPseudoNodeCache = null;
-        _incomingTransitionsByTarget = null;
         _layoutCacheFsmIndex = -1;
     }
 
@@ -662,53 +677,15 @@ internal sealed class FsmGraphOverlay
         _sidePanelEventCache = null;
     }
 
-    // Which states point at a given target, sorted by source world-X. Pure topology - independent
-    // of screen space, so computed once per FSM selection rather than in the per-frame draw path.
-    // WorldToScreen is a uniform scale+translate, so sorting by world-X preserves the same relative
-    // order screen-X would give, meaning this doesn't need recomputing as pan/zoom change either.
-    private void BuildIncomingTransitionsByTarget(FsmInfo fsm)
-    {
-        var byTarget = new Dictionary<string, List<IncomingTransition>>();
-        foreach (FsmStateInfo state in fsm.States)
-        {
-            foreach (FsmTransitionInfo transition in state.Transitions)
-            {
-                if (!byTarget.TryGetValue(transition.ToState, out List<IncomingTransition>? list))
-                {
-                    list = new List<IncomingTransition>();
-                    byTarget[transition.ToState] = list;
-                }
-
-                list.Add(new IncomingTransition(state.Name, transition.EventName));
-            }
-        }
-
-        var worldX = new Dictionary<string, float>();
-        foreach (FsmStateInfo state in fsm.States)
-        {
-            worldX[state.Name] = state.State.Position.x;
-        }
-
-        foreach (List<IncomingTransition> list in byTarget.Values)
-        {
-            list.Sort((a, b) =>
-            {
-                float ax = worldX.TryGetValue(a.FromState, out float x1) ? x1 : 0f;
-                float bx = worldX.TryGetValue(b.FromState, out float x2) ? x2 : 0f;
-                return ax.CompareTo(bx);
-            });
-        }
-
-        _incomingTransitionsByTarget = byTarget;
-    }
-
     // Diagnostic for the "stacked nodes" report - logs each state's raw Position/ColorIndex next to
     // its computed screen Rect once per FSM selection (not continuously), so a cluster of states
     // with near-identical Position values (an FSM author never dragging them apart in the PlayMaker
     // editor) is distinguishable at a glance from a genuine WorldToScreen collision.
     private void LogNodePositionDiagnostics(FsmInfo fsm)
     {
-        var localCanvasRect = new Rect(0f, 0f, Mathf.Max(Screen.width - ListWidth - SidePanelWidth, 100f), Screen.height);
+        // Matches the graph canvas's actual, always-full-screen rect (see OnGUI) so the logged
+        // ScreenRect values reflect what's really drawn, not an approximation of it.
+        var localCanvasRect = new Rect(0f, 0f, Screen.width, Screen.height);
 
         foreach (FsmStateInfo state in fsm.States)
         {
@@ -744,7 +721,11 @@ internal sealed class FsmGraphOverlay
         float worldWidth = Mathf.Max(maxX - minX, 1f) + FitMargin * 2f;
         float worldHeight = Mathf.Max(maxY - minY, 1f) + FitMargin * 2f;
 
-        float canvasWidth = Mathf.Max(Screen.width - ListWidth - SidePanelWidth, 100f);
+        // Fits against the graph canvas's actual, always-full-screen size (see OnGUI) rather than a
+        // size reduced by the list/side panel - the panels are drawn as an overlay on top of the
+        // graph, not a reduction of its coordinate space, so fitting against a smaller area here
+        // would make the initial zoom inconsistent with how the graph actually renders.
+        float canvasWidth = Mathf.Max(Screen.width, 100f);
         float canvasHeight = Mathf.Max(Screen.height, 100f);
 
         _zoom = Mathf.Clamp(Mathf.Min(canvasWidth / worldWidth, canvasHeight / worldHeight), MinZoom, MaxZoom);
@@ -771,9 +752,14 @@ internal sealed class FsmGraphOverlay
         return new Rect(topLeft.x, topLeft.y, worldRect.width * _zoom, worldRect.height * _zoom);
     }
 
-    private void DrawGraph(FsmInfo fsm, Rect canvasRect)
+    private void DrawGraph(FsmInfo fsm, Rect canvasRect, Rect interactiveRect)
     {
-        GUI.BeginGroup(canvasRect, GUI.skin.box);
+        // GUI.skin.box's background is a semi-transparent dark fill - fine as a backdrop while the
+        // list/side panel are shown, but with the selection UI hidden (the "1" key in Update) that
+        // same fill would darken the game view behind the now-unobscured graph. GUIStyle.none draws
+        // no background at all in that mode. canvasRect itself always spans the full screen (see
+        // OnGUI) regardless of which of those two applies.
+        GUI.BeginGroup(canvasRect, _selectionUiVisible ? GUI.skin.box : GUIStyle.none);
         var localCanvasRect = new Rect(0f, 0f, canvasRect.width, canvasRect.height);
 
         bool cacheStale = _nodeLayoutCache == null
@@ -797,8 +783,8 @@ internal sealed class FsmGraphOverlay
         // drawn via GUI calls local to this GUI.BeginGroup, so Unity's GUIClip stack silently adds
         // canvasRect's screen offset for them, but raw GL calls bypass GUIClip entirely - DrawLineBufferGL
         // needs the real screen-space offset to line its geometry up with those GUI-drawn nodes.
-        DrawCachedGraph(fsm.Fsm.ActiveStateName, canvasRect.position);
-        HandlePanAndZoom(localCanvasRect);
+        DrawCachedGraph(fsm.Fsm.ActiveStateName, canvasRect.position, interactiveRect);
+        HandlePanAndZoom(interactiveRect);
 
         GUI.EndGroup();
     }
@@ -814,71 +800,6 @@ internal sealed class FsmGraphOverlay
             nodeScreenRects[state.Name] = WorldToScreen(worldRect, canvasRect);
         }
 
-        // Entry points for incoming transitions - this is the actual convergence fix. Always spread
-        // along whichever of the target's left/right edges each transition attaches to (matching
-        // FSMExpress's own convention - never the top/bottom), picked per-transition by
-        // EntersLeftSide (built on top of PickExitDirection's own side choice - see both for the
-        // reasoning), so nodes stacked in a rough vertical column - where different transitions
-        // previously picked inconsistent left/right sides based on tiny, often-incidental x
-        // differences between states an FSM author never intended to offset - now consistently
-        // favor whichever side is actually closest instead of producing the crossing/braided look
-        // that instability caused.
-        var targetEntryPoints = new Dictionary<string, Vector2[]>();
-        if (_incomingTransitionsByTarget != null)
-        {
-            foreach (KeyValuePair<string, List<IncomingTransition>> entry in _incomingTransitionsByTarget)
-            {
-                if (!nodeScreenRects.TryGetValue(entry.Key, out Rect targetRect))
-                {
-                    continue;
-                }
-
-                List<IncomingTransition> incoming = entry.Value;
-                int count = incoming.Count;
-
-                var entersLeftSide = new bool[count];
-                int leftCount = 0;
-                for (int i = 0; i < count; i++)
-                {
-                    bool entersLeft;
-                    if (nodeScreenRects.TryGetValue(incoming[i].FromState, out Rect fromRect))
-                    {
-                        Vector2 exitDirection = PickExitDirection(fromRect, targetRect);
-                        entersLeft = EntersLeftSide(fromRect, targetRect, exitDirection);
-                    }
-                    else
-                    {
-                        entersLeft = true;
-                    }
-
-                    entersLeftSide[i] = entersLeft;
-                    if (entersLeft)
-                    {
-                        leftCount++;
-                    }
-                }
-
-                int rightCount = count - leftCount;
-                var points = new Vector2[count];
-                int leftIndex = 0, rightIndex = 0;
-                for (int i = 0; i < count; i++)
-                {
-                    if (entersLeftSide[i])
-                    {
-                        points[i] = new Vector2(targetRect.x, targetRect.y + targetRect.height * (leftIndex + 0.5f) / leftCount);
-                        leftIndex++;
-                    }
-                    else
-                    {
-                        points[i] = new Vector2(targetRect.xMax, targetRect.y + targetRect.height * (rightIndex + 0.5f) / rightCount);
-                        rightIndex++;
-                    }
-                }
-
-                targetEntryPoints[entry.Key] = points;
-            }
-        }
-
         var layoutCache = new Dictionary<string, NodeLayout>();
         foreach (FsmStateInfo state in fsm.States)
         {
@@ -891,7 +812,10 @@ internal sealed class FsmGraphOverlay
                 Name = state.Name,
                 ScreenRect = screenRect,
                 TitleRect = titleRect,
-                FillColor = StateColors[colorIndex],
+                // ColorIndex 0 is PlayMaker's "no color set" default - baked to black here (rather
+                // than its literal grey StateColors entry). This is the title band's DEFAULT
+                // background - see ActiveTitleBackgroundColor for what it switches to on activation.
+                FillColor = colorIndex == 0 ? Color.black : StateColors[colorIndex],
                 ColorIndex = colorIndex,
             };
 
@@ -912,41 +836,22 @@ internal sealed class FsmGraphOverlay
 
                 if (nodeScreenRects.TryGetValue(transition.ToState, out Rect targetRect))
                 {
-                    // Picked once per transition - always left or right (exitDirection.y is always
-                    // 0, never top/bottom). See PickExitDirection for how the exit side is chosen.
+                    // Exit side is still whichever of the source row's left/right edges faces the
+                    // target - see PickExitDirection.
                     exitDirection = PickExitDirection(screenRect, targetRect);
                     sourceAnchor = new Vector2(exitDirection.x > 0f ? rowRect.xMax : rowRect.x, rowRect.center.y);
 
-                    // Entry side favors whichever side is actually closest to the source rather than
-                    // always being the exit side's opposite - see EntersLeftSide. entryDirection feeds
-                    // SampleBezierCurve's target-side control point, which must point away from the
-                    // target on whichever side is actually being entered (not just the exit side
-                    // negated), or the curve's approach tangent points the wrong way when entry and
-                    // exit land on the same side.
-                    bool entersLeftSide = EntersLeftSide(screenRect, targetRect, exitDirection);
-                    entryDirection = new Vector2(entersLeftSide ? -1f : 1f, 0f);
-                    targetAnchor = entersLeftSide
-                        ? new Vector2(targetRect.x, targetRect.center.y)
-                        : new Vector2(targetRect.xMax, targetRect.center.y);
-
-                    // Look up this specific transition's assigned spread point among everything
-                    // pointing at the same target, so multiple incoming lines land at distinct
-                    // positions along whichever of the target's left/right edges they attach to,
-                    // instead of converging on one point. Fallback (above) only applies if this
-                    // transition is somehow missing from the topology map built on selection.
-                    if (targetEntryPoints.TryGetValue(transition.ToState, out Vector2[]? entryPoints)
-                        && _incomingTransitionsByTarget != null
-                        && _incomingTransitionsByTarget.TryGetValue(transition.ToState, out List<IncomingTransition>? incoming))
-                    {
-                        for (int j = 0; j < incoming.Count; j++)
-                        {
-                            if (incoming[j].FromState == state.Name && incoming[j].EventName == transition.EventName)
-                            {
-                                targetAnchor = entryPoints[j];
-                                break;
-                            }
-                        }
-                    }
+                    // Every incoming transition enters through one of the two sides of the target's
+                    // title band ("the state name"), never the top - whichever side faces the source,
+                    // via the same left/right heuristic as the exit side (PickExitDirection), just
+                    // evaluated against the title band instead of the whole node. Multiple incoming
+                    // lines landing on the same side overlap at that side's single fixed point rather
+                    // than being spread out to avoid it.
+                    var targetTitleRect = new Rect(targetRect.x, targetRect.y, targetRect.width, TitleBarHeight * _zoom);
+                    entryDirection = PickExitDirection(targetTitleRect, screenRect);
+                    targetAnchor = entryDirection.x > 0f
+                        ? new Vector2(targetTitleRect.xMax, targetTitleRect.center.y)
+                        : new Vector2(targetTitleRect.x, targetTitleRect.center.y);
                 }
 
                 Vector2[] curvePoints = SampleBezierCurve(sourceAnchor, targetAnchor, exitDirection, entryDirection, _zoom);
@@ -1028,30 +933,12 @@ internal sealed class FsmGraphOverlay
         return new Vector2(1f, 0f);
     }
 
-    // Which side of `toRect` a transition should enter through, given the side it already exits
-    // `fromRect` from (see PickExitDirection). When PickExitDirection picked a side because the
-    // target genuinely sits to one side of the source, the curve is actually traveling horizontally
-    // across to it, so the natural approach is from the opposite side. But when PickExitDirection
-    // only fell back to its stable default (the common vertically-stacked case, where the target's
-    // center sits within the source's own horizontal extent), there's no real horizontal travel to
-    // justify swinging across the target's full width to the far side - entering on the SAME side as
-    // the exit instead keeps the curve as a tight bow hugging whichever side is actually closest,
-    // matching FSMExpress's own rendering of stacked states instead of an unnecessary diagonal
-    // crossing through the node.
-    private static bool EntersLeftSide(Rect fromRect, Rect toRect, Vector2 exitDirection)
-    {
-        bool genuineHorizontalOffset = toRect.center.x > fromRect.xMax || toRect.center.x < fromRect.x;
-        bool exitsRight = exitDirection.x > 0f;
-        return genuineHorizontalOffset ? exitsRight : !exitsRight;
-    }
-
     // Samples a cubic Bezier once at layout-cache-build time (not per-frame) so DrawBezierArrow can
     // just walk a cached polyline every OnGUI call. Adapted from FSMExpress's FsmCanvasArrow, which
     // exits a node from whichever side faces the target via a control point offset from the anchor,
-    // and enters the target through its own independently-chosen side (see EntersLeftSide) - control2
-    // extends further in the entry direction (away from the target, on whichever side is actually
-    // being entered) so the curve swoops in from whichever side it's actually attached to, rather
-    // than always dropping straight down into the target.
+    // and enters the target's title band through whichever of its two sides faces the source (see the
+    // call site in RebuildNodeLayoutCache) - control2 extends further in that same direction (away
+    // from the target) so the curve swoops in from whichever side it's actually attached to.
     //
     // The control-point offsets are scaled by zoom, not fixed screen pixels: source/target anchors
     // are already zoom-scaled screen positions, so a fixed-pixel offset would shrink relative to the
@@ -1106,7 +993,7 @@ internal sealed class FsmGraphOverlay
         return new Rect(minX, minY, maxX - minX, maxY - minY);
     }
 
-    private void DrawCachedGraph(string? activeStateName, Vector2 canvasScreenOffset)
+    private void DrawCachedGraph(string? activeStateName, Vector2 canvasScreenOffset, Rect interactiveRect)
     {
         if (_nodeLayoutCache == null)
         {
@@ -1142,34 +1029,40 @@ internal sealed class FsmGraphOverlay
                         continue;
                     }
 
-                    // Same rounded-outline chrome as a regular state box, per the request to keep
-                    // globals visually consistent with state color-coding rather than a distinct
-                    // flat grey block. Single band, so rounding all 4 corners is safe here. Geometry
-                    // is only collected here - actually drawn in one GL batch below, alongside every
-                    // other node's chrome gathered for this frame. The label itself is deliberately
-                    // NOT drawn here (see the label pass after both GL flushes below).
-                    AddRoundedRectOutlineToChromeBuffer(pseudo.Rect, TransitionRowBackgroundColor, NodeOutlineColor, NodeBorderThickness * _zoom);
+                    // Same rounded-outline chrome as a regular state box, but always plain grey with
+                    // a black outline - global transitions aren't owned by any one colorIndex, so
+                    // there's no state color to draw the outline in. Single band, so rounding all 4
+                    // corners is safe here. Geometry is only collected here - actually drawn in one
+                    // GL batch below, alongside every other node's chrome gathered for this frame.
+                    // The label itself is deliberately NOT drawn here (see the label pass after both
+                    // GL flushes below).
+                    AddRoundedRectOutlineToChromeBuffer(pseudo.Rect, GlobalPseudoNodeColor, GlobalPseudoNodeOutlineColor, NodeBorderThickness * _zoom);
 
                     // Arrow geometry is only collected here - actually drawn in one GL batch below,
                     // once every pseudo/edge line for this frame has been gathered.
-                    _lineDrawBuffer.Add((pseudo.ArrowPoints, GlobalTransitionColor));
+                    _lineDrawBuffer.Add((pseudo.ArrowPoints, GlobalTransitionColor, TransitionLineThickness));
                 }
             }
 
             // Regular per-state transition lines - geometry collected here (same cull check as
-            // before), drawn in the same GL batch as the pseudo-node arrows above.
+            // before), drawn in the same GL batch as the pseudo-node arrows above. Default color is
+            // each state's own TransitionColors entry (see NodeLayout.ColorIndex); lines leaving the
+            // active state switch to the fixed ActiveStateColor and draw thicker instead, matching its
+            // transition-name text color below.
             foreach (NodeLayout node in _nodeLayoutCache.Values)
             {
+                bool nodeIsActiveForLines = activeStateName != null && node.Name == activeStateName;
+                Color lineColor = nodeIsActiveForLines ? ActiveStateColor : TransitionColors[node.ColorIndex];
+                float lineThickness = nodeIsActiveForLines ? ActiveTransitionLineThickness : TransitionLineThickness;
+
                 foreach (TransitionRow row in node.Rows)
                 {
-                    _diagnosticEdgesTotal++;
                     if (!row.CurveBounds.Overlaps(visibleRect))
                     {
                         continue;
                     }
 
-                    _diagnosticEdgesDrawn++;
-                    _lineDrawBuffer.Add((row.CurvePoints, TransitionLineColor));
+                    _lineDrawBuffer.Add((row.CurvePoints, lineColor, lineThickness));
                 }
             }
 
@@ -1183,13 +1076,10 @@ internal sealed class FsmGraphOverlay
             // the title's end (the previous bug). Middle rows touch no corner and stay plain rects.
             foreach (NodeLayout node in _nodeLayoutCache.Values)
             {
-                _diagnosticNodesTotal++;
                 if (!node.ScreenRect.Overlaps(visibleRect))
                 {
                     continue;
                 }
-
-                _diagnosticNodesDrawn++;
 
                 // One shared radius for every rounded rect belonging to this node (active ring,
                 // outer ring, title, last row). Previously each of those called GetScreenCornerRadius
@@ -1202,6 +1092,10 @@ internal sealed class FsmGraphOverlay
                 // this one rather than reusing it as-is, which is what the "+ offset" below does.
                 float cornerRadius = GetNodeCornerRadius(node.ScreenRect);
 
+                // The active-indicator ring is the outer "chrome" halo - drawn behind and larger than
+                // the inner ring below, so only its outer edge shows past it. Always the fixed
+                // ActiveStateColor (cyan), regardless of the state's own theme - it's a generic
+                // "this is active" signal, not a color-identity one.
                 bool isActive = activeStateName != null && node.Name == activeStateName;
                 if (isActive)
                 {
@@ -1211,29 +1105,39 @@ internal sealed class FsmGraphOverlay
                         node.ScreenRect.y - activeOffset,
                         node.ScreenRect.width + activeOffset * 2f,
                         node.ScreenRect.height + activeOffset * 2f);
-                    AddRoundedRectToChromeBuffer(activeRect, cornerRadius + activeOffset, ActiveStateOutlineColor);
+                    AddRoundedRectToChromeBuffer(activeRect, cornerRadius + activeOffset, ActiveStateColor);
                 }
 
-                // Just the outer ring "background" - title/rows below are drawn full node width and
-                // round their own top/bottom corners themselves, fully covering the inner area, so
-                // no separate inner fill pass is needed here.
+                // The inner ring - always present, drawn on top of the active halo above - is
+                // NodeOutlineColor's white by default, switching to the state's own theme color (or
+                // the ActiveStateColor fallback for an unthemed (colorIndex 0) state - see
+                // GetActiveOutlineColor) while active. Title/rows below are drawn full node width and
+                // round their own top/bottom corners themselves, fully covering the inner area, so no
+                // separate inner fill pass is needed here.
+                Color innerOutlineColor = isActive ? GetActiveOutlineColor(node.ColorIndex) : NodeOutlineColor;
                 float outlineThickness = NodeBorderThickness * _zoom;
                 var outerRect = new Rect(
                     node.ScreenRect.x - outlineThickness,
                     node.ScreenRect.y - outlineThickness,
                     node.ScreenRect.width + outlineThickness * 2f,
                     node.ScreenRect.height + outlineThickness * 2f);
-                AddRoundedRectToChromeBuffer(outerRect, cornerRadius + outlineThickness, NodeOutlineColor);
+                AddRoundedRectToChromeBuffer(outerRect, cornerRadius + outlineThickness, innerOutlineColor);
 
+                // Title band is this state's own color by default (colorIndex 0 baked to black - see
+                // NodeLayout.FillColor), switching to the fixed ActiveTitleBackgroundColor (light blue)
+                // while it's the active state - see the label pass below for its matching black text.
                 bool titleIsOnlyBand = node.Rows.Count == 0;
-                AddRoundedRectToChromeBuffer(node.TitleRect, cornerRadius, TitleBackgroundColor, roundTop: true, roundBottom: titleIsOnlyBand);
+                Color titleFillColor = isActive ? ActiveTitleBackgroundColor : node.FillColor;
+                AddRoundedRectToChromeBuffer(node.TitleRect, cornerRadius, titleFillColor, roundTop: true, roundBottom: titleIsOnlyBand);
                 // Title/row labels are deliberately NOT drawn here (see the label pass after both GL
                 // flushes below).
 
+                // Title/row divider - same color as the inner ring (see above), so every separator on
+                // the node reads as one consistent "outline" whether or not the state is active.
                 float dividerThickness = NodeBorderThickness * _zoom;
                 if (node.Rows.Count > 0)
                 {
-                    AddFilledRectToChromeBuffer(new Rect(node.ScreenRect.x, node.TitleRect.yMax - dividerThickness / 2f, node.ScreenRect.width, dividerThickness), NodeOutlineColor);
+                    AddFilledRectToChromeBuffer(new Rect(node.ScreenRect.x, node.TitleRect.yMax - dividerThickness / 2f, node.ScreenRect.width, dividerThickness), innerOutlineColor);
                 }
 
                 for (int i = 0; i < node.Rows.Count; i++)
@@ -1252,7 +1156,7 @@ internal sealed class FsmGraphOverlay
 
                     if (!isLastRow)
                     {
-                        AddFilledRectToChromeBuffer(new Rect(node.ScreenRect.x, row.Rect.yMax - dividerThickness / 2f, node.ScreenRect.width, dividerThickness), TitleBackgroundColor);
+                        AddFilledRectToChromeBuffer(new Rect(node.ScreenRect.x, row.Rect.yMax - dividerThickness / 2f, node.ScreenRect.width, dividerThickness), innerOutlineColor);
                     }
                 }
             }
@@ -1260,16 +1164,12 @@ internal sealed class FsmGraphOverlay
             // One GL batch for every line gathered above - drawn before the chrome batch below so
             // node/pseudo chrome sits on top of the lines, matching the layering the old per-shape
             // GUI.DrawTexture calls also preserved.
-            _diagnosticLineTimer.Start();
             DrawLineBufferGL(canvasScreenOffset);
-            _diagnosticLineTimer.Stop();
 
             // One GL batch for every rounded-rect/fill gathered above - drawn after the line batch so
             // node/pseudo chrome sits on top of the lines, matching the layering the old per-shape
             // GUI.DrawTexture calls also preserved.
-            _diagnosticChromeTimer.Start();
             FlushChromeBufferGL(canvasScreenOffset);
-            _diagnosticChromeTimer.Stop();
 
             // Labels are drawn last, only once every line/chrome GL batch above has actually been
             // rendered. Drawing them earlier (interleaved with chrome collection, as a first attempt
@@ -1287,9 +1187,7 @@ internal sealed class FsmGraphOverlay
                         continue;
                     }
 
-                    _diagnosticLabelTimer.Start();
-                    GUI.Label(pseudo.Rect, pseudo.EventName, _eventStyle);
-                    _diagnosticLabelTimer.Stop();
+                    GUI.Label(pseudo.Rect, pseudo.EventName, _globalEventStyle);
                 }
             }
 
@@ -1300,60 +1198,44 @@ internal sealed class FsmGraphOverlay
                     continue;
                 }
 
-                _diagnosticLabelTimer.Start();
+                // Default title text is white, switching to the fixed ActiveTitleTextColor (black,
+                // matching ActiveTitleBackgroundColor's light blue - see the chrome pass above) only
+                // for the active state's own name. Event/transition text stays this state's own
+                // (desaturated) TransitionColors entry regardless of activity; only the state name
+                // itself, its title/chrome background, its outline ring, and its outgoing lines (see
+                // the chrome and line-color passes above) pick up the active styling. Both styles are
+                // shared/mutable, so this only needs setting once per node right before its labels
+                // draw, not rebuilt from scratch.
+                bool nodeIsActive = activeStateName != null && node.Name == activeStateName;
+                _titleStyle!.normal.textColor = nodeIsActive ? ActiveTitleTextColor : Color.white;
+                _eventStyle!.normal.textColor = TransitionColors[node.ColorIndex];
+
                 GUI.Label(node.TitleRect, node.Name, _titleStyle);
-                _diagnosticLabelTimer.Stop();
 
                 foreach (TransitionRow row in node.Rows)
                 {
-                    _diagnosticLabelTimer.Start();
                     GUI.Label(row.Rect, row.EventName, _eventStyle);
-                    _diagnosticLabelTimer.Stop();
                 }
             }
-
-            LogDiagnosticSummaryIfDue();
         }
 
-        foreach (NodeLayout node in _nodeLayoutCache.Values)
+        // Gated on interactiveRect (not just node.ScreenRect) so a click on the list/side panel -
+        // which visually sits on top of the graph now that the canvas spans the full screen - never
+        // also selects whatever node happens to render underneath it.
+        if (Event.current.type == EventType.MouseDown && Event.current.button == 0 && interactiveRect.Contains(Event.current.mousePosition))
         {
-            if (Event.current.type == EventType.MouseDown && Event.current.button == 0 && node.ScreenRect.Contains(Event.current.mousePosition))
+            foreach (NodeLayout node in _nodeLayoutCache.Values)
             {
-                _selectedStateName = node.Name;
-                InvalidateSidePanelCache();
-                Event.current.Use();
+                if (node.ScreenRect.Contains(Event.current.mousePosition))
+                {
+                    _selectedStateName = node.Name;
+                    InvalidateSidePanelCache();
+                    Event.current.Use();
+                    break;
+                }
             }
         }
     }
-
-    // ---- TEMPORARY PERF DIAGNOSTICS: delete this method after profiling ----
-    // Logs an averaged ms/frame summary for each bucket, plus cull-effectiveness counts, every
-    // DiagnosticLogIntervalFrames Repaint frames, then resets the accumulators for the next window.
-    private void LogDiagnosticSummaryIfDue()
-    {
-        _diagnosticFrameCount++;
-        if (_diagnosticFrameCount < DiagnosticLogIntervalFrames)
-        {
-            return;
-        }
-
-        double lineMs = _diagnosticLineTimer.Elapsed.TotalMilliseconds / _diagnosticFrameCount;
-        double labelMs = _diagnosticLabelTimer.Elapsed.TotalMilliseconds / _diagnosticFrameCount;
-        double chromeMs = _diagnosticChromeTimer.Elapsed.TotalMilliseconds / _diagnosticFrameCount;
-
-        _logger.LogInfo(FormattableString.Invariant(
-            $"[FsmMaster] PERF avg/frame over {_diagnosticFrameCount} frames: lines={lineMs:F3}ms labels={labelMs:F3}ms chrome={chromeMs:F3}ms | nodes {_diagnosticNodesDrawn}/{_diagnosticNodesTotal} drawn, edges {_diagnosticEdgesDrawn}/{_diagnosticEdgesTotal} drawn"));
-
-        _diagnosticLineTimer.Reset();
-        _diagnosticLabelTimer.Reset();
-        _diagnosticChromeTimer.Reset();
-        _diagnosticFrameCount = 0;
-        _diagnosticNodesTotal = 0;
-        _diagnosticNodesDrawn = 0;
-        _diagnosticEdgesTotal = 0;
-        _diagnosticEdgesDrawn = 0;
-    }
-    // ---- END TEMPORARY PERF DIAGNOSTICS ----
 
     private void HandlePanAndZoom(Rect canvasRect)
     {
@@ -1395,6 +1277,15 @@ internal sealed class FsmGraphOverlay
     private float GetScreenCornerRadius(Rect rect)
     {
         return Mathf.Min(NodeCornerRadius * _zoom, Mathf.Min(rect.width, rect.height) / 2f);
+    }
+
+    // The active-indicator ring's color: a genuinely themed state (colorIndex 1-7) uses its own
+    // StateColors entry, so its outline reads as "its own color, just thicker" while active. ColorIndex
+    // 0 (PlayMaker's "no color set" default) has no theme color to borrow, so it falls back to the
+    // fixed ActiveStateColor instead.
+    private static Color GetActiveOutlineColor(int colorIndex)
+    {
+        return colorIndex == 0 ? ActiveStateColor : StateColors[colorIndex];
     }
 
     private const int CornerFanSegments = 8;
@@ -1582,8 +1473,6 @@ internal sealed class FsmGraphOverlay
             return;
         }
 
-        float thickness = TransitionLineThickness * _zoom;
-
         GL.PushMatrix();
         GL.LoadPixelMatrix(
             -canvasScreenOffset.x,
@@ -1592,22 +1481,25 @@ internal sealed class FsmGraphOverlay
             -canvasScreenOffset.y);
         _glMaterial.SetPass(0);
 
-        // Thin lines while the selection UI is hidden, thick otherwise - see _useThinGlLines.
+        // Thin lines while the selection UI is hidden, thick otherwise - see _useThinGlLines. Thin
+        // mode ignores each line's own Thickness for the line itself (GL.LINES has no per-vertex
+        // width control), but the arrowhead size is still driven by it either way - see
+        // EmitThinArrowhead/EmitThickArrowhead.
         if (_useThinGlLines)
         {
             GL.Begin(GL.LINES);
-            foreach ((Vector2[] points, Color color) in _lineDrawBuffer)
+            foreach ((Vector2[] points, Color color, float baseThickness) in _lineDrawBuffer)
             {
-                EmitThinPolyline(points, color);
+                EmitThinPolyline(points, color, baseThickness * _zoom);
             }
             GL.End();
         }
         else
         {
             GL.Begin(GL.TRIANGLES);
-            foreach ((Vector2[] points, Color color) in _lineDrawBuffer)
+            foreach ((Vector2[] points, Color color, float baseThickness) in _lineDrawBuffer)
             {
-                EmitThickPolyline(points, color, thickness);
+                EmitThickPolyline(points, color, baseThickness * _zoom);
             }
             GL.End();
         }
@@ -1615,9 +1507,51 @@ internal sealed class FsmGraphOverlay
         GL.PopMatrix();
     }
 
+    // Base screen-space arrowhead size at the default TransitionLineThickness (scaled by zoom like
+    // every other on-screen length constant here - see BezierControlOffset) rather than derived from
+    // the distance between the curve's last two sampled points: that distance is only
+    // ~BezierTargetSegmentLength (14 world units) to begin with, and the old "0.15 of that" arrowhead
+    // worked out to just a couple of screen pixels - visually indistinguishable from the line itself.
+    // Direction still comes from those two points (the curve's approach tangent). Actual arrow length
+    // scales with each line's own thickness (see EmitThinArrowhead/EmitThickArrowhead) so the active
+    // state's thicker transitions get a proportionally bigger arrowhead to match.
+    private const float ArrowheadLength = 14f;
+
+    // How far back along the curve (in screen pixels, at the arrowhead's own zoom/thickness-scaled
+    // size - see ArrowheadLength) to read the angle from, expressed as a multiple of that size rather
+    // than a fixed number of sampled points. A fixed segment count was wrong: SampleBezierCurve only
+    // targets ~BezierTargetSegmentLength per segment on average, and actually clamps the segment
+    // count to [MinBezierSegments, MaxBezierSegments] - outside that window a curve's real per-segment
+    // screen length drifts well away from the target (shorter when a small, zoomed-out curve still
+    // gets the minimum segment count; longer when a large, zoomed-in curve is capped at the maximum).
+    // A fixed segment count back therefore covered a wildly different on-screen distance depending on
+    // zoom. Walking back by a fixed *distance* instead (see WalkBackAlongPolyline) keeps the angle's
+    // sample window - and so the arrowhead's apparent shape - consistent at any zoom level.
+    private const float ArrowheadAngleLookbackFactor = 0.6f;
+
+    // Walks backward from the curve's endpoint along its sampled points, accumulating on-screen
+    // distance, and returns the point `distance` back (interpolated between the two samples straddling
+    // it) - or the curve's start if the whole curve is shorter than `distance`.
+    private static Vector2 WalkBackAlongPolyline(Vector2[] points, float distance)
+    {
+        float remaining = distance;
+        for (int i = points.Length - 2; i >= 0; i--)
+        {
+            float segmentLength = Vector2.Distance(points[i], points[i + 1]);
+            if (segmentLength >= remaining)
+            {
+                return Vector2.Lerp(points[i + 1], points[i], remaining / segmentLength);
+            }
+
+            remaining -= segmentLength;
+        }
+
+        return points[0];
+    }
+
     // Plain 1px hard-edged GL.LINES, used when the selection UI is hidden - no thickness or
-    // antialiasing control, matching the more minimal look of that mode.
-    private static void EmitThinPolyline(Vector2[] points, Color color)
+    // antialiasing control on the line itself, matching the more minimal look of that mode.
+    private static void EmitThinPolyline(Vector2[] points, Color color, float thickness)
     {
         for (int i = 0; i < points.Length - 1; i++)
         {
@@ -1626,7 +1560,7 @@ internal sealed class FsmGraphOverlay
 
         if (points.Length >= 2)
         {
-            EmitThinArrowhead(points[points.Length - 2], points[points.Length - 1], color);
+            EmitThinArrowhead(points, color, thickness);
         }
     }
 
@@ -1637,18 +1571,27 @@ internal sealed class FsmGraphOverlay
         GL.Vertex3(to.x, to.y, 0f);
     }
 
-    private static void EmitThinArrowhead(Vector2 from, Vector2 to, Color color)
+    // GL.LINES can't fill a shape, so this draws the outline of the same triangle EmitThickArrowhead
+    // fills solid (see below) - closing the third edge between the two wing tips reads as a proper
+    // arrowhead rather than the old open two-stroke chevron.
+    private static void EmitThinArrowhead(Vector2[] points, Color color, float thickness)
     {
-        Vector3 backDirection = (Vector3)(from - to) * 0.15f;
-        if (backDirection.sqrMagnitude < 0.01f)
+        float arrowLength = ArrowheadLength * (thickness / TransitionLineThickness);
+        Vector2 to = points[points.Length - 1];
+        Vector2 from = WalkBackAlongPolyline(points, arrowLength * ArrowheadAngleLookbackFactor);
+
+        Vector2 approachDirection = to - from;
+        if (approachDirection.sqrMagnitude < 0.0001f)
         {
             return;
         }
 
+        Vector3 backDirection = (Vector3)(-approachDirection.normalized) * arrowLength;
         Vector2 left = Quaternion.Euler(0f, 0f, 25f) * backDirection;
         Vector2 right = Quaternion.Euler(0f, 0f, -25f) * backDirection;
         EmitThinSegment(to, to + left, color);
         EmitThinSegment(to, to + right, color);
+        EmitThinSegment(to + left, to + right, color);
     }
 
     private const float LineAntiAliasWidth = 1.5f;
@@ -1667,22 +1610,36 @@ internal sealed class FsmGraphOverlay
 
         if (points.Length >= 2)
         {
-            EmitThickArrowhead(points[points.Length - 2], points[points.Length - 1], color, thickness);
+            EmitThickArrowhead(points, color, thickness);
         }
     }
 
-    private static void EmitThickArrowhead(Vector2 from, Vector2 to, Color color, float thickness)
+    // A single solid filled triangle (apex at the curve's endpoint, base spanning the two wing
+    // points) rather than the old two-stroke open chevron - much more readable as a direction
+    // indicator at a glance. Emitted as three plain vertices directly into the caller's already-open
+    // GL.Begin(GL.TRIANGLES) block (see DrawLineBufferGL), the same way EmitThickSegment's quads are.
+    // Sized relative to the line's own thickness (both already zoom-scaled by the caller), so the
+    // active state's thicker transitions get a proportionally bigger arrowhead to match.
+    private static void EmitThickArrowhead(Vector2[] points, Color color, float thickness)
     {
-        Vector3 backDirection = (Vector3)(from - to) * 0.15f;
-        if (backDirection.sqrMagnitude < 0.01f)
+        float arrowLength = ArrowheadLength * (thickness / TransitionLineThickness);
+        Vector2 to = points[points.Length - 1];
+        Vector2 from = WalkBackAlongPolyline(points, arrowLength * ArrowheadAngleLookbackFactor);
+
+        Vector2 approachDirection = to - from;
+        if (approachDirection.sqrMagnitude < 0.0001f)
         {
             return;
         }
 
+        Vector3 backDirection = (Vector3)(-approachDirection.normalized) * arrowLength;
         Vector2 left = Quaternion.Euler(0f, 0f, 25f) * backDirection;
         Vector2 right = Quaternion.Euler(0f, 0f, -25f) * backDirection;
-        EmitThickSegment(to, to + left, color, thickness);
-        EmitThickSegment(to, to + right, color, thickness);
+
+        GL.Color(color);
+        GL.Vertex3(to.x, to.y, 0f);
+        GL.Vertex3(to.x + left.x, to.y + left.y, 0f);
+        GL.Vertex3(to.x + right.x, to.y + right.y, 0f);
     }
 
     // One thickness-wide solid quad down the segment's length, flanked by two slightly wider quads
@@ -1909,18 +1866,6 @@ internal sealed class FsmGraphOverlay
             EventName = eventName;
             Rect = rect;
             ArrowPoints = new[] { arrowFrom, arrowTo };
-        }
-    }
-
-    private readonly struct IncomingTransition
-    {
-        public readonly string FromState;
-        public readonly string EventName;
-
-        public IncomingTransition(string fromState, string eventName)
-        {
-            FromState = fromState;
-            EventName = eventName;
         }
     }
 

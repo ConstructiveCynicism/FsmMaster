@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using BepInEx;
+using HutongGames.PlayMaker;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
@@ -32,6 +33,7 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
         //new FsmConsoleLogger(Logger).LogSnapshot(snapshot);
 
         ApplyPersistedEditsForScene(sceneName, fsms);
+        _graphOverlay.RefreshSnapshot();
 
         SceneManager.sceneLoaded += OnSceneLoaded;
     }
@@ -53,6 +55,7 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
         _graphOverlay?.Update();
     }
 
+
     private void OnGUI()
     {
         _graphOverlay?.OnGUI();
@@ -62,6 +65,11 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
     {
         PlayMakerFSM[] fsms = Object.FindObjectsByType<PlayMakerFSM>(FindObjectsSortMode.None);
         ApplyPersistedEditsForScene(scene.name, fsms);
+
+        // The overlay's own cached FSM list/hierarchy goes stale on every scene load - PlayMakerFSM
+        // instances from the previous scene are destroyed, and freshly discovered ones would sit at
+        // different indices than whatever the overlay's list panel/selection was pointing at.
+        _graphOverlay?.RefreshSnapshot();
     }
 
     // Groups the freshly discovered live FSMs by FsmKey (see FsmIdentity, which also covers scene-authored
