@@ -1,9 +1,8 @@
-using System;
 using System.Collections.Generic;
 using BepInEx.Logging;
 using HutongGames.PlayMaker;
 using UnityEngine;
-using UnityEngine.SceneManagement;
+using UnityEngine.EventSystems;
 
 namespace FsmMaster;
 
@@ -26,9 +25,6 @@ internal sealed class FsmGraphOverlay
     private const float GlobalPseudoNodeGap = 10f;
     private const float GlobalPseudoNodeOffset = 40f;
     private const float FitMargin = 60f;
-    private const float ListWidth = 260f;
-    private const float SidePanelWidth = 340f;
-    private const float FsmListRowHeight = 22f;
 
     private const float NodeCornerRadius = 10f;
     private const float NodeBorderThickness = 2f;
@@ -141,51 +137,44 @@ internal sealed class FsmGraphOverlay
     private bool _isVisible;
     private bool _selectionUiVisible = true;
     private FsmSnapshot? _snapshot;
-    private int _selectedFsmIndex = -1;
+
+    // Working copy of whichever tab is currently active - synced in from FsmTabState at the top of
+    // OnGUI and back out at the bottom (see OnGUI), rather than threading an FsmTabState parameter
+    // through every one of the ~20 call sites below that read pan/zoom while drawing the graph (GL
+    // line/chrome batching, bezier sampling, corner-radius math, text sizing). This keeps all of that
+    // existing, already-tuned rendering code unchanged while still giving each tab its own persisted
+    // pan/zoom/selected-state across switches - the observable behavior the tab system needs.
     private string? _selectedStateName;
-
-    // Scene -> object -> FSM drill-down for the list panel. Built once per RefreshSnapshot rather
-    // than every OnGUI call or every navigation click - Unity dispatches OnGUI several times per
-    // rendered frame (Layout, Repaint, once per queued input event), and re-grouping/re-formatting
-    // labels on every single one of those was a steady GC-allocation source even with no graph open.
-    private enum FsmListLevel { Scenes, Objects, Fsms }
-    private FsmListLevel _fsmListLevel = FsmListLevel.Scenes;
-    private int _selectedSceneIndex = -1;
-    private int _selectedObjectIndex = -1;
-    private List<SceneGroup>? _sceneGroups;
-
-    // Navigation clicks (scene/object rows, back buttons) stage their change here instead of
-    // mutating _fsmListLevel/_selectedSceneIndex/_selectedObjectIndex directly. Unity dispatches
-    // OnGUI multiple times per rendered frame (Layout first, then queued input events, then
-    // Repaint last), all sharing one GUILayoutGroup control count established during that frame's
-    // Layout pass - if a click (detected on a later event, e.g. MouseUp) switched the level
-    // immediately, the Repaint pass later in the same frame would render a different level (and
-    // therefore a different control count) than Layout recorded, which Unity reports as
-    // "Getting control N's position in a group with only N controls". Applying the change in
-    // Update() instead means it always takes effect at the very start of the NEXT frame, before
-    // that frame's own Layout pass runs, so every event within a given frame always sees the same
-    // level/selection throughout.
-    private FsmListLevel? _pendingFsmListLevel;
-    private int _pendingSelectedSceneIndex;
-    private int _pendingSelectedObjectIndex;
-
-    // Cached per-frame virtualization window for whichever list level is active - recomputed only
-    // on the Layout event (see ComputeFsmListWindow) and reused for every other event dispatched
-    // that same frame. _fsmListScrollPosition can change mid-frame (e.g. a ScrollWheel event
-    // processed after Layout but before Repaint), and recomputing the window from its live value on
-    // every event hits the same Layout/Repaint control-count mismatch described above.
-    private int _fsmListWindowFirstVisible;
-    private int _fsmListWindowLastVisible;
-
-    // World-space point currently centered in the canvas, plus zoom - resolution-independent by
-    // design. The canvas rect itself is recomputed from Screen.width/height every OnGUI call, so
-    // resizing the window or running at a different resolution never distorts node layout.
     private Vector2 _panWorldCenter;
     private float _zoom = 1f;
-    private bool _isPanning;
 
-    private Vector2 _fsmListScrollPosition;
-    private Vector2 _sidePanelScrollPosition;
+    // Exposed so FsmMasterPlugin can hand the same snapshot to FsmTabManager.RebindAfterRefresh
+    // instead of collecting a second, independent one via FsmDataCollector after every
+    // RefreshSnapshot call - matching the single-owner snapshot approach already used elsewhere.
+    internal FsmSnapshot? CurrentSnapshot => _snapshot;
+
+    // Resolves an open tab's FsmKey back to this frame's FsmInfo - used both internally (OnGUI) and
+    // externally by FsmMasterPlugin.Update to feed FsmActiveStatePanel whichever FSM/state the active
+    // tab points at.
+    internal FsmInfo? ResolveFsmInfo(string fsmKey)
+    {
+        if (_snapshot == null)
+        {
+            return null;
+        }
+
+        foreach (FsmInfo fsm in _snapshot.Fsms)
+        {
+            if (FsmIdentity.GetFsmKey(fsm.Component) == fsmKey)
+            {
+                return fsm;
+            }
+        }
+
+        return null;
+    }
+
+    private bool _isPanning;
 
     // Node/edge layout cache - rebuilt only when the FSM selection, pan, zoom, or canvas size
     // changes. Unity dispatches OnGUI once per queued input event (several times per rendered
@@ -193,7 +182,7 @@ internal sealed class FsmGraphOverlay
     // GC stutter, so it's now cache-gated and only ever rebuilt when something actually moved.
     private Dictionary<string, NodeLayout>? _nodeLayoutCache;
     private List<GlobalPseudoNodeLayout>? _globalPseudoNodeCache;
-    private int _layoutCacheFsmIndex = -1;
+    private string? _layoutCacheFsmKey;
     private Vector2 _layoutCachePanCenter;
     private float _layoutCacheZoom;
     private Rect _layoutCacheCanvasRect;
@@ -211,12 +200,6 @@ internal sealed class FsmGraphOverlay
     // then drawn as a single GL batch (see FlushChromeBufferGL), replacing what used to be up to ~7
     // GUI.DrawTexture calls per rounded rect (flat fills plus a baked corner-mask texture per corner).
     private readonly List<(Vector2 Position, Color Color)> _chromeVertexBuffer = new();
-
-    // Side panel content cache - rebuilt only when the selected state changes.
-    private string? _sidePanelCachedStateName;
-    private List<(string Header, List<(string Label, string Value)> Fields)>? _sidePanelActionCache;
-    private List<(string Label, string Value)>? _sidePanelVariableCache;
-    private List<string>? _sidePanelEventCache;
 
     // Thin GL.LINES render when the selection UI is hidden (see the "1" key in Update) - thick
     // quads with a soft antialiased edge are the default, full-selection-UI style.
@@ -250,60 +233,46 @@ internal sealed class FsmGraphOverlay
         _textStyleBuiltForZoom = -1f;
     }
 
+    // Read by FsmMasterPlugin.Update each frame to mirror this overlay's own "0"/"1" hotkey state
+    // onto the new uGUI right panel's ActiveSelf, since that panel has no IMGUI presence of its own
+    // for these keys to toggle directly.
+    internal bool IsVisible => _isVisible;
+    internal bool SelectionUiVisible => _selectionUiVisible;
+
     public void Update()
     {
-        // Applied here rather than at click time - see _pendingFsmListLevel's declaration comment.
-        // Update() always runs before this frame's own OnGUI (Layout/input/Repaint) dispatches, so
-        // the level/selection is guaranteed stable for every one of them.
-        if (_pendingFsmListLevel.HasValue)
-        {
-            _fsmListLevel = _pendingFsmListLevel.Value;
-            _selectedSceneIndex = _pendingSelectedSceneIndex;
-            _selectedObjectIndex = _pendingSelectedObjectIndex;
-            _fsmListScrollPosition = Vector2.zero;
-            _pendingFsmListLevel = null;
-        }
-
         // Purely a visibility flip - RefreshSnapshot runs only off scene load (see FsmMasterPlugin),
         // never here, so toggling the overlay off and back on never discards the current FSM
-        // selection, graph pan/zoom, or list drill-down position.
+        // selection or graph pan/zoom.
         if (Input.GetKeyDown(KeyCode.Alpha0))
         {
             _isVisible = !_isVisible;
         }
 
-        // Toggles the FSM list, side panel, and their box backgrounds off, leaving just the graph
-        // canvas - and switches transition lines to the thinner style to match the more minimal
-        // look. Pressing "1" again restores both. Only active while the overlay itself is on.
+        // Switches transition lines to the thinner style for a more minimal graph-only look, and
+        // (via IsVisible/SelectionUiVisible above) hides the uGUI right panel entirely - the "0" key's
+        // job is hiding the whole tool; "1" is a secondary "minimal view" toggle nested within that.
+        // Pressing "1" again restores both. Only active while the overlay itself is on.
         if (_isVisible && Input.GetKeyDown(KeyCode.Alpha1))
         {
             _selectionUiVisible = !_selectionUiVisible;
             _useThinGlLines = !_selectionUiVisible;
-            _logger.LogInfo($"[FsmMaster] Graph overlay: selection UI {(_selectionUiVisible ? "shown" : "hidden")}.");
+            _logger.LogInfo($"[FsmMaster] Graph overlay: minimal view {(!_selectionUiVisible ? "on" : "off")}.");
         }
     }
 
-    // Called by FsmMasterPlugin on initial Awake and on every scene load - never from the "0" key
-    // itself (see Update). Resets the current FSM/state selection along with the snapshot, since
-    // _selectedFsmIndex is just an index into _snapshot.Fsms and PlayMakerFSM discovery order isn't
-    // guaranteed stable across a scene reload. The graph/side-panel caches are invalidated as the very
-    // last step, after the new snapshot has been fully captured and logged - not interleaved with that
+    // Called by FsmMasterPlugin on initial Awake and on every scene load (which already owns the
+    // PlayMakerFSM discovery for its own persisted-edit reapplication, so this reuses that array
+    // rather than re-walking the scene a second time) - never from the "0" key itself (see Update).
+    // Tab selection (FsmTabManager) is intentionally untouched here - a tab whose FSM isn't in the
+    // new snapshot is rebound to not-live by FsmMasterPlugin's own FsmTabManager.RebindAfterRefresh
+    // call, not reset by this method. The graph/side-panel caches are invalidated as the very last
+    // step, after the new snapshot has been fully captured and logged - not interleaved with that
     // work - so nothing here can observe a state where the new snapshot exists but the caches built
     // from the previous scene's snapshot haven't been torn down yet.
-    internal void RefreshSnapshot()
+    internal void RefreshSnapshot(string sceneName, PlayMakerFSM[] components)
     {
-        string sceneName = SceneManager.GetActiveScene().name;
-        PlayMakerFSM[] allComponents = UnityEngine.Object.FindObjectsByType<PlayMakerFSM>(FindObjectsSortMode.None);
-        _snapshot = FsmDataCollector.CollectSnapshot(sceneName, allComponents);
-        BuildFsmListHierarchy();
-
-        _selectedFsmIndex = -1;
-        _selectedStateName = null;
-        _fsmListLevel = FsmListLevel.Scenes;
-        _selectedSceneIndex = -1;
-        _selectedObjectIndex = -1;
-        _fsmListScrollPosition = Vector2.zero;
-        _pendingFsmListLevel = null;
+        _snapshot = FsmDataCollector.CollectSnapshot(sceneName, components);
 
         if (_snapshot.Fsms.Count == 0)
         {
@@ -311,136 +280,74 @@ internal sealed class FsmGraphOverlay
         }
 
         InvalidateGraphCaches();
-        InvalidateSidePanelCache();
     }
 
-    // Groups the flat snapshot into scene -> object -> FSM for the drill-down list panel, sorted
-    // alphabetically at each level so the list panel never has to format or sort anything itself.
-    private void BuildFsmListHierarchy()
-    {
-        var scenesByName = new Dictionary<string, SceneGroup>();
-        var objectsByScene = new Dictionary<string, Dictionary<int, ObjectGroup>>();
-
-        for (int i = 0; i < _snapshot!.Fsms.Count; i++)
-        {
-            FsmInfo fsm = _snapshot.Fsms[i];
-            GameObject gameObject = fsm.Component.gameObject;
-            string sceneName = gameObject.scene.name;
-
-            if (!scenesByName.TryGetValue(sceneName, out SceneGroup? sceneGroup))
-            {
-                sceneGroup = new SceneGroup { SceneName = sceneName };
-                scenesByName[sceneName] = sceneGroup;
-                objectsByScene[sceneName] = new Dictionary<int, ObjectGroup>();
-            }
-
-            Dictionary<int, ObjectGroup> objectsById = objectsByScene[sceneName];
-            int instanceId = gameObject.GetInstanceID();
-            if (!objectsById.TryGetValue(instanceId, out ObjectGroup? objectGroup))
-            {
-                objectGroup = new ObjectGroup { InstanceId = instanceId, Label = fsm.GameObjectName };
-                objectsById[instanceId] = objectGroup;
-                sceneGroup.Objects.Add(objectGroup);
-            }
-
-            objectGroup.FsmIndices.Add(i);
-            objectGroup.FsmLabels.Add(fsm.FsmName);
-        }
-
-        var sceneGroups = new List<SceneGroup>(scenesByName.Values);
-        sceneGroups.Sort((a, b) => string.CompareOrdinal(a.SceneName, b.SceneName));
-
-        foreach (SceneGroup sceneGroup in sceneGroups)
-        {
-            sceneGroup.Objects.Sort((a, b) => string.CompareOrdinal(a.Label, b.Label));
-
-            foreach (ObjectGroup objectGroup in sceneGroup.Objects)
-            {
-                // FsmIndices/FsmLabels are parallel lists - sort a permutation of indices by label,
-                // then rebuild both lists in that order so they stay aligned.
-                var order = new List<int>(objectGroup.FsmLabels.Count);
-                for (int i = 0; i < objectGroup.FsmLabels.Count; i++)
-                {
-                    order.Add(i);
-                }
-
-                order.Sort((a, b) => string.CompareOrdinal(objectGroup.FsmLabels[a], objectGroup.FsmLabels[b]));
-
-                var sortedIndices = new List<int>(order.Count);
-                var sortedLabels = new List<string>(order.Count);
-                foreach (int i in order)
-                {
-                    sortedIndices.Add(objectGroup.FsmIndices[i]);
-                    sortedLabels.Add(objectGroup.FsmLabels[i]);
-                }
-
-                objectGroup.FsmIndices = sortedIndices;
-                objectGroup.FsmLabels = sortedLabels;
-            }
-        }
-
-        _sceneGroups = sceneGroups;
-    }
-
-    public void OnGUI()
+    // rightPanelScreenRect is the new uGUI right panel's current screen rect (top-left origin,
+    // matching both this Rect's own convention and IMGUI's Event.current.mousePosition - no axis
+    // flip needed, unlike CanvasNode.IsMouseOver's conversion to Input.mousePosition), or null
+    // whenever that panel is hidden - see FsmMasterPlugin.OnGUI, which computes it from
+    // CanvasNode.Position/Size each frame.
+    public void OnGUI(FsmTabState? activeTab, Rect? rightPanelScreenRect)
     {
         if (!_isVisible || _snapshot == null)
         {
             return;
         }
 
-        // The graph canvas always spans the full screen, regardless of whether the FSM list / side
-        // panel are shown. WorldToScreen's mapping is derived entirely from the canvas rect's size
-        // (see RebuildNodeLayoutCache/WorldToScreen), so previously shrinking that rect whenever a
-        // panel appeared or disappeared re-centered every node on screen. Keeping it fixed means
-        // toggling the panels with "1" never shifts the graph.
-        var canvasRect = new Rect(0f, 0f, Screen.width, Screen.height);
-
-        float listWidth = _selectionUiVisible ? ListWidth : 0f;
-        var listRect = new Rect(0f, 0f, listWidth, Screen.height);
-        bool showSidePanel = _selectionUiVisible && _selectedStateName != null;
-        float sidePanelWidth = showSidePanel ? SidePanelWidth : 0f;
-        var sidePanelRect = new Rect(Screen.width - sidePanelWidth, 0f, sidePanelWidth, Screen.height);
-
-        // Mouse-input region for panning/zoom/node-selection - excludes whatever screen space the
-        // list/side panel currently occupy, independent of the (now fixed) canvasRect above, so a
-        // click on a panel button never also pans the graph or selects a node underneath it.
-        var interactiveRect = new Rect(listWidth, 0f, Mathf.Max(Screen.width - listWidth - sidePanelWidth, 0f), Screen.height);
-
-        if (_selectedFsmIndex >= 0 && _selectedFsmIndex < _snapshot.Fsms.Count)
+        // Sync in from whichever tab is active this frame - a different tab may have been active
+        // last frame with different pan/zoom/selection cached in these working fields (see their
+        // declaration comment near the top of this class).
+        if (activeTab != null)
         {
-            FsmInfo selectedFsm = _snapshot.Fsms[_selectedFsmIndex];
-            if (selectedFsm.Component == null)
-            {
-                // Backing GameObject/component was destroyed (e.g. scene change) while the overlay
-                // was open - drop the stale selection rather than drawing a dead FSM's graph.
-                _selectedFsmIndex = -1;
-                _selectedStateName = null;
-                InvalidateGraphCaches();
-                InvalidateSidePanelCache();
-            }
-            else
-            {
-                DrawGraph(selectedFsm, canvasRect, interactiveRect);
-
-                if (showSidePanel)
-                {
-                    GUILayout.BeginArea(sidePanelRect, GUI.skin.box);
-                    DrawSidePanel(selectedFsm);
-                    GUILayout.EndArea();
-                }
-            }
+            _panWorldCenter = activeTab.PanWorldCenter;
+            _zoom = activeTab.Zoom;
+            _selectedStateName = activeTab.SelectedStateName;
         }
 
-        // Drawn last (on top of the graph, which now spans the full screen underneath it) so its
-        // buttons/background aren't painted over by the graph's own node chrome.
-        if (_selectionUiVisible)
+        var canvasRect = new Rect(0f, 0f, Screen.width, Screen.height);
+        Rect interactiveRect = ComputeInteractiveRect(rightPanelScreenRect);
+
+        // A tab stays open even once its backing FSM disappears from the scene (see
+        // FsmTabManager.RebindAfterRefresh) - IsLive false / an unresolvable FsmKey both mean "draw
+        // nothing for the graph this frame," not "drop the tab."
+        FsmInfo? activeFsm = activeTab is { IsLive: true } ? ResolveFsmInfo(activeTab.FsmKey) : null;
+
+        if (activeFsm != null)
         {
-            GUILayout.BeginArea(listRect, GUI.skin.box);
-            DrawFsmList(listRect.height);
-            GUILayout.EndArea();
+            DrawGraph(activeFsm, activeTab!, canvasRect, interactiveRect);
+        }
+
+        // Sync back out so a tab switch (or the next scene reload) doesn't lose whatever pan/zoom/
+        // selection changed this frame (drag, scroll-zoom, click-to-select - see HandlePanAndZoom and
+        // the click-select block in DrawCachedGraph).
+        if (activeTab != null)
+        {
+            activeTab.PanWorldCenter = _panWorldCenter;
+            activeTab.Zoom = _zoom;
+            activeTab.SelectedStateName = _selectedStateName;
         }
     }
+
+    // Excludes the uGUI right panel's own screen rect (a fixed, right-docked, full-height strip is a
+    // conservative approximation - the panel isn't always literally full-height, but this matches how
+    // the old IMGUI list panel's rect exclusion worked too) from the graph's pan/zoom/click-to-select
+    // input region, so a click on it never also pans the graph or selects a node underneath it.
+    private static Rect ComputeInteractiveRect(Rect? rightPanelScreenRect)
+    {
+        float excludedFromX = rightPanelScreenRect?.x ?? Screen.width;
+        return new Rect(0f, 0f, Mathf.Max(0f, excludedFromX), Screen.height);
+    }
+
+    // Second guard alongside ComputeInteractiveRect's rect-subtraction: the Open dropdown can render
+    // outside the right panel's own base rect (e.g. if its row list grows tall enough to extend past
+    // the panel's bottom edge), so rect-subtraction alone can't account for it. Note this polls a
+    // separate channel from CanvasScrollView/CanvasHorizontalScrollStrip's own direct
+    // Input.mouseScrollDelta polling - a scroll-wheel gesture over one of those could still also
+    // reach this method's ScrollWheel branch in HandlePanAndZoom if IsPointerOverGameObject somehow
+    // returned false while the pointer is actually over uGUI content; this hasn't been observed, but
+    // is worth watching for if a report of the graph zooming while scrolling a panel ever comes in.
+    private static bool IsPointerOverUi() =>
+        EventSystem.current != null && EventSystem.current.IsPointerOverGameObject();
 
     // Builds the title/event GUIStyles from a dynamic OS font. Gated on its own _zoom-only check
     // rather than the full layout cacheStale flag, since text styling depends only on zoom (font
@@ -482,230 +389,24 @@ internal sealed class FsmGraphOverlay
         _textStyleBuiltForZoom = _zoom;
     }
 
-    // Scene -> object -> FSM drill-down, dispatching to one of three level-specific draw methods
-    // below rather than a single generic helper - a generic Func<int,string>/Action<int> helper
-    // would allocate a fresh closure on every OnGUI call (Layout, Repaint, each queued input
-    // event), which is exactly the per-frame GC-allocation pattern this file otherwise avoids.
-    private void DrawFsmList(float viewportHeight)
-    {
-        switch (_fsmListLevel)
-        {
-            case FsmListLevel.Scenes:
-                DrawSceneList(viewportHeight);
-                break;
-            case FsmListLevel.Objects:
-                DrawObjectList(viewportHeight);
-                break;
-            case FsmListLevel.Fsms:
-                DrawFsmLeafList(viewportHeight);
-                break;
-        }
-    }
-
-    // Recomputes the shared virtualization window only on the Layout event and caches it into
-    // _fsmListWindowFirstVisible/_fsmListWindowLastVisible - see those fields' declaration comment
-    // for why every other event this frame must reuse the cached values instead of recomputing.
-    private void ComputeFsmListWindow(int count, float viewportHeight)
-    {
-        if (Event.current.type != EventType.Layout)
-        {
-            return;
-        }
-
-        _fsmListWindowFirstVisible = Mathf.Clamp(Mathf.FloorToInt(_fsmListScrollPosition.y / FsmListRowHeight), 0, count);
-        int visibleRowCount = Mathf.CeilToInt(viewportHeight / FsmListRowHeight) + 1;
-        _fsmListWindowLastVisible = Mathf.Clamp(_fsmListWindowFirstVisible + visibleRowCount, _fsmListWindowFirstVisible, count);
-    }
-
-    private void DrawSceneList(float viewportHeight)
-    {
-        GUILayout.Label("Loaded scenes");
-        _fsmListScrollPosition = GUILayout.BeginScrollView(_fsmListScrollPosition);
-
-        // Only the rows actually inside the scroll viewport get a real GUILayout.Button - with a
-        // long list, GUILayout controls run their full layout/style/hit-test logic on *every*
-        // OnGUI event (Layout, Repaint, each queued input event), not just Repaint, so one button
-        // per row regardless of scroll position was the actual remaining cost. Space() placeholders
-        // before/after the visible slice preserve the scrollbar's total content height without
-        // instantiating off-screen controls. Same pattern repeated in DrawObjectList/DrawFsmLeafList
-        // below for the other two levels.
-        List<SceneGroup> scenes = _sceneGroups!;
-        int count = scenes.Count;
-        ComputeFsmListWindow(count, viewportHeight);
-        int firstVisible = _fsmListWindowFirstVisible;
-        int lastVisible = _fsmListWindowLastVisible;
-
-        if (firstVisible > 0)
-        {
-            GUILayout.Space(firstVisible * FsmListRowHeight);
-        }
-
-        for (int i = firstVisible; i < lastVisible; i++)
-        {
-            if (GUILayout.Button(scenes[i].SceneName, GUILayout.Height(FsmListRowHeight)))
-            {
-                _pendingFsmListLevel = FsmListLevel.Objects;
-                _pendingSelectedSceneIndex = i;
-                _pendingSelectedObjectIndex = -1;
-            }
-        }
-
-        if (lastVisible < count)
-        {
-            GUILayout.Space((count - lastVisible) * FsmListRowHeight);
-        }
-
-        GUILayout.EndScrollView();
-    }
-
-    private void DrawObjectList(float viewportHeight)
-    {
-        SceneGroup sceneGroup = _sceneGroups![_selectedSceneIndex];
-
-        if (GUILayout.Button("< Back to scenes"))
-        {
-            _pendingFsmListLevel = FsmListLevel.Scenes;
-            _pendingSelectedSceneIndex = -1;
-            _pendingSelectedObjectIndex = -1;
-            return;
-        }
-
-        GUILayout.Label($"Scene: {sceneGroup.SceneName}");
-        _fsmListScrollPosition = GUILayout.BeginScrollView(_fsmListScrollPosition);
-
-        List<ObjectGroup> objects = sceneGroup.Objects;
-        int count = objects.Count;
-        ComputeFsmListWindow(count, viewportHeight);
-        int firstVisible = _fsmListWindowFirstVisible;
-        int lastVisible = _fsmListWindowLastVisible;
-
-        if (firstVisible > 0)
-        {
-            GUILayout.Space(firstVisible * FsmListRowHeight);
-        }
-
-        for (int i = firstVisible; i < lastVisible; i++)
-        {
-            if (GUILayout.Button(objects[i].Label, GUILayout.Height(FsmListRowHeight)))
-            {
-                _pendingFsmListLevel = FsmListLevel.Fsms;
-                _pendingSelectedSceneIndex = _selectedSceneIndex;
-                _pendingSelectedObjectIndex = i;
-            }
-        }
-
-        if (lastVisible < count)
-        {
-            GUILayout.Space((count - lastVisible) * FsmListRowHeight);
-        }
-
-        GUILayout.EndScrollView();
-    }
-
-    private void DrawFsmLeafList(float viewportHeight)
-    {
-        ObjectGroup objectGroup = _sceneGroups![_selectedSceneIndex].Objects[_selectedObjectIndex];
-
-        if (GUILayout.Button("< Back to objects"))
-        {
-            _pendingFsmListLevel = FsmListLevel.Objects;
-            _pendingSelectedSceneIndex = _selectedSceneIndex;
-            _pendingSelectedObjectIndex = -1;
-            return;
-        }
-
-        GUILayout.Label($"Object: {objectGroup.Label}");
-        _fsmListScrollPosition = GUILayout.BeginScrollView(_fsmListScrollPosition);
-
-        List<string> fsmLabels = objectGroup.FsmLabels;
-        int count = fsmLabels.Count;
-        ComputeFsmListWindow(count, viewportHeight);
-        int firstVisible = _fsmListWindowFirstVisible;
-        int lastVisible = _fsmListWindowLastVisible;
-
-        if (firstVisible > 0)
-        {
-            GUILayout.Space(firstVisible * FsmListRowHeight);
-        }
-
-        // Selecting a leaf FSM does not change _fsmListLevel - the list stays on this object's FSMs
-        // so the graph panel and list panel remain independently browsable, matching how they
-        // already behave today (selecting a state doesn't change the list either). This assignment
-        // is immediate (not deferred through _pendingFsmListLevel) because it never changes which
-        // level-draw method runs or how many controls it lays out, so it carries none of the
-        // Layout/Repaint mismatch risk the level transitions above do.
-        for (int i = firstVisible; i < lastVisible; i++)
-        {
-            if (GUILayout.Button(fsmLabels[i], GUILayout.Height(FsmListRowHeight)))
-            {
-                SelectFsm(objectGroup.FsmIndices[i]);
-            }
-        }
-
-        if (lastVisible < count)
-        {
-            GUILayout.Space((count - lastVisible) * FsmListRowHeight);
-        }
-
-        GUILayout.EndScrollView();
-    }
-
-    private void SelectFsm(int index)
-    {
-        _selectedFsmIndex = index;
-        _selectedStateName = null;
-        InvalidateGraphCaches();
-        InvalidateSidePanelCache();
-
-        FsmInfo fsm = _snapshot!.Fsms[index];
-        FitViewToFsm(fsm);
-        LogNodePositionDiagnostics(fsm);
-    }
-
     private void InvalidateGraphCaches()
     {
         _nodeLayoutCache = null;
         _globalPseudoNodeCache = null;
-        _layoutCacheFsmIndex = -1;
-    }
-
-    private void InvalidateSidePanelCache()
-    {
-        _sidePanelCachedStateName = null;
-        _sidePanelActionCache = null;
-        _sidePanelVariableCache = null;
-        _sidePanelEventCache = null;
-    }
-
-    // Diagnostic for the "stacked nodes" report - logs each state's raw Position/ColorIndex next to
-    // its computed screen Rect once per FSM selection (not continuously), so a cluster of states
-    // with near-identical Position values (an FSM author never dragging them apart in the PlayMaker
-    // editor) is distinguishable at a glance from a genuine WorldToScreen collision.
-    private void LogNodePositionDiagnostics(FsmInfo fsm)
-    {
-        // Matches the graph canvas's actual, always-full-screen rect (see OnGUI) so the logged
-        // ScreenRect values reflect what's really drawn, not an approximation of it.
-        var localCanvasRect = new Rect(0f, 0f, Screen.width, Screen.height);
-
-        foreach (FsmStateInfo state in fsm.States)
-        {
-            Rect position = state.State.Position;
-            Rect screenRect = WorldToScreen(position, localCanvasRect);
-            _logger.LogInfo(FormattableString.Invariant(
-                $"[FsmMaster] Graph overlay: state \"{state.Name}\" Position=({position.x:F1}, {position.y:F1}, {position.width:F1}, {position.height:F1}) ColorIndex={state.State.ColorIndex} ScreenRect=({screenRect.x:F1}, {screenRect.y:F1}, {screenRect.width:F1}, {screenRect.height:F1})"));
-        }
+        _layoutCacheFsmKey = null;
     }
 
     // FsmState.Position values live in PlayMaker's own unbounded editor-canvas space, authored
     // per-FSM with an arbitrary origin - fit the view to whatever this FSM's states actually
     // occupy rather than assuming a fixed pan/zoom starting point.
-    private void FitViewToFsm(FsmInfo fsm)
+    // Pure function (no instance-field mutation) so callers can seed a specific tab's pan/zoom state
+    // rather than always overwriting this overlay's own singleton fields - see the call site in
+    // SelectFsm, which is the only remaining caller today.
+    internal static (Vector2 PanCenter, float Zoom) FitViewToFsm(FsmInfo fsm)
     {
         if (fsm.States.Count == 0)
         {
-            _panWorldCenter = Vector2.zero;
-            _zoom = 1f;
-            return;
+            return (Vector2.zero, 1f);
         }
 
         float minX = float.MaxValue, minY = float.MaxValue, maxX = float.MinValue, maxY = float.MinValue;
@@ -728,8 +429,9 @@ internal sealed class FsmGraphOverlay
         float canvasWidth = Mathf.Max(Screen.width, 100f);
         float canvasHeight = Mathf.Max(Screen.height, 100f);
 
-        _zoom = Mathf.Clamp(Mathf.Min(canvasWidth / worldWidth, canvasHeight / worldHeight), MinZoom, MaxZoom);
-        _panWorldCenter = new Vector2((minX + maxX) / 2f, (minY + maxY) / 2f);
+        float zoom = Mathf.Clamp(Mathf.Min(canvasWidth / worldWidth, canvasHeight / worldHeight), MinZoom, MaxZoom);
+        var panCenter = new Vector2((minX + maxX) / 2f, (minY + maxY) / 2f);
+        return (panCenter, zoom);
     }
 
     // Node height is content-driven (title band + one row per transition) rather than the
@@ -752,7 +454,7 @@ internal sealed class FsmGraphOverlay
         return new Rect(topLeft.x, topLeft.y, worldRect.width * _zoom, worldRect.height * _zoom);
     }
 
-    private void DrawGraph(FsmInfo fsm, Rect canvasRect, Rect interactiveRect)
+    private void DrawGraph(FsmInfo fsm, FsmTabState activeTab, Rect canvasRect, Rect interactiveRect)
     {
         // GUI.skin.box's background is a semi-transparent dark fill - fine as a backdrop while the
         // list/side panel are shown, but with the selection UI hidden (the "1" key in Update) that
@@ -763,7 +465,7 @@ internal sealed class FsmGraphOverlay
         var localCanvasRect = new Rect(0f, 0f, canvasRect.width, canvasRect.height);
 
         bool cacheStale = _nodeLayoutCache == null
-            || _layoutCacheFsmIndex != _selectedFsmIndex
+            || _layoutCacheFsmKey != activeTab.FsmKey
             || _layoutCachePanCenter != _panWorldCenter
             || !Mathf.Approximately(_layoutCacheZoom, _zoom)
             || _layoutCacheCanvasRect != localCanvasRect;
@@ -771,7 +473,7 @@ internal sealed class FsmGraphOverlay
         if (cacheStale)
         {
             RebuildNodeLayoutCache(fsm, localCanvasRect);
-            _layoutCacheFsmIndex = _selectedFsmIndex;
+            _layoutCacheFsmKey = activeTab.FsmKey;
             _layoutCachePanCenter = _panWorldCenter;
             _layoutCacheZoom = _zoom;
             _layoutCacheCanvasRect = localCanvasRect;
@@ -1219,17 +921,20 @@ internal sealed class FsmGraphOverlay
             }
         }
 
-        // Gated on interactiveRect (not just node.ScreenRect) so a click on the list/side panel -
+        // Gated on interactiveRect (not just node.ScreenRect) so a click on the uGUI right panel -
         // which visually sits on top of the graph now that the canvas spans the full screen - never
-        // also selects whatever node happens to render underneath it.
-        if (Event.current.type == EventType.MouseDown && Event.current.button == 0 && interactiveRect.Contains(Event.current.mousePosition))
+        // also selects whatever node happens to render underneath it. IsPointerOverUi is a second
+        // guard for uGUI content that can render outside that panel's own base rect (the Open
+        // dropdown) - see ComputeInteractiveRect's own comment for why rect-subtraction alone isn't
+        // enough for that case.
+        if (Event.current.type == EventType.MouseDown && Event.current.button == 0
+            && interactiveRect.Contains(Event.current.mousePosition) && !IsPointerOverUi())
         {
             foreach (NodeLayout node in _nodeLayoutCache.Values)
             {
                 if (node.ScreenRect.Contains(Event.current.mousePosition))
                 {
                     _selectedStateName = node.Name;
-                    InvalidateSidePanelCache();
                     Event.current.Use();
                     break;
                 }
@@ -1241,7 +946,11 @@ internal sealed class FsmGraphOverlay
     {
         Event current = Event.current;
 
-        if (current.type == EventType.MouseDown && current.button == 0 && canvasRect.Contains(current.mousePosition))
+        // IsPointerOverUi only gates *starting* a new pan/zoom gesture - an already-in-progress drag
+        // (the MouseDrag branch below) keeps going even if the cursor drifts over uGUI content
+        // mid-drag, matching how a drag normally isn't interrupted by crossing over an overlapping
+        // widget.
+        if (current.type == EventType.MouseDown && current.button == 0 && canvasRect.Contains(current.mousePosition) && !IsPointerOverUi())
         {
             _isPanning = true;
         }
@@ -1254,7 +963,7 @@ internal sealed class FsmGraphOverlay
             _panWorldCenter -= current.delta / _zoom;
             current.Use();
         }
-        else if (current.type == EventType.ScrollWheel && canvasRect.Contains(current.mousePosition))
+        else if (current.type == EventType.ScrollWheel && canvasRect.Contains(current.mousePosition) && !IsPointerOverUi())
         {
             _zoom = Mathf.Clamp(_zoom - current.delta.y * ZoomSpeed, MinZoom, MaxZoom);
             current.Use();
@@ -1685,145 +1394,6 @@ internal sealed class FsmGraphOverlay
         GL.Vertex3(d.x, d.y, 0f);
     }
 
-    private void DrawSidePanel(FsmInfo fsm)
-    {
-        if (_sidePanelCachedStateName != _selectedStateName)
-        {
-            FsmStateInfo? selectedState = null;
-            foreach (FsmStateInfo state in fsm.States)
-            {
-                if (state.Name == _selectedStateName)
-                {
-                    selectedState = state;
-                    break;
-                }
-            }
-
-            if (selectedState == null)
-            {
-                _selectedStateName = null;
-                InvalidateSidePanelCache();
-                return;
-            }
-
-            RebuildSidePanelCache(fsm, selectedState);
-        }
-
-        _sidePanelScrollPosition = GUILayout.BeginScrollView(_sidePanelScrollPosition);
-
-        GUILayout.Label($"State: {_selectedStateName}");
-
-        GUILayout.Space(8f);
-        GUILayout.Label("Actions");
-        foreach ((string header, List<(string Label, string Value)> fields) in _sidePanelActionCache!)
-        {
-            GUILayout.Label(header);
-            foreach ((string label, string value) in fields)
-            {
-                DrawFieldRow(label, value);
-            }
-        }
-
-        GUILayout.Space(8f);
-        GUILayout.Label("Variables");
-        foreach ((string label, string value) in _sidePanelVariableCache!)
-        {
-            DrawFieldRow(label, value);
-        }
-
-        GUILayout.Space(8f);
-        GUILayout.Label("Events");
-        foreach (string eventName in _sidePanelEventCache!)
-        {
-            DrawFieldRow(eventName, "");
-        }
-
-        GUILayout.EndScrollView();
-    }
-
-    // Computed once per state selection rather than on every OnGUI pass - this (plus the layout
-    // cache above) is what removes the per-frame LINQ/delegate allocations that were causing the
-    // reported GC stutter while the panel was visible.
-    private void RebuildSidePanelCache(FsmInfo fsm, FsmStateInfo state)
-    {
-        var actionCache = new List<(string Header, List<(string Label, string Value)> Fields)>();
-        foreach (FsmActionInfo action in state.Actions)
-        {
-            var fields = new List<(string Label, string Value)>();
-            foreach (FsmActionFieldInfo field in action.Fields)
-            {
-                fields.Add((field.FieldName, FormatActionField(action.Action, field.FieldValue)));
-            }
-
-            actionCache.Add((action.ActionType.Name, fields));
-        }
-
-        // Same typed-array set FsmConsoleLogger.LogFsmVariables already enumerates - reusing the
-        // same known set rather than re-deriving what's on FsmVariables.
-        FsmVariables variables = fsm.Fsm.Variables;
-        var variableCache = new List<(string Label, string Value)>();
-        foreach (FsmFloat v in variables.FloatVariables) variableCache.Add(($"Float \"{v.Name}\"", v.Value.ToString()));
-        foreach (FsmInt v in variables.IntVariables) variableCache.Add(($"Int \"{v.Name}\"", v.Value.ToString()));
-        foreach (FsmBool v in variables.BoolVariables) variableCache.Add(($"Bool \"{v.Name}\"", v.Value.ToString()));
-        foreach (FsmString v in variables.StringVariables) variableCache.Add(($"String \"{v.Name}\"", v.Value ?? "null"));
-        foreach (FsmVector2 v in variables.Vector2Variables) variableCache.Add(($"Vector2 \"{v.Name}\"", v.Value.ToString()));
-        foreach (FsmVector3 v in variables.Vector3Variables) variableCache.Add(($"Vector3 \"{v.Name}\"", v.Value.ToString()));
-        foreach (FsmRect v in variables.RectVariables) variableCache.Add(($"Rect \"{v.Name}\"", v.Value.ToString()));
-        foreach (FsmQuaternion v in variables.QuaternionVariables) variableCache.Add(($"Quaternion \"{v.Name}\"", v.Value.ToString()));
-        foreach (FsmColor v in variables.ColorVariables) variableCache.Add(($"Color \"{v.Name}\"", v.Value.ToString()));
-        foreach (FsmGameObject v in variables.GameObjectVariables) variableCache.Add(($"GameObject \"{v.Name}\"", v.Value != null ? v.Value.name : "null"));
-        foreach (FsmObject v in variables.ObjectVariables) variableCache.Add(($"Object \"{v.Name}\"", v.Value != null ? v.Value.ToString() : "null"));
-        foreach (FsmMaterial v in variables.MaterialVariables) variableCache.Add(($"Material \"{v.Name}\"", v.Value != null ? v.Value.ToString() : "null"));
-        foreach (FsmTexture v in variables.TextureVariables) variableCache.Add(($"Texture \"{v.Name}\"", v.Value != null ? v.Value.ToString() : "null"));
-        foreach (FsmEnum v in variables.EnumVariables) variableCache.Add(($"Enum \"{v.Name}\"", v.Value != null ? v.Value.ToString() : "null"));
-        foreach (FsmArray v in variables.ArrayVariables) variableCache.Add(($"Array \"{v.Name}\"", string.Join(", ", v.Values)));
-
-        var eventCache = new List<string>();
-        foreach (FsmEvent fsmEvent in fsm.Fsm.Events)
-        {
-            eventCache.Add(fsmEvent.Name);
-        }
-
-        _sidePanelActionCache = actionCache;
-        _sidePanelVariableCache = variableCache;
-        _sidePanelEventCache = eventCache;
-        _sidePanelCachedStateName = state.Name;
-    }
-
-    // Delegates scalar formatting to FsmConsoleLogger's own (promoted internal) formatter so both
-    // the console dump and this panel describe FsmOwnerDefault/FsmEventTarget/NamedVariable fields
-    // identically instead of maintaining two versions of the same switch.
-    private static string FormatActionField(FsmStateAction action, object? fieldValue)
-    {
-        switch (fieldValue)
-        {
-            case FsmArray fsmArray:
-                var arrayParts = new string[fsmArray.Length];
-                for (int i = 0; i < fsmArray.Length; i++)
-                {
-                    arrayParts[i] = FsmConsoleLogger.FormatActionFieldValue(action, fsmArray.Values[i]);
-                }
-                return string.Join(", ", arrayParts);
-            case Array array:
-                var parts = new string[array.Length];
-                for (int i = 0; i < array.Length; i++)
-                {
-                    parts[i] = FsmConsoleLogger.FormatActionFieldValue(action, array.GetValue(i));
-                }
-                return string.Join(", ", parts);
-            default:
-                return FsmConsoleLogger.FormatActionFieldValue(action, fieldValue);
-        }
-    }
-
-    private void DrawFieldRow(string label, string valueText)
-    {
-        GUILayout.BeginHorizontal();
-        GUILayout.Label(label, GUILayout.Width(160f));
-        GUILayout.Label(valueText);
-        GUILayout.EndHorizontal();
-    }
-
     private sealed class NodeLayout
     {
         public string Name = "";
@@ -1867,23 +1437,5 @@ internal sealed class FsmGraphOverlay
             Rect = rect;
             ArrowPoints = new[] { arrowFrom, arrowTo };
         }
-    }
-
-    // One entry per distinct loaded scene containing at least one live PlayMakerFSM instance -
-    // root level of the list panel's scene -> object -> FSM drill-down.
-    private sealed class SceneGroup
-    {
-        public string SceneName = "";
-        public List<ObjectGroup> Objects = new();
-    }
-
-    // One entry per distinct GameObject (keyed by instance ID, not name - many enemy/object
-    // instances in this game share identical names) that has at least one live PlayMakerFSM.
-    private sealed class ObjectGroup
-    {
-        public int InstanceId;
-        public string Label = "";
-        public List<int> FsmIndices = new();
-        public List<string> FsmLabels = new();
     }
 }

@@ -1,0 +1,95 @@
+using System.Collections.Generic;
+using UnityEngine;
+
+namespace FsmMaster;
+
+// Horizontal scroll viewport for the FSM tab strip - not a DebugMod port (its CanvasScrollView is
+// vertical-only, agent-context/Silksong.DebugMod-main/UI/Canvas/CanvasScrollView.cs), but the same
+// pattern rotated to the X axis: this node is the clipped viewport, SetContent supplies the single
+// child panel whose tabs a caller adds to, and scrolling moves that child's LocalPosition.x within
+// the viewport - clamped so content never scrolls past its own bounds.
+internal sealed class CanvasHorizontalScrollStrip : CanvasNode
+{
+    private const float ScrollSpeed = 30f;
+
+    private CanvasNode? _content;
+    private float _contentWidthAtLastCheck;
+
+    public CanvasNode? Content => _content;
+
+    // NOT overridden to false: this container has no Graphic of its own to raycast against, so it
+    // needs no CanvasGroup either way - but CanvasNode.Build() adds a blocksRaycasts=false CanvasGroup
+    // whenever Interactable is false, and Unity's CanvasGroup.blocksRaycasts cascades to the entire
+    // subtree unless a descendant adds its own CanvasGroup to override it. That silently disabled
+    // every button nested inside this strip's content (the tab select/close buttons) until this was
+    // left at the default (true).
+
+    public CanvasHorizontalScrollStrip(string name) : base(name)
+    {
+        OnUpdate += Poll;
+    }
+
+    public T SetContent<T>(T content) where T : CanvasNode
+    {
+        _content = content;
+        content.Parent = this;
+        return content;
+    }
+
+    protected override IEnumerable<CanvasNode> ChildList()
+    {
+        if (_content != null)
+        {
+            yield return _content;
+        }
+    }
+
+    protected override bool GetClipRect(out Rect clipRect)
+    {
+        clipRect = new Rect(
+            Position.x - Screen.width / 2f,
+            Screen.height / 2f - Position.y - Size.y,
+            Size.x,
+            Size.y);
+        return true;
+    }
+
+    private void Poll()
+    {
+        if (_content == null)
+        {
+            return;
+        }
+
+        // Content grew/shrank (a tab opened/closed) since last frame - reclamp so a previously-valid
+        // offset doesn't leave a gap or an out-of-bounds scroll after the tab list changes.
+        if (!Mathf.Approximately(_content.Size.x, _contentWidthAtLastCheck))
+        {
+            float clampedX = Mathf.Clamp(_content.LocalPosition.x, Mathf.Min(-GetScrollableWidth(), 0f), 0f);
+            _content.LocalPosition = new Vector2(clampedX, _content.LocalPosition.y);
+            _contentWidthAtLastCheck = _content.Size.x;
+        }
+
+        // No physical horizontal wheel on most mice - the vertical wheel scrolls this strip instead
+        // while it's hovered, matching how most desktop UI toolkits handle a horizontal list.
+        if (!Mathf.Approximately(Input.mouseScrollDelta.y, 0f) && IsMouseOver())
+        {
+            float x = _content.LocalPosition.x + Input.mouseScrollDelta.y * ScrollSpeed;
+            x = Mathf.Clamp(x, Mathf.Min(-GetScrollableWidth(), 0f), 0f);
+            _content.LocalPosition = new Vector2(x, _content.LocalPosition.y);
+        }
+    }
+
+    public void SetScrollPercentage(float percentage)
+    {
+        if (_content == null)
+        {
+            return;
+        }
+
+        percentage = Mathf.Clamp01(percentage);
+        _content.LocalPosition = new Vector2(-percentage * GetScrollableWidth(), _content.LocalPosition.y);
+    }
+
+    public float GetScrollableWidth() => Mathf.Max(0f, (_content?.Size.x ?? 0f) - Size.x);
+}
