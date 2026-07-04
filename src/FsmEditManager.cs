@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Linq;
 using System.Reflection;
@@ -27,6 +28,18 @@ internal sealed class FsmEditManager
         VariableType.Color, VariableType.Enum,
     };
 
+    // Element types supported for per-element editing of an Array-typed FSM variable. Narrower than
+    // SupportedVariableTypes on purpose: FsmArray.Values stores every element as a boxed primitive
+    // keyed only by ElementType (HutongGames.PlayMaker.FsmArray - Values/Get/Set/SaveChanges), with no
+    // per-element NamedVariable wrapper to delegate to - vector/rect/quaternion/color-typed arrays pack
+    // their elements as Vector4 internally, which isn't verified safe to round-trip through the same
+    // plain-float-list format FormatFloats/ParseFloats use for a whole (non-array) variable of those
+    // types, so those stay read-only for now rather than risk a wrong cast.
+    private static readonly HashSet<VariableType> SupportedArrayElementTypes = new()
+    {
+        VariableType.Float, VariableType.Int, VariableType.Bool, VariableType.String,
+    };
+
     private readonly ManualLogSource _logger;
     private readonly Dictionary<string, List<Fsm>> _liveInstances = new();
     private readonly Dictionary<string, FsmPristineSnapshot> _pristine = new();
@@ -35,16 +48,43 @@ internal sealed class FsmEditManager
     // caller (e.g. a "save all changes" action) serializes to FsmSaveDataStore.
     private readonly Dictionary<string, FsmEditSet> _activeEdits = new();
 
+    // Per-FsmKey undo history - each entry is a closure that replays whichever manager call reverts the
+    // edit that pushed it (e.g. undoing a SetVariable call re-invokes SetVariable with the prior value).
+    // _isUndoing suppresses PushUndo while an entry is replaying, so popping one never pushes a new one.
+    private readonly Dictionary<string, Stack<Action>> _undoStacks = new();
+    private bool _isUndoing;
+
+    // Bumped by every method that actually mutates a live Fsm (variable/action-field overrides, state
+    // neutering, transition retargeting, sequencer installs, and ResetFsm's restore) - FsmGraphOverlay
+    // compares this against the value it last rebuilt its node/transition layout cache from, so a live
+    // edit made from outside the graph itself (the right panel's Save/Load/Undo/Reset buttons, or a
+    // saved edit set reapplied on scene load) still shows up without the graph's own explicit
+    // InvalidateGraphCaches() call, which only covers edits the graph made directly (drag/right-click).
+    public int EditGeneration { get; private set; }
+
+    private void BumpEditGeneration() => EditGeneration++;
+
     public FsmEditManager(ManualLogSource logger)
     {
         _logger = logger;
     }
 
-    // Called whenever the plugin (re)discovers live FSMs (Awake, each sceneLoaded) - replaces the tracked
-    // instance list for this key outright, since the previous scene's instances are gone.
-    public void RegisterLiveInstances(string fsmKey, IEnumerable<Fsm> instances)
+    // Called whenever the plugin (re)discovers live FSMs (Awake, each sceneLoaded) - wholesale
+    // replacement of every tracked FsmKey's live instance list, not just the keys present in this
+    // scan. The caller always passes every PlayMakerFSM currently alive (FindObjectsByType scans the
+    // whole loaded object graph, not just whichever scene just finished loading), so any FsmKey
+    // missing from instancesByKey is genuinely gone. Leaving a missing key's old list in place would
+    // keep FsmVariableTracker (and anything else calling GetLiveInstances) reading frozen values off
+    // Fsm instances whose owning GameObject was already destroyed - Fsm is a plain C# object, not a
+    // UnityEngine.Object, so it never becomes Unity's fake-null and nothing else would ever catch
+    // this.
+    public void ReplaceLiveInstances(IReadOnlyDictionary<string, List<Fsm>> instancesByKey)
     {
-        _liveInstances[fsmKey] = instances.ToList();
+        _liveInstances.Clear();
+        foreach (KeyValuePair<string, List<Fsm>> entry in instancesByKey)
+        {
+            _liveInstances[entry.Key] = entry.Value;
+        }
     }
 
     public IReadOnlyList<Fsm> GetLiveInstances(string fsmKey) =>
@@ -104,6 +144,8 @@ internal sealed class FsmEditManager
         RestoreSnapshot(snapshot, instances ?? new List<Fsm>());
         _pristine.Remove(fsmKey);
         _activeEdits.Remove(fsmKey);
+        _undoStacks.Remove(fsmKey);
+        BumpEditGeneration();
     }
 
     // Reverts every edit applied this session without touching persisted JSON, so a ScriptEngine hot-reload
@@ -119,6 +161,235 @@ internal sealed class FsmEditManager
         _pristine.Clear();
         _liveInstances.Clear();
         _activeEdits.Clear();
+        _undoStacks.Clear();
+    }
+
+    // ---- Undo ----
+
+    public bool HasUndo(string fsmKey) => _undoStacks.TryGetValue(fsmKey, out Stack<Action>? stack) && stack.Count > 0;
+
+    // Pops and replays the most recent undoable edit for fsmKey. Replayed entries are themselves calls
+    // back into this same class's edit methods (e.g. SetVariable with the prior value), so _isUndoing
+    // guards PushUndo for the duration to stop that replay from pushing a fresh entry onto the stack.
+    public void Undo(string fsmKey)
+    {
+        if (!_undoStacks.TryGetValue(fsmKey, out Stack<Action>? stack) || stack.Count == 0)
+        {
+            return;
+        }
+
+        Action undo = stack.Pop();
+        _isUndoing = true;
+        try
+        {
+            undo();
+        }
+        finally
+        {
+            _isUndoing = false;
+        }
+    }
+
+    private void PushUndo(string fsmKey, Action undo)
+    {
+        if (_isUndoing)
+        {
+            return;
+        }
+
+        if (!_undoStacks.TryGetValue(fsmKey, out Stack<Action>? stack))
+        {
+            stack = new Stack<Action>();
+            _undoStacks[fsmKey] = stack;
+        }
+
+        stack.Push(undo);
+    }
+
+    // ---- Ad-hoc single-value edits (the UI's own entry points) ----
+
+    // Applies one variable edit to every live instance sharing fsmKey (the same per-instance loop
+    // shape ApplyEditSet already uses for a whole edit set) - the entry point FsmActiveStatePanel's
+    // text fields/toggle buttons call directly, without building a full FsmEditSet themselves.
+    public void SetVariable(string fsmKey, string variableName, string variableType, string stringValue)
+    {
+        string? previousValue = GetCurrentVariableValue(fsmKey, variableName);
+
+        var ov = new VariableOverride { VariableType = variableType, Name = variableName, StringValue = stringValue };
+        foreach (Fsm fsm in GetLiveInstances(fsmKey))
+        {
+            ApplyVariableOverride(fsmKey, fsm, ov);
+        }
+
+        if (previousValue != null)
+        {
+            PushUndo(fsmKey, () => SetVariable(fsmKey, variableName, variableType, previousValue));
+        }
+    }
+
+    public void SetActionField(string fsmKey, string stateName, int actionIndex, string expectedActionTypeName, string fieldName, string stringValue)
+    {
+        string? previousValue = GetCurrentActionFieldValue(fsmKey, stateName, actionIndex, expectedActionTypeName, fieldName);
+
+        var ov = new ActionFieldOverride
+        {
+            StateName = stateName,
+            ActionIndex = actionIndex,
+            ExpectedActionTypeName = expectedActionTypeName,
+            FieldName = fieldName,
+            StringValue = stringValue,
+        };
+        foreach (Fsm fsm in GetLiveInstances(fsmKey))
+        {
+            ApplyActionFieldOverride(fsmKey, fsm, ov);
+        }
+
+        if (previousValue != null)
+        {
+            PushUndo(fsmKey, () => SetActionField(fsmKey, stateName, actionIndex, expectedActionTypeName, fieldName, previousValue));
+        }
+    }
+
+    // Same shape as SetVariable, for one element of an Array-typed variable - see
+    // ApplyVariableArrayElementOverride and SupportedArrayElementTypes for what's actually editable.
+    public void SetVariableArrayElement(string fsmKey, string variableName, int arrayIndex, string elementStringValue)
+    {
+        string? previousValue = GetCurrentVariableArrayElementValue(fsmKey, variableName, arrayIndex);
+
+        var ov = new VariableOverride
+        {
+            VariableType = VariableType.Array.ToString(),
+            Name = variableName,
+            ArrayIndex = arrayIndex,
+            StringValue = elementStringValue,
+        };
+        foreach (Fsm fsm in GetLiveInstances(fsmKey))
+        {
+            ApplyVariableOverride(fsmKey, fsm, ov);
+        }
+
+        if (previousValue != null)
+        {
+            PushUndo(fsmKey, () => SetVariableArrayElement(fsmKey, variableName, arrayIndex, previousValue));
+        }
+    }
+
+    // Same shape as SetActionField, for one element of a Fsm<Type>[]-typed field.
+    public void SetActionFieldArrayElement(string fsmKey, string stateName, int actionIndex, string expectedActionTypeName, string fieldName, int arrayIndex, string elementStringValue)
+    {
+        string? previousValue = GetCurrentActionFieldArrayElementValue(fsmKey, stateName, actionIndex, expectedActionTypeName, fieldName, arrayIndex);
+
+        var ov = new ActionFieldOverride
+        {
+            StateName = stateName,
+            ActionIndex = actionIndex,
+            ExpectedActionTypeName = expectedActionTypeName,
+            FieldName = fieldName,
+            ArrayIndex = arrayIndex,
+            StringValue = elementStringValue,
+        };
+        foreach (Fsm fsm in GetLiveInstances(fsmKey))
+        {
+            ApplyActionFieldOverride(fsmKey, fsm, ov);
+        }
+
+        if (previousValue != null)
+        {
+            PushUndo(fsmKey, () => SetActionFieldArrayElement(fsmKey, stateName, actionIndex, expectedActionTypeName, fieldName, arrayIndex, previousValue));
+        }
+    }
+
+    // ---- Undo-capture lookups ----
+    // Read the current live value the same way the edit path itself does (FormatNamedVariable/
+    // FormatArrayElement/TryFormatValue), so the value handed to PushUndo round-trips through the same
+    // parser the forward edit used. Return null (skip pushing undo) rather than guessing when nothing
+    // live matches - e.g. the field/variable was never found, matching how the edit methods above already
+    // no-op with a warning in that case.
+
+    private string? GetCurrentVariableValue(string fsmKey, string variableName)
+    {
+        foreach (Fsm fsm in GetLiveInstances(fsmKey))
+        {
+            NamedVariable? variable = fsm.Variables.FindVariable(variableName);
+            if (variable != null && SupportedVariableTypes.Contains(variable.VariableType))
+            {
+                return FormatNamedVariable(variable);
+            }
+        }
+
+        return null;
+    }
+
+    private string? GetCurrentVariableArrayElementValue(string fsmKey, string variableName, int arrayIndex)
+    {
+        foreach (Fsm fsm in GetLiveInstances(fsmKey))
+        {
+            if (fsm.Variables.FindVariable(variableName) is FsmArray array && arrayIndex < array.Length)
+            {
+                return FormatArrayElement(array.ElementType, array.Get(arrayIndex));
+            }
+        }
+
+        return null;
+    }
+
+    private string? GetCurrentActionFieldValue(string fsmKey, string stateName, int actionIndex, string expectedActionTypeName, string fieldName)
+    {
+        foreach (Fsm fsm in GetLiveInstances(fsmKey))
+        {
+            if (TryFindActionField(fsm, stateName, actionIndex, expectedActionTypeName, fieldName, out FsmStateAction? action, out FieldInfo? field)
+                && TryFormatValue(field.GetValue(action), out string formatted))
+            {
+                return formatted;
+            }
+        }
+
+        return null;
+    }
+
+    private string? GetCurrentActionFieldArrayElementValue(string fsmKey, string stateName, int actionIndex, string expectedActionTypeName, string fieldName, int arrayIndex)
+    {
+        foreach (Fsm fsm in GetLiveInstances(fsmKey))
+        {
+            if (TryFindActionField(fsm, stateName, actionIndex, expectedActionTypeName, fieldName, out FsmStateAction? action, out FieldInfo? field)
+                && field.GetValue(action) is Array array
+                && arrayIndex < array.Length
+                && TryFormatValue(array.GetValue(arrayIndex), out string formatted))
+            {
+                return formatted;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool TryFindActionField(Fsm fsm, string stateName, int actionIndex, string expectedActionTypeName, string fieldName,
+        [NotNullWhen(true)] out FsmStateAction? action, [NotNullWhen(true)] out FieldInfo? field)
+    {
+        action = null;
+        field = null;
+
+        FsmState? state = fsm.GetState(stateName);
+        if (state == null || actionIndex < 0 || actionIndex >= state.Actions.Length)
+        {
+            return false;
+        }
+
+        FsmStateAction candidate = state.Actions[actionIndex];
+        if (candidate.GetType().Name != expectedActionTypeName)
+        {
+            return false;
+        }
+
+        FieldInfo? candidateField = candidate.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (candidateField == null)
+        {
+            return false;
+        }
+
+        action = candidate;
+        field = candidateField;
+        return true;
     }
 
     // ---- Variables ----
@@ -129,6 +400,12 @@ internal sealed class FsmEditManager
         if (variable == null)
         {
             _logger.LogWarning($"[FsmMaster] Variable '{ov.Name}' not found on fsm '{fsm.Name}'; skipping.");
+            return;
+        }
+
+        if (ov.ArrayIndex >= 0)
+        {
+            ApplyVariableArrayElementOverride(fsmKey, fsm, variable, ov);
             return;
         }
 
@@ -145,7 +422,7 @@ internal sealed class FsmEditManager
         }
 
         FsmPristineSnapshot snapshot = GetOrCreateSnapshot(fsmKey);
-        if (!snapshot.OriginalValues.VariableOverrides.Exists(v => v.Name == ov.Name))
+        if (!snapshot.OriginalValues.VariableOverrides.Exists(v => v.Name == ov.Name && v.ArrayIndex == -1))
         {
             snapshot.OriginalValues.VariableOverrides.Add(new VariableOverride
             {
@@ -158,9 +435,87 @@ internal sealed class FsmEditManager
         AssignNamedVariable(variable, ov.StringValue);
 
         FsmEditSet active = GetOrCreateActiveEditSet(fsmKey);
-        active.VariableOverrides.RemoveAll(v => v.Name == ov.Name);
+        active.VariableOverrides.RemoveAll(v => v.Name == ov.Name && v.ArrayIndex == -1);
         active.VariableOverrides.Add(ov);
+        BumpEditGeneration();
     }
+
+    // ---- Array elements ----
+    // FsmArray (variable-typed arrays) and Fsm<Type>[] (action-field arrays) are unrelated shapes -
+    // FsmArray stores every element as a boxed primitive keyed by its own ElementType (no per-element
+    // NamedVariable to delegate to), while a Fsm<Type>[] field's elements already ARE NamedVariable
+    // instances the same as any other field - see AssignArrayElement vs. AssignActionFieldArrayElement.
+
+    private void ApplyVariableArrayElementOverride(string fsmKey, Fsm fsm, NamedVariable variable, VariableOverride ov)
+    {
+        if (variable is not FsmArray array)
+        {
+            _logger.LogWarning($"[FsmMaster] Variable '{ov.Name}' on fsm '{fsm.Name}' is not an array; skipping element edit.");
+            return;
+        }
+
+        if (!SupportedArrayElementTypes.Contains(array.ElementType))
+        {
+            _logger.LogWarning($"[FsmMaster] Variable '{ov.Name}' on fsm '{fsm.Name}' has unsupported array element type '{array.ElementType}'; skipping.");
+            return;
+        }
+
+        if (ov.ArrayIndex >= array.Length)
+        {
+            _logger.LogWarning($"[FsmMaster] Variable '{ov.Name}' on fsm '{fsm.Name}' array index {ov.ArrayIndex} is out of range (length {array.Length}); skipping.");
+            return;
+        }
+
+        FsmPristineSnapshot snapshot = GetOrCreateSnapshot(fsmKey);
+        if (!snapshot.OriginalValues.VariableOverrides.Exists(v => v.Name == ov.Name && v.ArrayIndex == ov.ArrayIndex))
+        {
+            snapshot.OriginalValues.VariableOverrides.Add(new VariableOverride
+            {
+                VariableType = ov.VariableType,
+                Name = ov.Name,
+                ArrayIndex = ov.ArrayIndex,
+                StringValue = FormatArrayElement(array.ElementType, array.Get(ov.ArrayIndex)),
+            });
+        }
+
+        AssignArrayElement(array, ov.ArrayIndex, ov.StringValue);
+
+        FsmEditSet active = GetOrCreateActiveEditSet(fsmKey);
+        active.VariableOverrides.RemoveAll(v => v.Name == ov.Name && v.ArrayIndex == ov.ArrayIndex);
+        active.VariableOverrides.Add(ov);
+        BumpEditGeneration();
+    }
+
+    private static void AssignArrayElement(FsmArray array, int index, string stringValue)
+    {
+        array.Set(index, ParseArrayElement(array.ElementType, stringValue));
+
+        // Set() alone only updates FsmArray's boxed Values[] cache (and, in-editor only, an internal
+        // Save call) - SaveChanges is the public call that flushes every boxed value back into the
+        // real typed backing arrays (floatValues/intValues/etc.) PlayMaker actions actually read from
+        // at runtime.
+        array.SaveChanges();
+    }
+
+    internal static bool IsSupportedArrayElementType(VariableType elementType) => SupportedArrayElementTypes.Contains(elementType);
+
+    internal static string FormatArrayElement(VariableType elementType, object? rawValue) => elementType switch
+    {
+        VariableType.Float => Convert.ToSingle(rawValue, CultureInfo.InvariantCulture).ToString("R", CultureInfo.InvariantCulture),
+        VariableType.Int => Convert.ToInt32(rawValue, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture),
+        VariableType.Bool => Convert.ToBoolean(rawValue).ToString(CultureInfo.InvariantCulture),
+        VariableType.String => rawValue as string ?? "",
+        _ => throw new NotSupportedException($"Array element type '{elementType}' is not supported for editing."),
+    };
+
+    private static object ParseArrayElement(VariableType elementType, string stringValue) => elementType switch
+    {
+        VariableType.Float => float.Parse(stringValue, CultureInfo.InvariantCulture),
+        VariableType.Int => int.Parse(stringValue, CultureInfo.InvariantCulture),
+        VariableType.Bool => bool.Parse(stringValue),
+        VariableType.String => stringValue,
+        _ => throw new NotSupportedException($"Array element type '{elementType}' is not supported for editing."),
+    };
 
     // ---- Action fields ----
 
@@ -180,7 +535,7 @@ internal sealed class FsmEditManager
             return;
         }
 
-        FieldInfo? field = action.GetType().GetField(ov.FieldName, BindingFlags.Instance | BindingFlags.Public);
+        FieldInfo? field = action.GetType().GetField(ov.FieldName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         if (field == null)
         {
             _logger.LogWarning($"[FsmMaster] Field '{ov.FieldName}' not found on action '{ov.ExpectedActionTypeName}'; skipping.");
@@ -188,6 +543,13 @@ internal sealed class FsmEditManager
         }
 
         object? currentValue = field.GetValue(action);
+
+        if (ov.ArrayIndex >= 0)
+        {
+            ApplyActionFieldArrayElementOverride(fsmKey, ov, currentValue);
+            return;
+        }
+
         if (!TryFormatValue(currentValue, out string formattedCurrent))
         {
             _logger.LogWarning($"[FsmMaster] Field '{ov.FieldName}' on '{ov.ExpectedActionTypeName}' has unsupported type '{currentValue?.GetType().Name ?? "null"}'; skipping.");
@@ -196,7 +558,7 @@ internal sealed class FsmEditManager
 
         FsmPristineSnapshot snapshot = GetOrCreateSnapshot(fsmKey);
         if (!snapshot.OriginalValues.ActionFieldOverrides.Exists(f =>
-                f.StateName == ov.StateName && f.ActionIndex == ov.ActionIndex && f.FieldName == ov.FieldName))
+                f.StateName == ov.StateName && f.ActionIndex == ov.ActionIndex && f.FieldName == ov.FieldName && f.ArrayIndex == -1))
         {
             snapshot.OriginalValues.ActionFieldOverrides.Add(new ActionFieldOverride
             {
@@ -212,8 +574,53 @@ internal sealed class FsmEditManager
 
         FsmEditSet active = GetOrCreateActiveEditSet(fsmKey);
         active.ActionFieldOverrides.RemoveAll(f =>
-            f.StateName == ov.StateName && f.ActionIndex == ov.ActionIndex && f.FieldName == ov.FieldName);
+            f.StateName == ov.StateName && f.ActionIndex == ov.ActionIndex && f.FieldName == ov.FieldName && f.ArrayIndex == -1);
         active.ActionFieldOverrides.Add(ov);
+        BumpEditGeneration();
+    }
+
+    // A Fsm<Type>[] field's elements already ARE NamedVariable instances (PlayMaker action fields never
+    // expose a raw primitive array - confirmed against agent-context/Playmaker's decompiled actions),
+    // so this reuses TryFormatValue/AssignNamedVariable exactly as the whole-field path does, just
+    // applied to one element instead of the field itself - the field reference never changes.
+    private void ApplyActionFieldArrayElementOverride(string fsmKey, ActionFieldOverride ov, object? fieldValue)
+    {
+        if (fieldValue is not Array array || ov.ArrayIndex >= array.Length)
+        {
+            _logger.LogWarning($"[FsmMaster] Field '{ov.FieldName}' on '{ov.ExpectedActionTypeName}' has no array element at index {ov.ArrayIndex}; skipping.");
+            return;
+        }
+
+        object? element = array.GetValue(ov.ArrayIndex);
+        if (!TryFormatValue(element, out string formattedCurrent))
+        {
+            _logger.LogWarning($"[FsmMaster] Field '{ov.FieldName}[{ov.ArrayIndex}]' on '{ov.ExpectedActionTypeName}' has unsupported type '{element?.GetType().Name ?? "null"}'; skipping.");
+            return;
+        }
+
+        FsmPristineSnapshot snapshot = GetOrCreateSnapshot(fsmKey);
+        if (!snapshot.OriginalValues.ActionFieldOverrides.Exists(f =>
+                f.StateName == ov.StateName && f.ActionIndex == ov.ActionIndex && f.FieldName == ov.FieldName && f.ArrayIndex == ov.ArrayIndex))
+        {
+            snapshot.OriginalValues.ActionFieldOverrides.Add(new ActionFieldOverride
+            {
+                StateName = ov.StateName,
+                ActionIndex = ov.ActionIndex,
+                ExpectedActionTypeName = ov.ExpectedActionTypeName,
+                FieldName = ov.FieldName,
+                ArrayIndex = ov.ArrayIndex,
+                StringValue = formattedCurrent,
+            });
+        }
+
+        // Guaranteed a NamedVariable of a supported type by the TryFormatValue check above.
+        AssignNamedVariable((NamedVariable)element, ov.StringValue);
+
+        FsmEditSet active = GetOrCreateActiveEditSet(fsmKey);
+        active.ActionFieldOverrides.RemoveAll(f =>
+            f.StateName == ov.StateName && f.ActionIndex == ov.ActionIndex && f.FieldName == ov.FieldName && f.ArrayIndex == ov.ArrayIndex);
+        active.ActionFieldOverrides.Add(ov);
+        BumpEditGeneration();
     }
 
     private static void RestoreActionField(Fsm fsm, ActionFieldOverride ov)
@@ -225,16 +632,95 @@ internal sealed class FsmEditManager
         }
 
         FsmStateAction action = state.Actions[ov.ActionIndex];
-        FieldInfo? field = action.GetType().GetField(ov.FieldName, BindingFlags.Instance | BindingFlags.Public);
+        FieldInfo? field = action.GetType().GetField(ov.FieldName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         if (field == null)
         {
             return;
         }
 
-        TryAssignFieldValue(action, field, field.GetValue(action), ov.StringValue);
+        object? currentValue = field.GetValue(action);
+
+        if (ov.ArrayIndex >= 0)
+        {
+            if (currentValue is Array array && ov.ArrayIndex < array.Length && array.GetValue(ov.ArrayIndex) is NamedVariable nv)
+            {
+                AssignNamedVariable(nv, ov.StringValue);
+            }
+
+            return;
+        }
+
+        TryAssignFieldValue(action, field, currentValue, ov.StringValue);
     }
 
     // ---- States ----
+
+    // Applies to every live instance sharing fsmKey - the graph overlay's right-click-to-disable entry
+    // point, mirroring the SetVariable/SetActionField "apply to every live instance" shape.
+    public void DisableState(string fsmKey, string stateName)
+    {
+        bool wasAlreadyDisabled = _pristine.TryGetValue(fsmKey, out FsmPristineSnapshot? existing) && existing.NeuteredActionIndices.ContainsKey(stateName);
+
+        foreach (Fsm fsm in GetLiveInstances(fsmKey))
+        {
+            DisableState(fsmKey, fsm, stateName);
+        }
+
+        if (!wasAlreadyDisabled)
+        {
+            PushUndo(fsmKey, () => EnableState(fsmKey, stateName));
+        }
+    }
+
+    // Undoes one state's DisableState without resetting every other edit this session - re-enables the
+    // actions DisableState neutered and removes the exit action it injected, on every live instance, then
+    // clears this state's own bookkeeping once.
+    public void EnableState(string fsmKey, string stateName)
+    {
+        if (!_pristine.TryGetValue(fsmKey, out FsmPristineSnapshot? snapshot) || !snapshot.NeuteredActionIndices.TryGetValue(stateName, out List<int>? neuteredIndices))
+        {
+            return;
+        }
+
+        foreach (Fsm fsm in GetLiveInstances(fsmKey))
+        {
+            FsmState? state = fsm.GetState(stateName);
+            if (state == null)
+            {
+                continue;
+            }
+
+            foreach (int i in neuteredIndices)
+            {
+                if (i >= 0 && i < state.Actions.Length)
+                {
+                    state.Actions[i].Enabled = true;
+                }
+            }
+
+            FsmStateAction? injectedExitAction = state.Actions.FirstOrDefault(a => a is SendExitEventAction);
+            if (injectedExitAction != null)
+            {
+                int idx = Array.IndexOf(state.Actions, injectedExitAction);
+                if (idx >= 0)
+                {
+                    state.RemoveAction(idx);
+                }
+
+                snapshot.InjectedExitActions.Remove(injectedExitAction);
+            }
+        }
+
+        snapshot.NeuteredActionIndices.Remove(stateName);
+
+        if (_activeEdits.TryGetValue(fsmKey, out FsmEditSet? active))
+        {
+            active.DisabledStates.Remove(stateName);
+        }
+
+        PushUndo(fsmKey, () => DisableState(fsmKey, stateName));
+        BumpEditGeneration();
+    }
 
     public void DisableState(string fsmKey, Fsm fsm, string stateName)
     {
@@ -281,12 +767,18 @@ internal sealed class FsmEditManager
         {
             active.DisabledStates.Add(stateName);
         }
+
+        BumpEditGeneration();
     }
 
     // Priority order requested: a real CANCEL/FINISHED/NEXT transition (state-level or global) on the state
     // being neutered, else the last FsmEvent-valued field found while scanning the state's own actions in
     // original order (the same reflection walk FsmDataCollector.CollectActions uses for read-only display).
-    private static FsmEvent? FindExitEvent(FsmState state)
+    // Internal (not private) so the graph overlay can ask "which one transition stays reachable" for a
+    // disabled state, using this exact same priority - re-running this against an already-disabled state is
+    // safe/idempotent, since SendExitEventAction stores its event in a private field the reflection walk
+    // below never sees.
+    internal static FsmEvent? FindExitEvent(FsmState state)
     {
         foreach (string candidate in ExitEventPriority)
         {
@@ -349,6 +841,8 @@ internal sealed class FsmEditManager
             return;
         }
 
+        string newEventName = EffectiveNewEventName(retarget);
+
         FsmPristineSnapshot snapshot = GetOrCreateSnapshot(fsmKey);
         if (!snapshot.OriginalValues.TransitionRetargets.Exists(t =>
                 t.StateName == retarget.StateName && t.EventName == retarget.EventName))
@@ -356,13 +850,15 @@ internal sealed class FsmEditManager
             bool disabling = retarget.NewToState == TransitionRetarget.DisabledMarker;
 
             // The instructions that would put this transition back exactly as found: locate it at wherever
-            // this edit is about to send it (NewStateName - or, for a pure disable, nowhere ever moved it,
-            // so its own StateName), and relocate/retarget it back to its original origin and destination.
+            // this edit is about to send it (NewStateName/newEventName - or, for a pure disable, nowhere
+            // ever moved it, so its own StateName/EventName), and relocate/retarget it back to its original
+            // origin, event, and destination.
             snapshot.OriginalValues.TransitionRetargets.Add(new TransitionRetarget
             {
                 StateName = disabling ? retarget.StateName : retarget.NewStateName,
-                EventName = retarget.EventName,
+                EventName = disabling ? retarget.EventName : newEventName,
                 NewStateName = retarget.StateName,
+                NewEventName = retarget.EventName,
                 NewToState = transition.ToState,
             });
         }
@@ -370,6 +866,7 @@ internal sealed class FsmEditManager
         FsmEditSet active = GetOrCreateActiveEditSet(fsmKey);
         active.TransitionRetargets.RemoveAll(t => t.StateName == retarget.StateName && t.EventName == retarget.EventName);
         active.TransitionRetargets.Add(retarget);
+        BumpEditGeneration();
 
         if (retarget.NewToState == TransitionRetarget.DisabledMarker)
         {
@@ -377,26 +874,182 @@ internal sealed class FsmEditManager
             return;
         }
 
-        RelocateTransition(fsm, retarget.StateName, retarget.NewStateName, retarget.EventName, retarget.NewToState);
+        RelocateTransition(fsm, retarget.StateName, retarget.NewStateName, retarget.EventName, newEventName, retarget.NewToState);
     }
 
-    // Used only when replaying a pristine snapshot, whose StateName/NewStateName/NewToState already encode
-    // "restore to here" directly (see the capture step above), so this needs no lookup/existence check the
-    // way ApplyTransitionRetarget does for new edits.
+    // Used only when replaying a pristine snapshot, whose StateName/NewStateName/EventName/NewEventName/
+    // NewToState already encode "restore to here" directly (see the capture step above), so this needs no
+    // lookup/existence check the way ApplyTransitionRetarget does for new edits.
     private static void RestoreTransition(Fsm fsm, TransitionRetarget original) =>
-        RelocateTransition(fsm, original.StateName, original.NewStateName, original.EventName, original.NewToState);
+        RelocateTransition(fsm, original.StateName, original.NewStateName, original.EventName, EffectiveNewEventName(original), original.NewToState);
 
-    // Moves a transition from one origin ("" = global) to another, retargeting/creating it at the new
-    // origin either way. A relocation stays in effect until something (only ever RestoreTransition today)
-    // moves it back - PlayMaker has no notion of a transition remembering where it "really" belongs.
-    private static void RelocateTransition(Fsm fsm, string fromStateName, string toStateName, string eventName, string newToState)
+    // Moves a transition from one origin/event ("" state = global) to another, retargeting/creating it at
+    // the new origin/event either way. A relocation stays in effect until something (only ever
+    // RestoreTransition today) moves it back - PlayMaker has no notion of a transition remembering where it
+    // "really" belongs.
+    private static void RelocateTransition(Fsm fsm, string fromStateName, string toStateName, string fromEventName, string toEventName, string newToState)
     {
-        if (fromStateName != toStateName)
+        if (fromStateName != toStateName || fromEventName != toEventName)
         {
-            RemoveTransitionAt(fsm, fromStateName, eventName);
+            RemoveTransitionAt(fsm, fromStateName, fromEventName);
         }
 
-        AddOrChangeTransitionAt(fsm, toStateName, eventName, newToState);
+        AddOrChangeTransitionAt(fsm, toStateName, toEventName, newToState);
+    }
+
+    // Blank NewEventName means "same event as before this edit" - every existing caller (plain ToState
+    // retarget, relocate, disable) leaves NewEventName unset; only RetargetTransitionEvent's drag-onto-an-
+    // existing-event-node rebind ever sets it to something different from EventName. Internal (not
+    // private) so the graph overlay can reconcile its own (frozen at scene-load) snapshot rows against
+    // the active edit set's current effective event name when rendering - see FsmGraphOverlay's
+    // RebuildNodeLayoutCache.
+    internal static string EffectiveNewEventName(TransitionRetarget retarget) =>
+        string.IsNullOrEmpty(retarget.NewEventName) ? retarget.EventName : retarget.NewEventName;
+
+    // Retargets a transition's ToState only, applied to every live instance sharing fsmKey - the graph
+    // overlay's drag-an-endpoint-onto-a-different-state entry point. stateName == "" targets a global
+    // transition, matching the convention used throughout this file.
+    public void RetargetTransitionToState(string fsmKey, string stateName, string eventName, string newToState)
+    {
+        string? previousToState = GetCurrentTransitionToState(fsmKey, stateName, eventName);
+
+        var retarget = new TransitionRetarget
+        {
+            StateName = stateName,
+            EventName = eventName,
+            NewStateName = stateName,
+            NewToState = newToState,
+        };
+
+        foreach (Fsm fsm in GetLiveInstances(fsmKey))
+        {
+            ApplyTransitionRetarget(fsmKey, fsm, retarget);
+        }
+
+        if (previousToState != null)
+        {
+            PushUndo(fsmKey, () => RetargetTransitionToState(fsmKey, stateName, eventName, previousToState));
+        }
+    }
+
+    private string? GetCurrentTransitionToState(string fsmKey, string stateName, string eventName)
+    {
+        foreach (Fsm fsm in GetLiveInstances(fsmKey))
+        {
+            FsmTransition? transition = string.IsNullOrEmpty(stateName)
+                ? fsm.GetGlobalTransition(eventName)
+                : fsm.GetTransition(stateName, eventName);
+            if (transition != null)
+            {
+                return transition.ToState;
+            }
+        }
+
+        return null;
+    }
+
+    // Applies to every live instance sharing fsmKey - the graph overlay's right-click-to-disable entry
+    // point for a single transition (state+event), as opposed to DisableState's whole-state neutering.
+    // stateName == "" targets a global transition, matching the convention used throughout this file.
+    public void DisableTransition(string fsmKey, string stateName, string eventName)
+    {
+        bool wasAlreadyDisabled = _pristine.TryGetValue(fsmKey, out FsmPristineSnapshot? existing)
+            && existing.OriginalValues.TransitionRetargets.Exists(t => t.NewStateName == stateName && EffectiveNewEventName(t) == eventName);
+
+        var retarget = new TransitionRetarget
+        {
+            StateName = stateName,
+            EventName = eventName,
+            NewStateName = stateName,
+            NewToState = TransitionRetarget.DisabledMarker,
+        };
+
+        foreach (Fsm fsm in GetLiveInstances(fsmKey))
+        {
+            ApplyTransitionRetarget(fsmKey, fsm, retarget);
+        }
+
+        if (!wasAlreadyDisabled)
+        {
+            PushUndo(fsmKey, () => EnableTransition(fsmKey, stateName, eventName));
+        }
+    }
+
+    // Undoes one transition's DisableTransition without resetting every other edit this session - looks up
+    // the pristine entry captured when it was disabled and restores from it, then drops the bookkeeping for
+    // just this one transition.
+    public void EnableTransition(string fsmKey, string stateName, string eventName)
+    {
+        if (!_pristine.TryGetValue(fsmKey, out FsmPristineSnapshot? snapshot))
+        {
+            return;
+        }
+
+        TransitionRetarget? original = snapshot.OriginalValues.TransitionRetargets.Find(t =>
+            t.NewStateName == stateName && EffectiveNewEventName(t) == eventName);
+        if (original == null)
+        {
+            return;
+        }
+
+        foreach (Fsm fsm in GetLiveInstances(fsmKey))
+        {
+            RestoreTransition(fsm, original);
+        }
+
+        snapshot.OriginalValues.TransitionRetargets.Remove(original);
+
+        if (_activeEdits.TryGetValue(fsmKey, out FsmEditSet? active))
+        {
+            active.TransitionRetargets.RemoveAll(t => t.StateName == stateName && t.EventName == eventName);
+        }
+
+        PushUndo(fsmKey, () => DisableTransition(fsmKey, stateName, eventName));
+        BumpEditGeneration();
+    }
+
+    // Drag-a-transition-endpoint-onto-an-existing-event-node rebind: relocates the transition identified by
+    // (stateName, eventName) to originate from newOwnerStateName ("" = global) and fire under newEventName
+    // instead, keeping its current destination (toState - read by the caller from the live transition being
+    // dragged, since every live instance is expected to share the same ToState for a given FSM template).
+    // Whatever transition previously occupied the (newOwnerStateName, newEventName) slot is deleted first,
+    // since PlayMaker only allows one transition per event on a given state/global list.
+    public void RetargetTransitionEvent(string fsmKey, string stateName, string eventName, string newOwnerStateName, string newEventName, string toState)
+    {
+        bool isSameSlot = newOwnerStateName == stateName && newEventName == eventName;
+
+        var retarget = new TransitionRetarget
+        {
+            StateName = stateName,
+            EventName = eventName,
+            NewStateName = newOwnerStateName,
+            NewEventName = newEventName,
+            NewToState = toState,
+        };
+
+        foreach (Fsm fsm in GetLiveInstances(fsmKey))
+        {
+            if (!isSameSlot)
+            {
+                FsmTransition? conflicting = string.IsNullOrEmpty(newOwnerStateName)
+                    ? fsm.GetGlobalTransition(newEventName)
+                    : fsm.GetTransition(newOwnerStateName, newEventName);
+                if (conflicting != null)
+                {
+                    RemoveTransitionAt(fsm, newOwnerStateName, newEventName);
+                }
+            }
+
+            ApplyTransitionRetarget(fsmKey, fsm, retarget);
+        }
+
+        // Note: if a conflicting transition occupied (newOwnerStateName, newEventName) and got deleted
+        // above, this undo can't bring it back - it only knows how to move the dragged transition back
+        // to its own prior slot, not resurrect a different one that was overwritten.
+        if (!isSameSlot)
+        {
+            PushUndo(fsmKey, () => RetargetTransitionEvent(fsmKey, newOwnerStateName, newEventName, stateName, eventName, toState));
+        }
     }
 
     private static void RemoveTransitionAt(Fsm fsm, string stateName, string eventName)
@@ -477,6 +1130,7 @@ internal sealed class FsmEditManager
         FsmEditSet active = GetOrCreateActiveEditSet(fsmKey);
         active.SequencerOverrides.RemoveAll(s => s.StateName == seq.StateName);
         active.SequencerOverrides.Add(seq);
+        BumpEditGeneration();
     }
 
     // ---- Snapshot plumbing ----
@@ -510,10 +1164,22 @@ internal sealed class FsmEditManager
             foreach (VariableOverride ov in snapshot.OriginalValues.VariableOverrides)
             {
                 NamedVariable? variable = fsm.Variables.FindVariable(ov.Name);
-                if (variable != null)
+                if (variable == null)
                 {
-                    AssignNamedVariable(variable, ov.StringValue);
+                    continue;
                 }
+
+                if (ov.ArrayIndex >= 0)
+                {
+                    if (variable is FsmArray array && ov.ArrayIndex < array.Length)
+                    {
+                        AssignArrayElement(array, ov.ArrayIndex, ov.StringValue);
+                    }
+
+                    continue;
+                }
+
+                AssignNamedVariable(variable, ov.StringValue);
             }
 
             foreach (ActionFieldOverride ov in snapshot.OriginalValues.ActionFieldOverrides)
@@ -573,7 +1239,10 @@ internal sealed class FsmEditManager
     // Every value round-trips as an invariant-culture string (see FsmEditModels) since JsonUtility can't
     // model a polymorphic value field.
 
-    private static bool TryFormatValue(object? value, out string formatted)
+    // Internal (not private) so FsmActiveStatePanel can reuse this exact switch as the single source of
+    // truth for both "is this value editable" and "what string to display/prefill" - avoids the UI
+    // re-implementing its own parallel type check that could drift out of sync with this one.
+    internal static bool TryFormatValue(object? value, out string formatted)
     {
         switch (value)
         {

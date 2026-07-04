@@ -16,6 +16,16 @@ internal static class FsmDrilldownHierarchy
         for (int i = 0; i < snapshot.Fsms.Count; i++)
         {
             FsmInfo fsm = snapshot.Fsms[i];
+
+            // fsm.Component can already be destroyed (Unity fake-null) if this snapshot is being
+            // rebuilt from a stale FsmSnapshot mid scene-transition, before RefreshSnapshot has
+            // replaced it with a freshly-collected one - accessing .gameObject on it throws
+            // NullReferenceException (see the identical guard in FsmGraphOverlay.ResolveFsmInfo).
+            if (fsm.Component == null)
+            {
+                continue;
+            }
+
             GameObject gameObject = fsm.Component.gameObject;
             string sceneName = gameObject.scene.name;
 

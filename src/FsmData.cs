@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using HutongGames.PlayMaker;
 
 namespace FsmMaster;
@@ -40,6 +41,17 @@ internal sealed class FsmActionFieldInfo
 {
     public string FieldName { get; set; } = "";
     public object? FieldValue { get; set; }
+
+    // The reflection handle CollectActions already had in hand when it read FieldValue - carried here
+    // so a caller (FsmActiveStatePanel) can re-read a raw (non-NamedVariable) field's current value
+    // after an edit without re-deriving GetType().GetField(name) itself.
+    public FieldInfo Field { get; set; } = null!;
+
+    // True for a field PlayMaker itself never serializes/shows in its editor (private runtime
+    // bookkeeping like Wait's startTime/timer) - set from !FieldInfo.IsPublic in FsmDataCollector.
+    // Purely a display hint for FsmActiveStatePanel; read/write/tracking treat these identically to
+    // any other field.
+    public bool IsHidden { get; set; }
 }
 
 internal sealed class FsmTransitionInfo

@@ -1,14 +1,21 @@
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.UI;
 
 namespace FsmMaster;
 
-// Vertical scroll viewport - concept and clip-rect math ported from Silksong.DebugMod's
-// CanvasScrollView (agent-context/Silksong.DebugMod-main/UI/Canvas/CanvasScrollView.cs). This node
-// itself is the clipped viewport; SetContent supplies the single child panel whose rows a caller
-// adds to, and scrolling moves that child's LocalPosition.y within the viewport - clamped so content
-// never scrolls past its own bounds. Mouse-wheel scrolling polls Input.mouseScrollDelta directly
-// (matching the reference), independent of EventSystem/GraphicRaycaster - see FsmGraphOverlay's
+// Vertical scroll viewport - concept ported from Silksong.DebugMod's CanvasScrollView
+// (agent-context/Silksong.DebugMod-main/UI/Canvas/CanvasScrollView.cs), but clipping uses a real
+// Unity RectMask2D rather than CanvasNode's own hand-rolled CanvasRenderer.EnableRectClipping (which
+// DebugMod's reference also uses). That hand-rolled clip is rendering-only - it has no effect on
+// GraphicRaycaster hit-testing - so content scrolled out of view stayed fully clickable at its real,
+// moved RectTransform position, silently swallowing clicks meant for whatever it happened to overlap
+// (e.g. rows scrolled above the viewport overlapping the button row above it). RectMask2D clips both
+// rendering and raycasts for its whole subtree, so content correctly stops being interactive once it's
+// actually scrolled out of view. SetContent supplies the single child panel whose rows a caller adds
+// to, and scrolling moves that child's LocalPosition.y within the viewport - clamped so content never
+// scrolls past its own bounds. Mouse-wheel scrolling polls Input.mouseScrollDelta directly (matching
+// the reference), independent of EventSystem/GraphicRaycaster - see FsmGraphOverlay's
 // interactiveRect/IsPointerOverGameObject gating, which exists precisely so the graph canvas's own
 // scroll-wheel zoom doesn't also fire while the pointer is over a scroll view like this one.
 internal sealed class CanvasScrollView : CanvasNode
@@ -47,14 +54,10 @@ internal sealed class CanvasScrollView : CanvasNode
         }
     }
 
-    protected override bool GetClipRect(out Rect clipRect)
+    public override void Build(Transform? rootParent = null)
     {
-        clipRect = new Rect(
-            Position.x - Screen.width / 2f,
-            Screen.height / 2f - Position.y - Size.y,
-            Size.x,
-            Size.y);
-        return true;
+        base.Build(rootParent);
+        GameObject!.AddComponent<RectMask2D>();
     }
 
     private void Poll()
@@ -90,6 +93,35 @@ internal sealed class CanvasScrollView : CanvasNode
 
         percentage = Mathf.Clamp01(percentage);
         _content.LocalPosition = new Vector2(_content.LocalPosition.x, -percentage * GetScrollableHeight());
+    }
+
+    // Scrolls just enough to bring the content-space range [y, y + height) fully into the viewport -
+    // a no-op if it's already visible, unlike SetScrollPercentage which always jumps to an absolute
+    // position. Used to bring a specific row (e.g. an action picked via the graph overlay's transition
+    // click-through) into view without fighting a scroll position the user may have set deliberately.
+    public void ScrollToShow(float y, float height)
+    {
+        if (_content == null)
+        {
+            return;
+        }
+
+        float scrollableHeight = GetScrollableHeight();
+        float currentScroll = -_content.LocalPosition.y;
+        float viewportHeight = Size.y;
+
+        float targetScroll = currentScroll;
+        if (y < currentScroll)
+        {
+            targetScroll = y;
+        }
+        else if (y + height > currentScroll + viewportHeight)
+        {
+            targetScroll = y + height - viewportHeight;
+        }
+
+        targetScroll = Mathf.Clamp(targetScroll, 0f, scrollableHeight);
+        _content.LocalPosition = new Vector2(_content.LocalPosition.x, -targetScroll);
     }
 
     public float GetScrollableHeight() => Mathf.Max(0f, (_content?.Size.y ?? 0f) - Size.y);

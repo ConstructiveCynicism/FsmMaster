@@ -37,6 +37,10 @@ internal sealed class VariableOverride
 {
     public string VariableType = "";
     public string Name = "";
+
+    // -1 = the whole variable's value (the original, non-array shape of this override); >= 0 = this
+    // one element of an Array-typed variable, leaving every other element untouched.
+    public int ArrayIndex = -1;
     public string StringValue = "";
 }
 
@@ -47,6 +51,11 @@ internal sealed class ActionFieldOverride
     public int ActionIndex;
     public string ExpectedActionTypeName = "";
     public string FieldName = "";
+
+    // -1 = the whole field's value; >= 0 = this one element of a Fsm<Type>[]-typed field (PlayMaker
+    // action fields expose arrays this way - see FsmEditManager's array-element handling - never as a
+    // raw primitive array or an Array-typed FsmVariable, which is a distinct, variable-only shape).
+    public int ArrayIndex = -1;
     public string StringValue = "";
 }
 
@@ -67,6 +76,12 @@ internal sealed class TransitionRetarget
     public string NewStateName = ""; // where it should originate after this edit ("" = global); same as
                                       // StateName for a pure retarget/disable that doesn't relocate it
     public string NewToState = "";
+
+    // Which event this transition fires under after this edit - blank means "same as EventName"
+    // (a plain ToState retarget/relocate/disable, never touching the event identity). Only a
+    // drag-onto-an-existing-event-node rebind (see FsmEditManager.RetargetTransitionEvent) ever sets
+    // this to something different from EventName.
+    public string NewEventName = "";
 }
 
 [Serializable]

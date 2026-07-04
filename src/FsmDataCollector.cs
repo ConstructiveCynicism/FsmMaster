@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using HutongGames.PlayMaker;
 
 namespace FsmMaster;
@@ -63,14 +64,27 @@ internal static class FsmDataCollector
             Type actionType = action.GetType();
             var fields = new List<FsmActionFieldInfo>();
 
-            foreach (FieldInfo field in actionType.GetFields(BindingFlags.Instance | BindingFlags.Public))
+            // NonPublic alongside Public surfaces an action's private runtime bookkeeping fields
+            // (e.g. Wait's startTime/timer, which PlayMaker itself never serializes or shows in its
+            // own editor) so they can be inspected/tracked/edited the same as any configured
+            // parameter - see FsmActionFieldInfo.IsHidden.
+            foreach (FieldInfo field in actionType.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
             {
                 if (field.DeclaringType == typeof(FsmStateAction))
                 {
                     continue;
                 }
 
-                fields.Add(new FsmActionFieldInfo { FieldName = field.Name, FieldValue = field.GetValue(action) });
+                // Skips auto-property backing fields (<Name>k__BackingField) that NonPublic would
+                // otherwise surface under their ugly compiler-generated name - PlayMaker actions are
+                // plain fields almost universally, but this guards against the rare action written
+                // with a private auto-property instead.
+                if (field.IsDefined(typeof(CompilerGeneratedAttribute), false))
+                {
+                    continue;
+                }
+
+                fields.Add(new FsmActionFieldInfo { FieldName = field.Name, FieldValue = field.GetValue(action), Field = field, IsHidden = !field.IsPublic });
             }
 
             result.Add(new FsmActionInfo { Action = action, ActionType = actionType, Fields = fields });

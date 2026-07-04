@@ -10,15 +10,18 @@ namespace FsmMaster;
 // class (not a generic reusable dialog base) since this mod only has one such popup; concept modeled
 // on Silksong.DebugMod's CanvasDialog show/hide/outside-click pattern
 // (agent-context/Silksong.DebugMod-main/UI/Canvas/CanvasDialog.cs is the closest existing pattern to
-// this), reusing FsmDrilldownHierarchy for the actual scene/object/fsm grouping. No windowing/
-// virtualization of the row list (unlike the old IMGUI list panel) - scene/object/fsm counts are
-// small enough in practice that this isn't needed for a first pass.
+// this), reusing FsmDrilldownHierarchy for the actual scene/object/fsm grouping. Every row for the
+// current level is still built up front rather than windowed/virtualized (unlike the old IMGUI list
+// panel) - scene/object/fsm counts are small enough in practice that building them all is cheap - but
+// the row list itself scrolls within a capped-height viewport (see RebuildRows) rather than growing
+// this popup past whatever room is left inside the parent panel.
 internal sealed class FsmOpenDropdown : CanvasPanel
 {
     private const float Width = 260f;
     private const float RowHeight = 22f;
     private const float HeaderHeight = 22f;
     private const float BackButtonWidth = 70f;
+    private const float ScrollbarWidth = 10f;
 
     private enum Level
     {
@@ -34,6 +37,8 @@ internal sealed class FsmOpenDropdown : CanvasPanel
 
     private readonly CanvasButton _backButton;
     private readonly CanvasText _headerText;
+    private readonly CanvasScrollView _rowsScrollView;
+    private readonly CanvasScrollbar _rowsScrollbar;
     private readonly CanvasPanel _rowsContainer;
     private readonly List<CanvasButton> _rowButtons = new();
 
@@ -67,10 +72,25 @@ internal sealed class FsmOpenDropdown : CanvasPanel
         _headerText.Alignment = TextAnchor.MiddleLeft;
         _headerText.Overflow = HorizontalWrapMode.Overflow;
 
-        _rowsContainer = Add(new CanvasPanel("Rows"));
-        _rowsContainer.LocalPosition = new Vector2(0f, HeaderHeight);
+        // Rows sit in a scrollable viewport rather than growing this panel's own Size without bound -
+        // the popup is anchored inside FsmRightPanel, which the user can resize down to a small
+        // MinPanelHeight, and a scene/object/FSM list can easily be taller than whatever room is left
+        // below the anchor button (see the height clamp in RebuildRows). Width always reserves
+        // ScrollbarWidth regardless of whether the scrollbar ends up visible, matching
+        // FsmMonitorPanel/FsmActiveStatePanel's own scroll view + scrollbar pairing, rather than
+        // reflowing row width whenever the row count crosses the overflow threshold.
+        _rowsScrollView = Add(new CanvasScrollView("RowsScroll"));
+        _rowsScrollView.LocalPosition = new Vector2(0f, HeaderHeight);
+        _rowsContainer = _rowsScrollView.SetContent(new CanvasPanel("Rows"));
+
+        _rowsScrollbar = Add(new CanvasScrollbar("RowsScrollbar", ui) { ScrollView = _rowsScrollView });
 
         OnUpdate += CloseOnOutsideClick;
+        // Mirrors FsmActiveStatePanel/FsmMonitorPanel's own pattern: the scrollbar can't decide its own
+        // visibility (its OnUpdate only runs once already active - see CanvasScrollbar.ShouldBeVisible),
+        // so the owning panel's OnUpdate (which always runs while the dropdown itself is shown) polls it
+        // every frame instead.
+        OnUpdate += () => _rowsScrollbar.ActiveSelf = _rowsScrollbar.ShouldBeVisible;
     }
 
     public void Toggle()
@@ -96,6 +116,12 @@ internal sealed class FsmOpenDropdown : CanvasPanel
 
         RebuildRows();
         ActiveSelf = true;
+
+        // uGUI/Canvas render (and raycast-hit) order follows sibling index within a shared parent -
+        // this popup is already the last child added to FsmRightPanel (see its constructor), but
+        // re-asserting SetAsLastSibling here on every open is a cheap, explicit guarantee that it
+        // stays the topmost-rendered item even if a future change adds more siblings afterward.
+        transform!.SetAsLastSibling();
     }
 
     private void Hide()
@@ -149,12 +175,14 @@ internal sealed class FsmOpenDropdown : CanvasPanel
         _backButton.ActiveSelf = _level != Level.Scenes;
         _headerText.Text = BuildHeaderText();
 
+        float rowsWidth = Width - ScrollbarWidth;
+
         float y = 0f;
         foreach ((string label, Action onClick) in BuildRowList())
         {
             CanvasButton button = _rowsContainer.Add(new CanvasButton($"Row{_rowButtons.Count}", _ui));
             button.LocalPosition = new Vector2(0f, y);
-            button.Size = new Vector2(Width, RowHeight);
+            button.Size = new Vector2(rowsWidth, RowHeight);
             button.Text.Text = label;
             button.Text.Alignment = TextAnchor.MiddleLeft;
             button.Text.Overflow = HorizontalWrapMode.Overflow;
@@ -165,7 +193,25 @@ internal sealed class FsmOpenDropdown : CanvasPanel
             _rowButtons.Add(button);
         }
 
-        Size = new Vector2(Width, HeaderHeight + Mathf.Max(RowHeight, y));
+        _rowsContainer.Size = new Vector2(rowsWidth, Mathf.Max(RowHeight, y));
+
+        // Caps the popup's own total height at whatever room is actually left below its anchor
+        // position inside the parent panel (FsmRightPanel, which the user can freely resize down to a
+        // small MinPanelHeight) - without this, a scene/object/FSM list long enough to need more room
+        // than that just kept growing the popup straight past the panel's own bottom edge instead of
+        // scrolling within it. Falls back to the unclamped natural height if this ever runs with no
+        // parent yet (shouldn't happen in practice - FsmRightPanel always Add()s this before Show() can
+        // run).
+        float desiredHeight = HeaderHeight + _rowsContainer.Size.y;
+        float maxHeight = Parent != null ? Mathf.Max(HeaderHeight + RowHeight, Parent.Size.y - LocalPosition.y) : desiredHeight;
+        float totalHeight = Mathf.Min(desiredHeight, maxHeight);
+
+        Size = new Vector2(Width, totalHeight);
+
+        float rowsViewportHeight = Mathf.Max(0f, totalHeight - HeaderHeight);
+        _rowsScrollView.Size = new Vector2(rowsWidth, rowsViewportHeight);
+        _rowsScrollbar.LocalPosition = new Vector2(rowsWidth, HeaderHeight);
+        _rowsScrollbar.Size = new Vector2(ScrollbarWidth, rowsViewportHeight);
     }
 
     private List<(string Label, Action OnClick)> BuildRowList()

@@ -6,13 +6,14 @@ using UnityEngine;
 
 namespace FsmMaster;
 
-// Persists FSM edits as JSON, one file per (scene, FsmKey) pair under a per-scene subfolder - not one file
-// per scene holding a list of every FsmKey's edits. Uses UnityEngine.JsonUtility rather than a third-party
-// JSON library, since JsonUtility ships inside UnityEngine.Modules (already a dependency here) and needs
-// nothing new added to the fixed dependency list in CLAUDE.md. Silksong.DebugMod follows the same
-// JsonUtility-based approach and the same Application.persistentDataPath-rooted storage convention
-// (agent-context/Silksong.DebugMod-main/DebugMod.cs, ModBaseDirectory;
-// agent-context/Silksong.DebugMod-main/SaveStates/SaveStateManager.cs).
+// Persists FSM edits as JSON, one file per (scene, FsmKey, save name) triple under a per-scene, per-FsmKey
+// subfolder - so a single FsmKey can hold several independently named configurations (e.g. "aggressive" vs
+// "passive" variants of the same enemy FSM) rather than exactly one save overwriting itself every time. Uses
+// UnityEngine.JsonUtility rather than a third-party JSON library, since JsonUtility ships inside
+// UnityEngine.Modules (already a dependency here) and needs nothing new added to the fixed dependency list
+// in CLAUDE.md. Silksong.DebugMod follows the same JsonUtility-based approach and the same
+// Application.persistentDataPath-rooted storage convention (agent-context/Silksong.DebugMod-main/DebugMod.cs,
+// ModBaseDirectory; agent-context/Silksong.DebugMod-main/SaveStates/SaveStateManager.cs).
 //
 // Confirmed in-game: JsonUtility silently drops a List<T> field entirely (not even an empty "[]") whenever
 // T is a custom class, regardless of nesting depth or whether the list is populated - List<string> serializes
@@ -37,12 +38,15 @@ internal static class FsmSaveDataStore
     private static string GetSceneDirectory(string sceneName) =>
         Path.Combine(DataDirectory, SanitizeForFileName(sceneName));
 
-    public static string GetFilePath(string sceneName, string fsmKey) =>
-        Path.Combine(GetSceneDirectory(sceneName), $"{SanitizeForFileName(fsmKey)}.json");
+    private static string GetFsmDirectory(string sceneName, string fsmKey) =>
+        Path.Combine(GetSceneDirectory(sceneName), SanitizeForFileName(fsmKey));
 
-    public static FsmEditSet? Load(string sceneName, string fsmKey)
+    public static string GetFilePath(string sceneName, string fsmKey, string saveName) =>
+        Path.Combine(GetFsmDirectory(sceneName, fsmKey), $"{SanitizeForFileName(saveName)}.json");
+
+    public static FsmEditSet? Load(string sceneName, string fsmKey, string saveName)
     {
-        string filePath = GetFilePath(sceneName, fsmKey);
+        string filePath = GetFilePath(sceneName, fsmKey, saveName);
         if (!File.Exists(filePath))
         {
             return null;
@@ -51,32 +55,138 @@ internal static class FsmSaveDataStore
         return FromWire(JsonUtility.FromJson<FsmEditSetWire>(File.ReadAllText(filePath)));
     }
 
-    // Every FsmEditSet persisted for a scene, discovered by listing that scene's subfolder rather than a
-    // separate manifest, so the plugin can reapply all of them on scene load without needing to know which
-    // FsmKeys exist ahead of time.
-    public static List<FsmEditSet> LoadAllForScene(string sceneName)
+    // Every save name that exists for one FsmKey in a scene, discovered by listing that FsmKey's own
+    // subfolder rather than a separate manifest - this is what populates the Load dialog's row list.
+    // Sorted case-insensitively so the list order doesn't depend on filesystem enumeration order.
+    public static List<string> ListSaveNames(string sceneName, string fsmKey)
     {
-        var result = new List<FsmEditSet>();
-        string sceneDirectory = GetSceneDirectory(sceneName);
-        if (!Directory.Exists(sceneDirectory))
+        var result = new List<string>();
+        string fsmDirectory = GetFsmDirectory(sceneName, fsmKey);
+        if (!Directory.Exists(fsmDirectory))
         {
             return result;
         }
 
-        foreach (string filePath in Directory.EnumerateFiles(sceneDirectory, "*.json"))
+        foreach (string filePath in Directory.EnumerateFiles(fsmDirectory, "*.json"))
         {
-            FsmEditSetWire? wire = JsonUtility.FromJson<FsmEditSetWire>(File.ReadAllText(filePath));
-            if (wire != null)
+            result.Add(Path.GetFileNameWithoutExtension(filePath));
+        }
+
+        result.Sort(StringComparer.OrdinalIgnoreCase);
+        return result;
+    }
+
+    // Returns the JSON text that was written, so a caller can log/inspect exactly what got persisted.
+    public static string Save(string sceneName, string saveName, FsmEditSet edits)
+    {
+        string fsmDirectory = GetFsmDirectory(sceneName, edits.FsmKey);
+        if (!Directory.Exists(fsmDirectory))
+        {
+            Directory.CreateDirectory(fsmDirectory);
+        }
+
+        string json = JsonUtility.ToJson(ToWire(edits), prettyPrint: true);
+        File.WriteAllText(GetFilePath(sceneName, edits.FsmKey, saveName), json);
+        return json;
+    }
+
+    // Deletes every named save for one FsmKey in a scene, plus its remembered last-chosen entry (used by
+    // FsmMasterPlugin.ResetFsm) - so the next time this scene loads, this FsmKey comes up unmodified
+    // instead of having any of its saved configurations reapplied to it.
+    public static void ClearAllSavesForFsm(string sceneName, string fsmKey)
+    {
+        string fsmDirectory = GetFsmDirectory(sceneName, fsmKey);
+        if (Directory.Exists(fsmDirectory))
+        {
+            Directory.Delete(fsmDirectory, recursive: true);
+        }
+
+        Dictionary<string, string> manifest = LoadLastChosenManifest(sceneName);
+        if (manifest.Remove(fsmKey))
+        {
+            SaveLastChosenManifest(sceneName, manifest);
+        }
+    }
+
+    // Every FsmEditSet this scene should auto-reapply on load - one per fsmKey in fsmKeysPresent that has
+    // a remembered last-chosen save name (see SetLastChosenSaveName), skipping any fsmKey with no such
+    // choice recorded rather than guessing which of its (possibly several) named saves to use.
+    public static List<FsmEditSet> LoadLastChosenForScene(string sceneName, IEnumerable<string> fsmKeysPresent)
+    {
+        var result = new List<FsmEditSet>();
+        Dictionary<string, string> manifest = LoadLastChosenManifest(sceneName);
+
+        foreach (string fsmKey in fsmKeysPresent)
+        {
+            if (!manifest.TryGetValue(fsmKey, out string? saveName))
             {
-                result.Add(FromWire(wire));
+                continue;
+            }
+
+            FsmEditSet? editSet = Load(sceneName, fsmKey, saveName);
+            if (editSet != null)
+            {
+                result.Add(editSet);
             }
         }
 
         return result;
     }
 
-    // Returns the JSON text that was written, so a caller can log/inspect exactly what got persisted.
-    public static string Save(string sceneName, FsmEditSet edits)
+    public static string? GetLastChosenSaveName(string sceneName, string fsmKey) =>
+        LoadLastChosenManifest(sceneName).TryGetValue(fsmKey, out string? saveName) ? saveName : null;
+
+    // Recorded whenever the user explicitly saves or loads a named configuration for this FsmKey (see
+    // FsmRightPanel's save/load dialog handlers) - the next save/load supersedes whatever was chosen
+    // before, and this is what LoadLastChosenForScene reapplies on the next scene load.
+    public static void SetLastChosenSaveName(string sceneName, string fsmKey, string saveName)
+    {
+        Dictionary<string, string> manifest = LoadLastChosenManifest(sceneName);
+        manifest[fsmKey] = saveName;
+        SaveLastChosenManifest(sceneName, manifest);
+    }
+
+    // ---- Last-chosen-save-per-FsmKey manifest ----
+    // One small file per scene (not one file per FsmKey folder) so remembering "which save is active" for
+    // an FsmKey can never collide with a user-chosen save name in that same FsmKey's own folder.
+
+    private static string GetLastChosenManifestPath(string sceneName) =>
+        Path.Combine(GetSceneDirectory(sceneName), "_last-chosen.json");
+
+    [Serializable]
+    private sealed class LastChosenManifestWire
+    {
+        public List<string> Entries = new(); // "fsmKey=saveName", one per FsmKey with a remembered choice
+    }
+
+    private static Dictionary<string, string> LoadLastChosenManifest(string sceneName)
+    {
+        var result = new Dictionary<string, string>();
+        string path = GetLastChosenManifestPath(sceneName);
+        if (!File.Exists(path))
+        {
+            return result;
+        }
+
+        LastChosenManifestWire? wire = JsonUtility.FromJson<LastChosenManifestWire>(File.ReadAllText(path));
+        if (wire == null)
+        {
+            return result;
+        }
+
+        foreach (string entry in wire.Entries)
+        {
+            int eq = entry.IndexOf('=');
+            if (eq > 0)
+            {
+                result[entry[..eq]] = entry[(eq + 1)..];
+            }
+        }
+
+        return result;
+    }
+
+    private static void SaveLastChosenManifest(string sceneName, Dictionary<string, string> manifest)
     {
         string sceneDirectory = GetSceneDirectory(sceneName);
         if (!Directory.Exists(sceneDirectory))
@@ -84,20 +194,13 @@ internal static class FsmSaveDataStore
             Directory.CreateDirectory(sceneDirectory);
         }
 
-        string json = JsonUtility.ToJson(ToWire(edits), prettyPrint: true);
-        File.WriteAllText(GetFilePath(sceneName, edits.FsmKey), json);
-        return json;
-    }
-
-    // Deletes one FsmKey's persisted overrides for a scene (used by Reset), so the next time that scene
-    // loads the FSM comes up unmodified instead of having the override reapplied to it.
-    public static void ClearFsmKey(string sceneName, string fsmKey)
-    {
-        string filePath = GetFilePath(sceneName, fsmKey);
-        if (File.Exists(filePath))
+        var wire = new LastChosenManifestWire();
+        foreach (KeyValuePair<string, string> entry in manifest)
         {
-            File.Delete(filePath);
+            wire.Entries.Add($"{entry.Key}={entry.Value}");
         }
+
+        File.WriteAllText(GetLastChosenManifestPath(sceneName), JsonUtility.ToJson(wire, prettyPrint: true));
     }
 
     // ---- Wire format conversion ----
@@ -152,7 +255,11 @@ internal static class FsmSaveDataStore
 
         foreach (VariableOverride ov in edits.VariableOverrides)
         {
-            wire.VariableOverrides.Add(JoinPairs("type", ov.VariableType, "name", ov.Name, "value", ov.StringValue));
+            wire.VariableOverrides.Add(JoinPairs(
+                "type", ov.VariableType,
+                "name", ov.Name,
+                "array", ov.ArrayIndex.ToString(CultureInfo.InvariantCulture),
+                "value", ov.StringValue));
         }
 
         foreach (ActionFieldOverride ov in edits.ActionFieldOverrides)
@@ -162,6 +269,7 @@ internal static class FsmSaveDataStore
                 "action", ov.ActionIndex.ToString(CultureInfo.InvariantCulture),
                 "type", ov.ExpectedActionTypeName,
                 "field", ov.FieldName,
+                "array", ov.ArrayIndex.ToString(CultureInfo.InvariantCulture),
                 "value", ov.StringValue));
         }
 
@@ -173,7 +281,8 @@ internal static class FsmSaveDataStore
                 "state", t.StateName,
                 "event", t.EventName,
                 "newState", t.NewStateName,
-                "newTo", t.NewToState));
+                "newTo", t.NewToState,
+                "newEvent", t.NewEventName));
         }
 
         foreach (SequencerOverride seq in edits.SequencerOverrides)
@@ -205,6 +314,9 @@ internal static class FsmSaveDataStore
             {
                 VariableType = p["type"],
                 Name = p["name"],
+                // Missing "array" key = a file saved before per-element array editing existed - treat
+                // as -1 (the whole value), same as ArrayOverride's own default.
+                ArrayIndex = p.TryGetValue("array", out string? arrayIndex) ? int.Parse(arrayIndex, CultureInfo.InvariantCulture) : -1,
                 StringValue = p["value"],
             });
         }
@@ -218,6 +330,7 @@ internal static class FsmSaveDataStore
                 ActionIndex = int.Parse(p["action"], CultureInfo.InvariantCulture),
                 ExpectedActionTypeName = p["type"],
                 FieldName = p["field"],
+                ArrayIndex = p.TryGetValue("array", out string? arrayIndex) ? int.Parse(arrayIndex, CultureInfo.InvariantCulture) : -1,
                 StringValue = p["value"],
             });
         }
@@ -233,6 +346,9 @@ internal static class FsmSaveDataStore
                 EventName = p["event"],
                 NewStateName = p["newState"],
                 NewToState = p["newTo"],
+                // Missing "newEvent" key = a file saved before event-rebind editing existed - treat as ""
+                // (same event as before this edit), matching TransitionRetarget.NewEventName's own default.
+                NewEventName = p.TryGetValue("newEvent", out string? newEvent) ? newEvent : "",
             });
         }
 

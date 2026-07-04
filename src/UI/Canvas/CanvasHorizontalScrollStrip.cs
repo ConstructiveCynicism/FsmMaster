@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.UI;
 
 namespace FsmMaster;
 
@@ -7,7 +8,11 @@ namespace FsmMaster;
 // vertical-only, agent-context/Silksong.DebugMod-main/UI/Canvas/CanvasScrollView.cs), but the same
 // pattern rotated to the X axis: this node is the clipped viewport, SetContent supplies the single
 // child panel whose tabs a caller adds to, and scrolling moves that child's LocalPosition.x within
-// the viewport - clamped so content never scrolls past its own bounds.
+// the viewport - clamped so content never scrolls past its own bounds. Clipping uses a real Unity
+// RectMask2D rather than CanvasNode's own hand-rolled CanvasRenderer.EnableRectClipping - that
+// hand-rolled clip is rendering-only and has no effect on GraphicRaycaster hit-testing, so a tab
+// scrolled out of view stayed fully clickable at its real, moved position (see CanvasScrollView's own
+// header comment for the full explanation of this same bug and fix).
 internal sealed class CanvasHorizontalScrollStrip : CanvasNode
 {
     private const float ScrollSpeed = 30f;
@@ -44,14 +49,10 @@ internal sealed class CanvasHorizontalScrollStrip : CanvasNode
         }
     }
 
-    protected override bool GetClipRect(out Rect clipRect)
+    public override void Build(Transform? rootParent = null)
     {
-        clipRect = new Rect(
-            Position.x - Screen.width / 2f,
-            Screen.height / 2f - Position.y - Size.y,
-            Size.x,
-            Size.y);
-        return true;
+        base.Build(rootParent);
+        GameObject!.AddComponent<RectMask2D>();
     }
 
     private void Poll()

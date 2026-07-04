@@ -24,4 +24,10 @@ internal sealed class FsmTabState
     public Vector2 PanWorldCenter;
     public float Zoom = 1f;
     public string? SelectedStateName;
+
+    // Set by the graph overlay when a transition click resolves to a specific action (see
+    // FsmGraphOverlay's transition hit-testing) - consumed and cleared by FsmMasterPlugin.Update once it's
+    // called FsmActiveStatePanel.ScrollToAction, the same one-shot "request" shape SelectedStateName's own
+    // producer/consumer split already uses.
+    public int? PendingScrollActionIndex;
 }

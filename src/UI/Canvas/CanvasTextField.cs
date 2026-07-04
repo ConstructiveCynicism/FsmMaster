@@ -1,0 +1,303 @@
+using System;
+using System.Collections.Generic;
+using System.Reflection;
+using HarmonyLib;
+using InControl;
+using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.UI;
+
+namespace FsmMaster;
+
+// Click-to-type, Enter-or-click-away-to-confirm text field - concept-ported from Silksong.DebugMod's
+// CanvasTextField (agent-context/Silksong.DebugMod-main/UI/Canvas/CanvasTextField.cs), including its
+// Harmony patch on HollowKnightInputModule.ProcessMove (see FocusOnHoverSuppressionPatch below) -
+// confirmed by decompiling the installed game's Assembly-CSharp.dll that focusOnMouseHover runs
+// unconditionally for mouse input (gated only on allowMouseInput/Cursor.visible, not on gamepad
+// presence), so without this patch, moving the mouse toward another interactive element while a field
+// is focused deselects the field mid-click and can swallow the click.
+//
+// Unlike the reference (and unlike FsmMaster's own first attempt at this class), this is a CanvasNode
+// that owns a child InteractiveLabel, NOT a CanvasText subclass with the InputField living directly on
+// the same GameObject as the Text component. Confirmed by decompiling UnityEngine.UI.dll's
+// InputField.UpdateGeometry(): Unity lazily creates the caret/highlight visual as a brand-new
+// GameObject parented to `textComponent.transform.parent`, then calls `SetAsFirstSibling()` on it. When
+// Text lived directly on this node's own GameObject (a sibling of every other row inside the shared
+// "Content" scroll panel), that parent was Content itself - so the caret/highlight ended up forced to
+// sibling index 0 of Content, rendered behind literally every row's own background image (added later,
+// hence in front - see FsmRightPanel's sibling-order comment), making it permanently invisible
+// regardless of its color/alpha. Giving the Text component its own dedicated child GameObject makes
+// `textComponent.transform.parent` this node's own GameObject instead, so the injected caret becomes a
+// private child scoped to just this one field - matching Unity's own canonical InputField prefab
+// layout (background+InputField on the root, Text as a child) - and can never be occluded by an
+// unrelated row again.
+internal sealed class CanvasTextField : CanvasNode
+{
+    public static bool AnyFieldFocused { get; private set; }
+
+    private readonly UICommon _ui;
+    private readonly InteractiveLabel _label;
+    private InputField? _inputField;
+    private Color _baseColor;
+
+    public event Action<string>? OnSubmit;
+
+    protected override bool Interactable => true;
+
+    public string Text
+    {
+        get => _label.Text;
+        set => _label.Text = value;
+    }
+
+    // Backed by _baseColor rather than reading _label.Color directly - the label's actual displayed
+    // color is temporarily overridden to black while the user has an active text selection (see
+    // UpdateSelectionTextColor), and callers setting/reading Color should see the real per-value-type
+    // color they assigned, not whatever's momentarily on screen.
+    public Color Color
+    {
+        get => _baseColor;
+        set
+        {
+            _baseColor = value;
+            _label.Color = value;
+        }
+    }
+
+    public HorizontalWrapMode Overflow
+    {
+        get => _label.Overflow;
+        set => _label.Overflow = value;
+    }
+
+    public CanvasTextField(string name, UICommon ui) : base(name)
+    {
+        _ui = ui;
+        _label = new InteractiveLabel("Label", ui);
+        _label.Parent = this;
+        OnUpdate += UpdateSelectionTextColor;
+    }
+
+    // Unity's legacy InputField has no built-in notion of a distinct "selected text" color - the glyph
+    // color drawn over the selection highlight is still just the label's own color, which can be hard
+    // to read against SelectionColor for some of UICommon's own light, pastel value colors
+    // (NumericValueColor/StringValueColor/etc.). Force the label to black for as long as a real
+    // (non-collapsed) selection exists, and restore its actual color otherwise.
+    private void UpdateSelectionTextColor()
+    {
+        if (_inputField == null)
+        {
+            return;
+        }
+
+        bool hasSelection = IsFocused() && _inputField.selectionAnchorPosition != _inputField.selectionFocusPosition;
+        _label.Color = hasSelection ? Color.black : _baseColor;
+    }
+
+    protected override IEnumerable<CanvasNode> ChildList()
+    {
+        yield return _label;
+    }
+
+    protected override void OnUpdateSize()
+    {
+        base.OnUpdateSize();
+        _label.Size = Size;
+    }
+
+    public override void Build(Transform? rootParent = null)
+    {
+        base.Build(rootParent);
+
+        _inputField = GameObject!.AddComponent<InputField>();
+        _inputField.textComponent = _label.TextComponent;
+        _inputField.transition = Selectable.Transition.None;
+        _inputField.enabled = false;
+
+        // Engine defaults (a low-alpha light-blue selection, caret tinted to match the text color) are
+        // tuned for light-themed UI and are hard to see against UICommon's dark palette.
+        _inputField.selectionColor = _ui.SelectionColor;
+        _inputField.customCaretColor = true;
+        _inputField.caretColor = _ui.CaretColor;
+        _inputField.caretWidth = (byte)Mathf.Max(1, UICommon.ScaleWidth(2));
+
+        _inputField.onSubmit.AddListener(text =>
+        {
+            Text = text;
+            OnSubmit?.Invoke(text);
+        });
+
+        _inputField.onEndEdit.AddListener(_ =>
+        {
+            _inputField!.enabled = false;
+            _label.TextComponent!.text = Text;
+            AnyFieldFocused = false;
+            TrySetInputLocked(false);
+        });
+
+        // Added on this node (the InputField's own root), not on _label directly - a raycast hit on
+        // the label's Text graphic still reaches this via Unity's own hierarchy-bubbling pointer-down
+        // dispatch (confirmed in UnityEngine.UI.dll: StandaloneInputModule.ProcessMousePress calls
+        // ExecuteEvents.ExecuteHierarchy(..., pointerDownHandler), which walks up from the raycast hit
+        // through ancestors looking for a handler).
+        AddEventTrigger(EventTriggerType.PointerDown, _ =>
+        {
+            if (!IsFocused())
+            {
+                Activate();
+            }
+        });
+    }
+
+    public void Activate()
+    {
+        if (_inputField == null)
+        {
+            return;
+        }
+
+        _inputField.text = Text;
+        _inputField.enabled = true;
+        _inputField.Select();
+        AnyFieldFocused = true;
+        TrySetInputLocked(true);
+
+        // InputField.Select() synchronously fires OnSelect -> ActivateInputField -> SelectAll
+        // (confirmed by decompiling UnityEngine.UI.dll), selecting the entire text - collapse that
+        // immediately to a caret at the end, in the same call, rather than the reference's own
+        // "wait one frame, then MoveTextEnd" trick. That deferred approach left a window where
+        // anything reselecting this field before the deferred frame ran (or a stray extra OnSelect)
+        // would leave the select-all state in place with nothing left to collapse it - which read as
+        // "the caret never shows up," since GenerateCaret only ever runs while the selection is
+        // already collapsed. Setting caretPosition directly takes effect before this frame renders at
+        // all, so there's nothing left to race and no flash of the initial full-text selection to hide.
+        _inputField.caretPosition = _inputField.text.Length;
+    }
+
+    // No-ops while focused so a background row refresh never overwrites text the user is actively
+    // typing. NOT used to revert on a parse failure from within OnSubmit - at that point the field is
+    // still focused (onSubmit fires before onEndEdit), so this guard would silently swallow the
+    // revert; callers reverting from OnSubmit should assign the plain Text setter instead.
+    public void UpdateDefaultText(string text)
+    {
+        if (IsFocused())
+        {
+            return;
+        }
+
+        Text = text;
+        if (_inputField != null)
+        {
+            _inputField.text = text;
+        }
+    }
+
+    public bool IsFocused() => _inputField != null && _inputField.enabled;
+
+    public override void Destroy()
+    {
+        if (IsFocused())
+        {
+            AnyFieldFocused = false;
+            TrySetInputLocked(false);
+        }
+
+        base.Destroy();
+    }
+
+    // Unconditional release, for a path where this exact field never gets its own Destroy()/onEndEdit
+    // called - GameObject.SetActive(false) on an ancestor (e.g. FsmRightPanel hiding on the
+    // toggle-overlay hotkey) does not reliably fire onEndEdit. See FsmRightPanel.OnUpdateActive, the
+    // caller of this method.
+    public static void ForceReleaseFocus()
+    {
+        if (AnyFieldFocused)
+        {
+            AnyFieldFocused = false;
+            TrySetInputLocked(false);
+        }
+    }
+
+    // Best-effort attempt to stop typed keystrokes from also driving player movement/actions while a
+    // field is focused. Confirmed (via src/packages.lock.json and src/obj/project.assets.json) that the
+    // currently-locked Silksong.GameLibs version ships Unity.InputSystem*.dll, not InControl.dll -
+    // unlike Silksong.DebugMod's reference code, which references InControl.InputManager directly, this
+    // cannot be a compile-time reference here. Resolved via reflection instead, and silently a no-op if
+    // the type isn't found at runtime either (most likely explanation: this Silksong build doesn't use
+    // InControl at all) - this assumption is unverified until checked in-game.
+    private static bool s_resolutionAttempted;
+    private static PropertyInfo? s_inputManagerEnabled;
+
+    private static void TrySetInputLocked(bool locked)
+    {
+        if (!s_resolutionAttempted)
+        {
+            s_resolutionAttempted = true;
+            try
+            {
+                Type? inputManagerType = Type.GetType("InControl.InputManager, InControl");
+                s_inputManagerEnabled = inputManagerType?.GetProperty("enabled", BindingFlags.Public | BindingFlags.Static);
+            }
+            catch
+            {
+                s_inputManagerEnabled = null;
+            }
+        }
+
+        if (s_inputManagerEnabled == null)
+        {
+            return;
+        }
+
+        try
+        {
+            s_inputManagerEnabled.SetValue(null, !locked);
+        }
+        catch
+        {
+            // Stop retrying every keystroke if the property turned out not to behave as expected.
+            s_inputManagerEnabled = null;
+        }
+    }
+}
+
+// A CanvasText that accepts raycasts - plain CanvasText defaults Interactable to false (correct for
+// read-only labels, which should let clicks pass through to whatever's behind them), but
+// CanvasTextField's own label is the actual click target that triggers Activate(), so it needs to stay
+// a valid raycast target. CanvasNode.Build() adds a blocksRaycasts=false CanvasGroup to any
+// non-interactive node, which would otherwise make this label's Text graphic untouchable by
+// GraphicRaycaster entirely.
+internal sealed class InteractiveLabel : CanvasText
+{
+    protected override bool Interactable => true;
+
+    public InteractiveLabel(string name, UICommon ui) : base(name, ui)
+    {
+    }
+}
+
+// Ported from Silksong.DebugMod's own patch on this same method
+// (agent-context/Silksong.DebugMod-main/UI/Canvas/CanvasTextField.cs) - suppresses
+// HollowKnightInputModule's "select whatever the mouse is hovering" behavior while any CanvasTextField
+// is focused, restoring it immediately afterward. Without this, moving the mouse toward another
+// clickable widget (e.g. the Load button) while a field is focused deselects that field mid-hover,
+// which can interfere with the click landing on the intended target in the same input pass.
+[HarmonyPatch(typeof(HollowKnightInputModule), nameof(HollowKnightInputModule.ProcessMove))]
+internal static class FocusOnHoverSuppressionPatch
+{
+    [HarmonyPrefix]
+    private static void Prefix(HollowKnightInputModule __instance, out bool __state)
+    {
+        __state = __instance.focusOnMouseHover;
+        if (CanvasTextField.AnyFieldFocused)
+        {
+            __instance.focusOnMouseHover = false;
+        }
+    }
+
+    [HarmonyPostfix]
+    private static void Postfix(HollowKnightInputModule __instance, bool __state)
+    {
+        __instance.focusOnMouseHover = __state;
+    }
+}

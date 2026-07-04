@@ -9,13 +9,19 @@ namespace FsmMaster;
 // choice in the reference.
 internal class CanvasText : CanvasNode
 {
-    private Text? _uiText;
+    protected Text? _uiText;
+
+    // Public so CanvasTextField (a CanvasNode, not a CanvasText subclass - see that file's own header
+    // comment for why) can hand this Text component straight to UnityEngine.UI.InputField.textComponent
+    // for a child label it owns, rather than duplicating a second Text sibling.
+    public Text? TextComponent => _uiText;
     private string _text = "";
     private Font? _font;
     private int _fontSize;
     private TextAnchor _alignment = TextAnchor.UpperLeft;
     private Color _color;
     private HorizontalWrapMode _overflow = HorizontalWrapMode.Wrap;
+    private FontStyle _fontStyle = FontStyle.Normal;
 
     protected override bool Interactable => false;
 
@@ -95,6 +101,35 @@ internal class CanvasText : CanvasNode
         }
     }
 
+    // Lets a caller switch to UICommon.HeaderFont for section/action titles - defaults to whatever font
+    // the constructor was given (ui.BodyFont).
+    public Font? Font
+    {
+        get => _font;
+        set
+        {
+            _font = value;
+            if (_uiText != null)
+            {
+                _uiText.font = value;
+            }
+        }
+    }
+
+    // Header rows (section titles, action names) use Bold; everything else stays Normal (the default).
+    public FontStyle FontStyle
+    {
+        get => _fontStyle;
+        set
+        {
+            _fontStyle = value;
+            if (_uiText != null)
+            {
+                _uiText.fontStyle = value;
+            }
+        }
+    }
+
     public override void Build(Transform? rootParent = null)
     {
         base.Build(rootParent);
@@ -103,6 +138,7 @@ internal class CanvasText : CanvasNode
         _uiText.text = _text;
         _uiText.font = _font;
         _uiText.fontSize = _fontSize;
+        _uiText.fontStyle = _fontStyle;
         _uiText.alignment = _alignment;
         _uiText.color = _color;
         _uiText.horizontalOverflow = _overflow;
