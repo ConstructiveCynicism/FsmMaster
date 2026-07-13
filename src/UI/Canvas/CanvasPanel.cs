@@ -2,10 +2,7 @@ using System.Collections.Generic;
 
 namespace FsmMaster;
 
-// Plain container node - concept-ported from Silksong.DebugMod's CanvasPanel
-// (agent-context/Silksong.DebugMod-main/UI/Canvas/CanvasPanel.cs), minus its Collapse()/CollapseMode
-// GameObject-count optimization: that exists there to flatten hundreds of layout-only wrapper panels
-// across DebugMod's much larger settings UI, which FsmMaster's single small right panel doesn't need.
+// Plain container node that holds and looks up child widgets by name.
 internal class CanvasPanel : CanvasNode
 {
     // Bumped by every Add/Remove/ClearChildren across every CanvasPanel in the tree - lets

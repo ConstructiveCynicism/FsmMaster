@@ -5,11 +5,9 @@ using UnityEngine.EventSystems;
 namespace FsmMaster;
 
 // Vertical scrollbar paired with a CanvasScrollView - track + draggable grip, sized proportional to
-// the visible/content height ratio. Concept-ported from Silksong.DebugMod's CanvasScrollbar
-// (agent-context/Silksong.DebugMod-main/UI/Canvas/CanvasScrollbar.cs), but the track is a plain
-// tinted strip reusing UICommon's shared solid sprite (see CanvasImage) rather than a baked
-// per-instance Texture2D - the reference generates one small texture per scrollbar in Build() and
-// never destroys it, which would leak across this mod's ScriptEngine reloads.
+// the visible/content height ratio. The track is a plain tinted strip reusing UICommon's shared solid
+// sprite (see CanvasImage) rather than a baked per-instance texture, avoiding a texture that would
+// need to be tracked and destroyed across this mod's ScriptEngine reloads.
 internal sealed class CanvasScrollbar : CanvasNode
 {
     private const float MinGripHeight = 24f;

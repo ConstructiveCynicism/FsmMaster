@@ -5,12 +5,9 @@ using UnityEngine.UI;
 
 namespace FsmMaster;
 
-// Displays UICommon's single shared solid-color sprite, tinted per instance via Tint - FsmMaster's
-// panels only ever need flat color fills (the graph canvas already owns all the fancy rounded-rect/
-// gradient rendering via GL), so unlike Silksong.DebugMod's CanvasImage
-// (agent-context/Silksong.DebugMod-main/UI/Canvas/CanvasImage.cs) this never generates or swaps in a
-// per-instance Texture2D/Sprite - avoiding any per-widget texture lifecycle to track through a
-// ScriptEngine reload.
+// Displays UICommon's single shared solid-color sprite, tinted per instance via Tint. Never
+// generates or swaps in a per-instance Texture2D/Sprite, avoiding any per-widget texture lifecycle
+// to track through a ScriptEngine reload.
 internal class CanvasImage : CanvasNode
 {
     private readonly UICommon _ui;

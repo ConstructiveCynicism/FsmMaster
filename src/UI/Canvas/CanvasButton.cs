@@ -6,12 +6,7 @@ using UnityEngine.EventSystems;
 namespace FsmMaster;
 
 // Clickable button - background image + centered label + a border, plus a hover-highlight border
-// shown only while the pointer is over it. Concept-ported from Silksong.DebugMod's CanvasButton
-// (agent-context/Silksong.DebugMod-main/UI/Canvas/CanvasButton.cs), but each button owns its own
-// hover-border child instance rather than sharing one static, reparented-per-hover CanvasBorder -
-// DebugMod's shared instance is a persistent-singleton optimization that doesn't fit FsmMaster's
-// per-reload-rebuilt tree, and this widget count is small enough that per-button ownership costs
-// nothing meaningful.
+// shown only while the pointer is over it. Each button owns its own hover-border child instance.
 internal class CanvasButton : CanvasImage
 {
     private readonly UICommon _ui;

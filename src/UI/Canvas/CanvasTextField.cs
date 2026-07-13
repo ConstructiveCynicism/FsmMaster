@@ -9,27 +9,24 @@ using UnityEngine.UI;
 
 namespace FsmMaster;
 
-// Click-to-type, Enter-or-click-away-to-confirm text field - concept-ported from Silksong.DebugMod's
-// CanvasTextField (agent-context/Silksong.DebugMod-main/UI/Canvas/CanvasTextField.cs), including its
-// Harmony patch on HollowKnightInputModule.ProcessMove (see FocusOnHoverSuppressionPatch below) -
-// confirmed by decompiling the installed game's Assembly-CSharp.dll that focusOnMouseHover runs
-// unconditionally for mouse input (gated only on allowMouseInput/Cursor.visible, not on gamepad
+// Click-to-type, Enter-or-click-away-to-confirm text field, including a Harmony patch on
+// HollowKnightInputModule.ProcessMove (see FocusOnHoverSuppressionPatch below): focusOnMouseHover
+// runs unconditionally for mouse input (gated only on allowMouseInput/Cursor.visible, not on gamepad
 // presence), so without this patch, moving the mouse toward another interactive element while a field
 // is focused deselects the field mid-click and can swallow the click.
 //
-// Unlike the reference (and unlike FsmMaster's own first attempt at this class), this is a CanvasNode
-// that owns a child InteractiveLabel, NOT a CanvasText subclass with the InputField living directly on
-// the same GameObject as the Text component. Confirmed by decompiling UnityEngine.UI.dll's
-// InputField.UpdateGeometry(): Unity lazily creates the caret/highlight visual as a brand-new
-// GameObject parented to `textComponent.transform.parent`, then calls `SetAsFirstSibling()` on it. When
-// Text lived directly on this node's own GameObject (a sibling of every other row inside the shared
-// "Content" scroll panel), that parent was Content itself - so the caret/highlight ended up forced to
-// sibling index 0 of Content, rendered behind literally every row's own background image (added later,
-// hence in front - see FsmRightPanel's sibling-order comment), making it permanently invisible
-// regardless of its color/alpha. Giving the Text component its own dedicated child GameObject makes
+// This is a CanvasNode that owns a child InteractiveLabel, rather than a CanvasText subclass with the
+// InputField living directly on the same GameObject as the Text component. Unity's
+// InputField.UpdateGeometry() lazily creates the caret/highlight visual as a brand-new GameObject
+// parented to `textComponent.transform.parent`, then calls `SetAsFirstSibling()` on it. If Text lived
+// directly on this node's own GameObject (a sibling of every other row inside the shared "Content"
+// scroll panel), that parent would be Content itself - forcing the caret/highlight to sibling index 0
+// of Content, rendered behind every row's own background image (added later, hence in front - see
+// FsmRightPanel's sibling-order comment), making it permanently invisible regardless of its
+// color/alpha. Giving the Text component its own dedicated child GameObject makes
 // `textComponent.transform.parent` this node's own GameObject instead, so the injected caret becomes a
-// private child scoped to just this one field - matching Unity's own canonical InputField prefab
-// layout (background+InputField on the root, Text as a child) - and can never be occluded by an
+// private child scoped to just this one field, matching Unity's own canonical InputField prefab
+// layout (background+InputField on the root, Text as a child), and can never be occluded by an
 // unrelated row again.
 internal sealed class CanvasTextField : CanvasNode
 {
@@ -40,6 +37,7 @@ internal sealed class CanvasTextField : CanvasNode
     private readonly CanvasNode[] _childList;
     private InputField? _inputField;
     private Color _baseColor;
+    private bool _submittedThisEdit;
 
     public event Action<string>? OnSubmit;
 
@@ -137,6 +135,7 @@ internal sealed class CanvasTextField : CanvasNode
 
         _inputField.onSubmit.AddListener(text =>
         {
+            _submittedThisEdit = true;
             Text = text;
             OnSubmit?.Invoke(text);
         });
@@ -144,7 +143,24 @@ internal sealed class CanvasTextField : CanvasNode
         _inputField.onEndEdit.AddListener(_ =>
         {
             _inputField!.enabled = false;
-            _label.TextComponent!.text = Text;
+
+            // onSubmit (Return key) already committed the typed value and fired OnSubmit above -
+            // onEndEdit still fires right after it either way (see the comment on FsmActiveStatePanel's
+            // own AddTextFieldRow), so only re-commit here for every OTHER way editing can end (clicking
+            // a different button/field, this whole panel getting hidden mid-edit, etc.). Without this,
+            // ending an edit by clicking away - rather than pressing Enter - silently discarded whatever
+            // was typed: Unity's InputField writes keystrokes straight into the live text component,
+            // bypassing this wrapper's own cached Text field entirely, so reading/restoring the stale
+            // Text here (the previous behavior) both lost the edit and visibly snapped the label back to
+            // its pre-edit value.
+            if (!_submittedThisEdit)
+            {
+                string typed = _inputField!.text;
+                Text = typed;
+                OnSubmit?.Invoke(typed);
+            }
+
+            _submittedThisEdit = false;
             AnyFieldFocused = false;
             TrySetInputLocked(false);
         });
@@ -178,13 +194,13 @@ internal sealed class CanvasTextField : CanvasNode
 
         // InputField.Select() synchronously fires OnSelect -> ActivateInputField -> SelectAll
         // (confirmed by decompiling UnityEngine.UI.dll), selecting the entire text - collapse that
-        // immediately to a caret at the end, in the same call, rather than the reference's own
-        // "wait one frame, then MoveTextEnd" trick. That deferred approach left a window where
-        // anything reselecting this field before the deferred frame ran (or a stray extra OnSelect)
-        // would leave the select-all state in place with nothing left to collapse it - which read as
-        // "the caret never shows up," since GenerateCaret only ever runs while the selection is
-        // already collapsed. Setting caretPosition directly takes effect before this frame renders at
-        // all, so there's nothing left to race and no flash of the initial full-text selection to hide.
+        // immediately to a caret at the end, in the same call. Deferring the collapse by a frame would
+        // leave a window where anything reselecting this field before the deferred frame runs (or a
+        // stray extra OnSelect) leaves the select-all state in place with nothing left to collapse it -
+        // which reads as "the caret never shows up," since GenerateCaret only ever runs while the
+        // selection is already collapsed. Setting caretPosition directly takes effect before this frame
+        // renders at all, so there's nothing left to race and no flash of the initial full-text
+        // selection to hide.
         _inputField.caretPosition = _inputField.text.Length;
     }
 
@@ -233,12 +249,11 @@ internal sealed class CanvasTextField : CanvasNode
     }
 
     // Best-effort attempt to stop typed keystrokes from also driving player movement/actions while a
-    // field is focused. Confirmed (via src/packages.lock.json and src/obj/project.assets.json) that the
-    // currently-locked Silksong.GameLibs version ships Unity.InputSystem*.dll, not InControl.dll -
-    // unlike Silksong.DebugMod's reference code, which references InControl.InputManager directly, this
-    // cannot be a compile-time reference here. Resolved via reflection instead, and silently a no-op if
-    // the type isn't found at runtime either (most likely explanation: this Silksong build doesn't use
-    // InControl at all) - this assumption is unverified until checked in-game.
+    // field is focused. Confirmed via src/packages.lock.json and src/obj/project.assets.json that the
+    // currently-locked Silksong.GameLibs version ships Unity.InputSystem*.dll, not InControl.dll, so
+    // this cannot be a compile-time reference here. Resolved via reflection instead, and silently a
+    // no-op if the type isn't found at runtime either (most likely explanation: this Silksong build
+    // doesn't use InControl at all) - this assumption is unverified until checked in-game.
     private static bool s_resolutionAttempted;
     private static PropertyInfo? s_inputManagerEnabled;
 
@@ -290,12 +305,11 @@ internal sealed class InteractiveLabel : CanvasText
     }
 }
 
-// Ported from Silksong.DebugMod's own patch on this same method
-// (agent-context/Silksong.DebugMod-main/UI/Canvas/CanvasTextField.cs) - suppresses
-// HollowKnightInputModule's "select whatever the mouse is hovering" behavior while any CanvasTextField
-// is focused, restoring it immediately afterward. Without this, moving the mouse toward another
-// clickable widget (e.g. the Load button) while a field is focused deselects that field mid-hover,
-// which can interfere with the click landing on the intended target in the same input pass.
+// Suppresses HollowKnightInputModule's "select whatever the mouse is hovering" behavior while any
+// CanvasTextField is focused, restoring it immediately afterward. Without this, moving the mouse
+// toward another clickable widget (e.g. the Load button) while a field is focused deselects that
+// field mid-hover, which can interfere with the click landing on the intended target in the same
+// input pass.
 [HarmonyPatch(typeof(HollowKnightInputModule), nameof(HollowKnightInputModule.ProcessMove))]
 internal static class FocusOnHoverSuppressionPatch
 {

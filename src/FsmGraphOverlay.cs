@@ -81,6 +81,13 @@ internal sealed class FsmGraphOverlay
     private float _textStyleBuiltForZoom = -1f;
 
     private bool _isVisible;
+
+    // Set true whenever SyncCursorState last forced the cursor unlocked/visible for the overlay
+    // (i.e. _isVisible was true that call), cleared once that override has been restored. Lets
+    // Shutdown (a ScriptEngine reload/unload) and the close-transition branch in SyncCursorState
+    // share the same "was this overlay the one holding the cursor open" check, rather than
+    // restoring unconditionally on every close and stomping on a cursor state something else owns.
+    private bool _cursorOverrideActive;
     private bool _selectionUiVisible = true;
     private bool _graphVisible = true;
     private FsmSnapshot? _snapshot;
@@ -92,6 +99,15 @@ internal sealed class FsmGraphOverlay
     // visit, for only whichever FSM(s) a graph tab actually resolves against, rather than the previous
     // eager approach of collecting it for every single FSM the scene scan discovers up front.
     private readonly Dictionary<string, FsmInfo> _fullInfoCache = new();
+
+    // FsmKeys ResolveFsmInfo has already scanned _snapshot.Fsms for and found nothing this scene visit
+    // - cleared alongside _fullInfoCache on every RefreshSnapshot, same lifetime. _snapshot.Fsms is
+    // frozen for the whole scene visit (only RefreshSnapshot ever replaces it), so "not found in this
+    // snapshot" can never change until the next RefreshSnapshot also clears this set - without this, a
+    // tab whose FSM isn't in the current scene (e.g. its owning enemy isn't in this room) re-ran the
+    // full O(live FSM count) scan, including a regex-based GetFsmKey per FSM, every single frame for as
+    // long as that tab stayed open, instead of failing fast after the first miss.
+    private readonly HashSet<string> _notFoundThisScene = new();
 
     // Working copy of whichever tab is currently active - synced in from FsmTabState at the top of
     // OnGUI and back out at the bottom (see OnGUI), rather than threading an FsmTabState parameter
@@ -138,6 +154,11 @@ internal sealed class FsmGraphOverlay
             return cached.Component == null ? null : cached;
         }
 
+        if (_notFoundThisScene.Contains(fsmKey))
+        {
+            return null;
+        }
+
         foreach (FsmIdentityInfo identity in _snapshot.Fsms)
         {
             if (identity.Component == null)
@@ -153,8 +174,14 @@ internal sealed class FsmGraphOverlay
             }
         }
 
+        _notFoundThisScene.Add(fsmKey);
         return null;
     }
+
+    // Hook-based (not polled) tracking of which states each visible FSM has actually entered - see its
+    // own header comment for why a per-frame Fsm.ActiveStateName poll alone isn't enough. Owned here
+    // (not shared with the rest of the plugin) since only this overlay's own rendering ever reads it.
+    private readonly FsmActiveStateTracker _activeStateTracker = new();
 
     private bool _isPanning;
 
@@ -304,6 +331,17 @@ internal sealed class FsmGraphOverlay
 
     public void Shutdown()
     {
+        // Symmetric with SyncCursorState forcing the cursor unlocked/visible while the overlay was
+        // open - a ScriptEngine reload/unload with the overlay still open must not leave the cursor
+        // stuck unlocked/visible over live gameplay just because nothing ever ran the close branch.
+        RestoreCursorForCurrentPauseState();
+
+        // Must run on every reload (see FsmActiveStateTracker.UnsubscribeAll's own comment) - a
+        // ScriptEngine reload otherwise leaves this instance's StateChanged handlers subscribed to
+        // still-live Fsm instances forever, stacked underneath whatever the next Awake's own tracker
+        // subscribes afresh.
+        _activeStateTracker.UnsubscribeAll();
+
         if (_glMaterial != null)
         {
             UnityEngine.Object.Destroy(_glMaterial);
@@ -330,6 +368,45 @@ internal sealed class FsmGraphOverlay
     // IMGUI presence of its own for these hotkeys to toggle directly.
     internal bool IsVisible => _isVisible;
     internal bool SelectionUiVisible => _selectionUiVisible;
+
+    // Called from FsmMasterPlugin.LateUpdate - deliberately LateUpdate rather than alongside the
+    // _isVisible toggle in Update above, so this always runs after whatever the game's own Update
+    // methods do to the cursor that same frame, including a pause/unpause transition that happens
+    // while the overlay is open. Forcing the cursor from Update alone would still risk being
+    // overwritten later the same frame by the game reclaiming it.
+    internal void SyncCursorState()
+    {
+        if (_isVisible)
+        {
+            Cursor.lockState = CursorLockMode.None;
+            Cursor.visible = true;
+            _cursorOverrideActive = true;
+            return;
+        }
+
+        RestoreCursorForCurrentPauseState();
+    }
+
+    // Restores the cursor to whatever the game's current paused/menu-or-not state calls for, but
+    // only if this overlay is the one that last forced it open - otherwise this would stomp on a
+    // cursor state neither the overlay nor the game's own pause handling set. Shared by
+    // SyncCursorState's close branch and Shutdown (a reload/unload while the overlay was left open).
+    //
+    // GameManager.instance.isPaused is the real pause/menu flag - Time.timeScale is deliberately not
+    // used to decide this, since gameplay can legitimately drive timeScale to 0 outside of an actual
+    // pause, which would otherwise misidentify normal gameplay as "paused" here.
+    private void RestoreCursorForCurrentPauseState()
+    {
+        if (!_cursorOverrideActive)
+        {
+            return;
+        }
+
+        bool pausedOrMenu = GameManager.instance != null && GameManager.instance.isPaused;
+        Cursor.lockState = pausedOrMenu ? CursorLockMode.None : CursorLockMode.Locked;
+        Cursor.visible = pausedOrMenu;
+        _cursorOverrideActive = false;
+    }
 
     // Independent of IsVisible/SelectionUiVisible above - those are driven by the toggle-overlay/
     // toggle-minimal-view hotkeys and hide the whole tool (graph + uGUI right panel) together. This
@@ -381,6 +458,7 @@ internal sealed class FsmGraphOverlay
     {
         _snapshot = FsmDataCollector.CollectSnapshot(sceneName, components);
         _fullInfoCache.Clear();
+        _notFoundThisScene.Clear();
 
         if (_snapshot.Fsms.Count == 0)
         {
@@ -453,6 +531,14 @@ internal sealed class FsmGraphOverlay
         if (activeFsm != null)
         {
             DrawGraph(activeFsm, activeTab!, canvasRect, interactiveRect, interactive: true, dim: false);
+        }
+
+        // Reconciles everything EnsureTracked/the StateChanged hook observed this frame - see
+        // FsmActiveStateTracker.CommitFrame's own comment for why this is gated on Repaint specifically
+        // rather than running on every OnGUI event.
+        if (Event.current.type == EventType.Repaint)
+        {
+            _activeStateTracker.CommitFrame();
         }
     }
 
@@ -689,8 +775,8 @@ internal sealed class FsmGraphOverlay
     }
 
     // Node height is content-driven (title band + one row per transition) rather than the
-    // FSM-authored Position.height, matching FSMExpress's own node sizing (its outer Border only
-    // sets Width from the authored bounds - Height is left unset so it auto-sizes to content).
+    // FSM-authored Position.height, so a node's box always fits its transition list instead of
+    // clipping or leaving dead space based on whatever height was authored in the FSM editor.
     private static float ComputeNodeWorldHeight(FsmStateInfo state)
     {
         return TitleBarHeight + state.Transitions.Count * TransitionRowHeight;
@@ -720,6 +806,8 @@ internal sealed class FsmGraphOverlay
         _panWorldCenter = tab.PanWorldCenter;
         _zoom = tab.Zoom;
         _selectedStateName = tab.SelectedStateName;
+
+        _activeStateTracker.EnsureTracked(tab.FsmKey, fsm.Fsm);
 
         // No background of its own here - GUIStyle.none - the full-screen dark vignette (when it's
         // shown at all) is drawn once in OnGUI, before this method runs, keyed off the FSM picker
@@ -769,7 +857,7 @@ internal sealed class FsmGraphOverlay
         // drawn via GUI calls local to this GUI.BeginGroup, so Unity's GUIClip stack silently adds
         // canvasRect's screen offset for them, but raw GL calls bypass GUIClip entirely - DrawLineBufferGL
         // needs the real screen-space offset to line its geometry up with those GUI-drawn nodes.
-        DrawCachedGraph(fsm, canvasRect.position, interactiveRect, interactive, dim);
+        DrawCachedGraph(fsm, tab.FsmKey, canvasRect.position, interactiveRect, interactive, dim);
 
         // A pinned-but-inactive tab's graph is a frozen ghost - it never pans/zooms/drags/selects on
         // its own, and only the active tab's own gestures should ever mutate _draggingTransition/
@@ -803,6 +891,9 @@ internal sealed class FsmGraphOverlay
         }
     }
 
+    // Walks every state/transition on this FSM and builds the screen-space node/curve geometry the
+    // rest of this class draws and hit-tests against, applying live edit-set overrides (disabled
+    // states/transitions, retargets) along the way. Result is written into _currentCache.
     private void RebuildNodeLayoutCache(FsmInfo fsm, Rect canvasRect)
     {
         // Active edit set drives disabled-state/transition styling below - null for an FSM with no edits
@@ -1032,11 +1123,11 @@ internal sealed class FsmGraphOverlay
     }
 
     // Samples a cubic Bezier once at layout-cache-build time (not per-frame) so DrawBezierArrow can
-    // just walk a cached polyline every OnGUI call. Adapted from FSMExpress's FsmCanvasArrow, which
-    // exits a node from whichever side faces the target via a control point offset from the anchor,
-    // and enters the target's title band through whichever of its two sides faces the source (see the
-    // call site in RebuildNodeLayoutCache) - control2 extends further in that same direction (away
-    // from the target) so the curve swoops in from whichever side it's actually attached to.
+    // just walk a cached polyline every OnGUI call. The curve exits a node from whichever side faces
+    // the target via a control point offset from the anchor, and enters the target's title band
+    // through whichever of its two sides faces the source (see the call site in
+    // RebuildNodeLayoutCache) - control2 extends further in that same direction (away from the
+    // target) so the curve swoops in from whichever side it's actually attached to.
     //
     // The control-point offsets are scaled by zoom, not fixed screen pixels: source/target anchors
     // are already zoom-scaled screen positions, so a fixed-pixel offset would shrink relative to the
@@ -1091,7 +1182,10 @@ internal sealed class FsmGraphOverlay
         return new Rect(minX, minY, maxX - minX, maxY - minY);
     }
 
-    private void DrawCachedGraph(FsmInfo fsm, Vector2 canvasScreenOffset, Rect interactiveRect, bool interactive, bool dim)
+    // Renders one FSM's graph from its already-built layout cache: gathers line/chrome geometry into
+    // GL batches, draws state/event labels, then (when interactive) hit-tests this frame's mouse-down
+    // against transition action zones and node rects to drive click/drag handling.
+    private void DrawCachedGraph(FsmInfo fsm, string fsmKey, Vector2 canvasScreenOffset, Rect interactiveRect, bool interactive, bool dim)
     {
         if (_currentCache.NodeLayoutCache == null)
         {
@@ -1101,6 +1195,12 @@ internal sealed class FsmGraphOverlay
         // Read live, not cached - the active state changes every frame as the FSM runs, independent of
         // the layout cache (which only tracks pan/zoom/selection/canvas-size).
         string? activeStateName = fsm.Fsm.ActiveStateName;
+
+        // Whether ANY state on this FSM currently has a "was active" fade running - forces the chrome
+        // cache below to rebuild every Repaint while true, since a fade's progress changes continuously
+        // and none of chromeCacheValid's other inputs (layout version, active/selected state name, box
+        // style, config generation) would otherwise ever catch that on their own.
+        bool anyFading = _activeStateTracker.HasAnyFading(fsmKey);
 
         // Unity dispatches OnGUI once per Layout pass plus once per queued input event (MouseMove,
         // ScrollWheel, etc.), in addition to Repaint - only Repaint actually puts pixels on screen,
@@ -1139,7 +1239,8 @@ internal sealed class FsmGraphOverlay
                 && _currentCache.ChromeCacheActiveStateName == activeStateName
                 && _currentCache.ChromeCacheSelectedStateName == _selectedStateName
                 && _currentCache.ChromeCacheBoxStyle == _performance.BoxStyle.Value
-                && _currentCache.ChromeCacheConfigGeneration == _performance.Generation;
+                && _currentCache.ChromeCacheConfigGeneration == _performance.Generation
+                && !anyFading;
 
             if (!chromeCacheValid)
             {
@@ -1291,6 +1392,13 @@ internal sealed class FsmGraphOverlay
                     bool isActive = !node.IsDisabled && activeStateName != null && node.Name == activeStateName;
                     bool isSelected = _selectedStateName != null && node.Name == _selectedStateName;
 
+                    // "Was active this frame (per the StateChanged hook - see FsmActiveStateTracker),
+                    // but isn't the FSM's final resolved active state" - 0 right after it stopped being
+                    // active, 1 once its 1s fade has fully settled back to this node's own default look.
+                    // Never set for an already-active or disabled node - disabled matches the isActive
+                    // rule above, and a node can't be both active and fading for the same reconciliation.
+                    float? fadeT = node.IsDisabled ? null : _activeStateTracker.GetFadeProgress(fsmKey, node.Name);
+
                     // Selected-state ring(s) are added first (outermost), so the active halo and inner
                     // ring below still draw on top of them. A state that's both active and selected gets
                     // a third ring further out than the normal active halo; a state that's only selected
@@ -1316,15 +1424,23 @@ internal sealed class FsmGraphOverlay
                         AddRoundedRectToChromeBuffer(selectedRect, cornerRadius + selectedOffset, _colors.SelectedStateColor.Value);
                     }
 
-                    if (isActive)
+                    if (isActive || fadeT.HasValue)
                     {
+                        // Same ring, same position, for both cases - only its color differs: solid
+                        // ActiveStateColor while genuinely active, or that same color fading toward
+                        // fully transparent (never toward a literal "default ring color," since a
+                        // non-active node has no ring of its own to fade into - see GetFadingActiveColor)
+                        // while merely fading. isSelected's own "not active" offset above already
+                        // reserves this exact radial slot regardless of which of the two this is, so a
+                        // fading + selected node's rings still stack correctly.
+                        Color ringColor = isActive ? _colors.ActiveStateColor.Value : GetFadingActiveColor(fadeT!.Value);
                         float activeOffset = (NodeBorderThickness + NodeActiveOutlineThickness) * _zoom;
                         var activeRect = new Rect(
                             node.ScreenRect.x - activeOffset,
                             node.ScreenRect.y - activeOffset,
                             node.ScreenRect.width + activeOffset * 2f,
                             node.ScreenRect.height + activeOffset * 2f);
-                        AddRoundedRectToChromeBuffer(activeRect, cornerRadius + activeOffset, _colors.ActiveStateColor.Value);
+                        AddRoundedRectToChromeBuffer(activeRect, cornerRadius + activeOffset, ringColor);
                     }
 
                     // The inner ring - drawn on top of the active halo above - is NodeOutlineColor's white
@@ -1335,8 +1451,14 @@ internal sealed class FsmGraphOverlay
                     // themselves, fully covering the inner area, so no separate inner fill pass is needed
                     // here. Always present in the Detailed box style; in Standard it's skipped for a plain,
                     // non-active/non-selected state, so only active/selected states show a border at all.
-                    Color innerOutlineColor = node.IsDisabled ? _colors.DisabledOutlineColor.Value : isActive ? GetActiveOutlineColor(node.ColorIndex) : _colors.NodeOutlineColor.Value;
-                    if (!standardBoxStyle || isActive || isSelected)
+                    Color innerOutlineColor = node.IsDisabled
+                        ? _colors.DisabledOutlineColor.Value
+                        : isActive
+                            ? GetActiveOutlineColor(node.ColorIndex)
+                            : fadeT.HasValue
+                                ? Color.Lerp(GetActiveOutlineColor(node.ColorIndex), _colors.NodeOutlineColor.Value, fadeT.Value)
+                                : _colors.NodeOutlineColor.Value;
+                    if (!standardBoxStyle || isActive || isSelected || fadeT.HasValue)
                     {
                         float outlineThickness = NodeBorderThickness * _zoom;
                         var outerRect = new Rect(
@@ -1351,7 +1473,11 @@ internal sealed class FsmGraphOverlay
                     // NodeLayout.FillColor), switching to the fixed ActiveTitleBackgroundColor (light blue)
                     // while it's the active state - see the label pass below for its matching black text.
                     bool titleIsOnlyBand = node.Rows.Count == 0;
-                    Color titleFillColor = isActive ? _colors.ActiveTitleBackgroundColor.Value : node.FillColor;
+                    Color titleFillColor = isActive
+                        ? _colors.ActiveTitleBackgroundColor.Value
+                        : fadeT.HasValue
+                            ? Color.Lerp(_colors.ActiveTitleBackgroundColor.Value, node.FillColor, fadeT.Value)
+                            : node.FillColor;
                     AddRoundedRectToChromeBuffer(node.TitleRect, cornerRadius, titleFillColor, roundTop: true, roundBottom: titleIsOnlyBand);
                     // Title/row labels are deliberately NOT drawn here (see the label pass after both GL
                     // flushes below).
@@ -1542,10 +1668,9 @@ internal sealed class FsmGraphOverlay
     // ---- Click/double-click/right-click handlers ----
 
     // A second MouseDown on the same node within DoubleClickWindowSeconds forces the FSM into that
-    // state via PlayMaker's own Fsm.SetState (agent-context/Playmaker's decompiled Fsm.cs - exits/enters
-    // properly via SwitchState, not a raw ActiveState assignment) - only the one live instance this tab
-    // is showing, per the resolved design (not every instance sharing this FsmKey). A single click still
-    // just selects, as before.
+    // state via PlayMaker's own Fsm.SetState, which exits/enters properly via SwitchState rather than
+    // a raw ActiveState assignment - and only affects the one live instance this tab is showing, not
+    // every instance that happens to share this FsmKey. A single click still just selects, as before.
     private void HandleNodeLeftClick(FsmInfo fsm, string stateName)
     {
         double now = Time.realtimeSinceStartup;
@@ -1586,8 +1711,8 @@ internal sealed class FsmGraphOverlay
     // owningStateName == "" means a global transition's pseudo-node line. For a per-state transition,
     // selects that state and requests a scroll to whichever action sends this event (correlated against
     // the already-collected FsmActionInfo.Fields - no new reflection walk). For a global transition,
-    // scans every currently OPEN tab (not the whole scene, per the resolved design) for the first state
-    // with a matching action and focuses that tab.
+    // scans every currently open tab (not the whole scene) for the first state with a matching action
+    // and focuses that tab.
     private void HandleTransitionLeftClick(FsmInfo fsm, string owningStateName, string eventName)
     {
         if (owningStateName != "")
@@ -2028,6 +2153,8 @@ internal sealed class FsmGraphOverlay
         return transition?.ToState;
     }
 
+    // Drives left-drag panning and scroll-wheel zoom for the active graph, updating _panWorldCenter/
+    // _zoom directly from mouse input.
     private void HandlePanAndZoom(Rect canvasRect)
     {
         Event current = Event.current;
@@ -2081,6 +2208,17 @@ internal sealed class FsmGraphOverlay
     private Color GetActiveOutlineColor(int colorIndex)
     {
         return colorIndex == 0 ? _colors.ActiveStateColor.Value : _colors.StateColors[colorIndex].Value;
+    }
+
+    // The active halo ring has no "default" (non-active) counterpart to tween its color toward - a
+    // node with no ring at all isn't a color, it's an absence - so a fading ring instead keeps
+    // ActiveStateColor's own RGB and fades its alpha toward 0, reading as the same halo gradually
+    // dissolving rather than shifting to some other hue. FlushChromeBufferGL's material is already set
+    // up for SrcAlpha/OneMinusSrcAlpha blending (see EnsureGlMaterial), so this alpha is respected.
+    private Color GetFadingActiveColor(float fadeT)
+    {
+        Color active = _colors.ActiveStateColor.Value;
+        return new Color(active.r, active.g, active.b, active.a * (1f - fadeT));
     }
 
     private const int CornerFanSegments = 8;
@@ -2212,6 +2350,7 @@ internal sealed class FsmGraphOverlay
         return blended;
     }
 
+    // Draws every triangle gathered into _currentCache.ChromeVertexBuffer this frame as a single GL batch.
     private void FlushChromeBufferGL(Vector2 canvasScreenOffset, float clipRightAbsolute, bool dim)
     {
         if (_currentCache.ChromeVertexBuffer.Count == 0)

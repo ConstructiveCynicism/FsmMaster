@@ -12,11 +12,13 @@ using UnityEngine.UI;
 namespace FsmMaster;
 
 // TODO - adjust the plugin guid as needed
-[BepInAutoPlugin(id: "io.github.ace9653.fsmmaster")]
+[BepInAutoPlugin(id: "io.github.constructivecynicism.fsmmaster")]
 [BepInDependency("org.silksong-modding.fsmutil")]
+[BepInDependency(DebugMod.DebugMod.Id, BepInDependency.DependencyFlags.SoftDependency)]
 public partial class FsmMasterPlugin : BaseUnityPlugin
 {
     private FsmEditManager? _editManager;
+    private DebugModCompat? _debugModCompat;
     private FsmVariableTracker? _variableTracker;
     private FsmTabManager? _tabManager;
     private FsmGraphOverlay? _graphOverlay;
@@ -45,6 +47,12 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
     private int _monitorPanelSubtreeVersion = -1;
 
     private static Harmony? _harmony;
+
+    // Mirrors _editManager - Harmony patches are static and can't reach this instance's own fields, so
+    // this is the one static handle FsmActivatedPatch (bottom of this file) needs to look up and reapply
+    // any pending edit set once a previously-inactive Fsm finally finishes its own Preprocess(). Set/cleared
+    // symmetrically alongside _editManager in Awake/OnDestroy per this project's hot-reload contract.
+    internal static FsmEditManager? ActiveEditManagerForPatches { get; private set; }
 
     internal FsmVariableTracker? VariableTracker => _variableTracker;
 
@@ -78,6 +86,8 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
                 + "reapplied whenever a scene containing that FSM loads. Toggled in-game by the panel's Auto button.");
 
         _editManager = new FsmEditManager(Logger);
+        ActiveEditManagerForPatches = _editManager;
+        _debugModCompat = DebugModCompat.TryCreate(_editManager, Logger);
         _variableTracker = new FsmVariableTracker(fsmKey => _editManager.GetLiveInstances(fsmKey));
         _tabManager = new FsmTabManager();
         _graphOverlay = new FsmGraphOverlay(Logger, _editManager, _tabManager, toggleOverlayHotkey, toggleMinimalViewHotkey, graphColors, graphPerformance);
@@ -90,9 +100,9 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
         string sceneName = SceneManager.GetActiveScene().name ?? string.Empty;
         PlayMakerFSM[] fsms = Object.FindObjectsByType<PlayMakerFSM>(FindObjectsInactive.Include, FindObjectsSortMode.None);
 
-        ApplyPersistedEditsForScene(sceneName, fsms);
+        Dictionary<string, List<PlayMakerFSM>> groups = ApplyPersistedEditsForScene(sceneName, fsms);
         _graphOverlay.RefreshSnapshot(sceneName, fsms);
-        _tabManager.RebindAfterRefresh(_graphOverlay.CurrentSnapshot!);
+        _tabManager.RebindAfterRefresh(groups);
 
         BuildRightPanel();
 
@@ -103,8 +113,12 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
     {
         SceneManager.sceneLoaded -= OnSceneLoaded;
 
+        _debugModCompat?.Unhook();
+        _debugModCompat = null;
+
         _editManager?.RevertAllForUnload();
         _editManager = null;
+        ActiveEditManagerForPatches = null;
         _variableTracker = null;
         _tabManager = null;
 
@@ -119,6 +133,8 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
 
     private void Update()
     {
+        _editManager?.PollPendingActivations();
+
         _graphOverlay?.Update();
 
         if (_rightPanel != null)
@@ -134,8 +150,8 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
             _rightPanel.ActiveSelf = _graphOverlay != null && _graphOverlay.IsVisible && _graphOverlay.SelectionUiVisible;
 
             FsmTabState? activeTab = _tabManager?.GetActive();
-            FsmInfo? activeFsm = activeTab != null ? _graphOverlay?.ResolveFsmInfo(activeTab.FsmKey) : null;
-            _rightPanel.ActiveStatePanel.Refresh(activeFsm, activeTab?.SelectedStateName);
+            FsmInfo? activeFsm = activeTab is { IsLive: true } ? _graphOverlay?.ResolveFsmInfo(activeTab.FsmKey) : null;
+            _rightPanel.ActiveStatePanel.Refresh(activeFsm, activeTab?.SelectedStateName, activeTab?.FsmKey);
 
             // One-shot request from a transition click in the graph overlay (see
             // FsmGraphOverlay.HandleTransitionLeftClick) - consumed and cleared here rather than left on
@@ -195,6 +211,13 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
         }
     }
 
+    private void LateUpdate()
+    {
+        // Runs after every other component's own Update this frame (including the game's own
+        // pause/unpause handling), so the overlay's forced cursor state always wins over anything
+        // the game just did to the cursor this same frame - see FsmGraphOverlay.SyncCursorState.
+        _graphOverlay?.SyncCursorState();
+    }
 
     private void OnGUI()
     {
@@ -223,11 +246,9 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
     }
 
     // Builds the right-side uGUI panel's Canvas/EventSystem/widget tree - see FsmRightPanel. Reuses
-    // an EventSystem already present in the scene if one exists: Silksong is itself a Unity-UI-driven
-    // game, and Silksong.DebugMod - a real, working mod - never constructs its own, only ever reads
-    // EventSystem.current (confirmed by grep across agent-context/Silksong.DebugMod-main), which is
-    // strong precedent one is already there. Only creates one as a defensive fallback, tracked via
-    // _ownsEventSystem so OnDestroy never tears down a scene-owned EventSystem it doesn't own.
+    // an EventSystem already present in the scene if one exists, since Silksong's own UI is expected to
+    // have one running already. Only creates one as a defensive fallback, tracked via _ownsEventSystem
+    // so OnDestroy never tears down a scene-owned EventSystem it doesn't own.
     //
     // Flagged assumption: whether Silksong's own EventSystem (if present) is a persistent
     // DontDestroyOnLoad singleton or gets recreated per scene load hasn't been independently verified
@@ -299,7 +320,7 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
     private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
     {
         PlayMakerFSM[] fsms = Object.FindObjectsByType<PlayMakerFSM>(FindObjectsInactive.Include, FindObjectsSortMode.None);
-        ApplyPersistedEditsForScene(scene.name, fsms);
+        Dictionary<string, List<PlayMakerFSM>> groups = ApplyPersistedEditsForScene(scene.name, fsms);
 
         // The overlay's own snapshot goes stale on every scene load - PlayMakerFSM instances from the
         // previous scene are destroyed and need re-collecting. Uses SceneManager.GetActiveScene().name
@@ -307,13 +328,10 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
         // FsmDataCollector.CollectSnapshot call has always keyed its snapshot by.
         _graphOverlay?.RefreshSnapshot(SceneManager.GetActiveScene().name ?? string.Empty, fsms);
 
-        // Re-resolves every open tab's live PlayMakerFSM by FsmKey against the fresh snapshot - a tab
-        // whose FSM isn't present here gets marked not-live (kept open as a placeholder) rather than
-        // closed, per FsmTabManager.RebindAfterRefresh's contract.
-        if (_graphOverlay?.CurrentSnapshot != null)
-        {
-            _tabManager?.RebindAfterRefresh(_graphOverlay.CurrentSnapshot);
-        }
+        // Re-resolves every open tab's live PlayMakerFSM by FsmKey against the groups just computed
+        // above - a tab whose FSM isn't present here gets marked not-live (kept open as a placeholder)
+        // rather than closed, per FsmTabManager.RebindAfterRefresh's contract.
+        _tabManager?.RebindAfterRefresh(groups);
     }
 
     // Groups the freshly discovered live FSMs by FsmKey (see FsmIdentity, which also covers scene-authored
@@ -326,11 +344,14 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
     // pristine-snapshot state on every scene revisit for the rest of the session regardless of whether the
     // player cared about it. Multiple named saves can exist per FsmKey (see FsmSaveDataStore), so this
     // deliberately only ever reapplies the one remembered choice, not every save ever made for that FsmKey.
-    private void ApplyPersistedEditsForScene(string sceneName, PlayMakerFSM[] components)
+    // Returns the FsmKey groups it computed, so the caller can feed the same grouping straight into
+    // FsmTabManager.RebindAfterRefresh instead of that method re-deriving keys from scratch with a
+    // second regex-driven walk over every live FSM in the room.
+    private Dictionary<string, List<PlayMakerFSM>> ApplyPersistedEditsForScene(string sceneName, PlayMakerFSM[] components)
     {
         if (_editManager == null || _tabManager == null)
         {
-            return;
+            return new Dictionary<string, List<PlayMakerFSM>>();
         }
 
         Dictionary<string, List<PlayMakerFSM>> groups = FsmIdentity.DiscoverFsmGroups(components);
@@ -338,7 +359,7 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
 
         if (_autoLoadConfig is not { Value: true })
         {
-            return;
+            return groups;
         }
 
         IEnumerable<string> openFsmKeysPresent = _tabManager.Tabs
@@ -349,6 +370,8 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
         {
             _editManager.ApplyEditSet(editSet);
         }
+
+        return groups;
     }
 
     // Reverts a live FSM to its pristine values and strips every named save (plus the remembered last-
@@ -357,5 +380,49 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
     {
         _editManager?.ResetFsm(fsmKey);
         FsmSaveDataStore.ClearAllSavesForFsm(sceneName, fsmKey);
+    }
+}
+
+// Closes the lifecycle gap flagged in FsmEditManager.InstallSequencer: an edit made against an FSM whose
+// owning GameObject was inactive at the time (so PlayMaker never ran Preprocess() on it, leaving every
+// FsmStateAction.State backref null) gets recorded but not physically installed on that instance, and
+// nothing previously caught it activating later within the same scene - only a fresh scene load
+// (FsmMasterPlugin.ApplyPersistedEditsForScene) re-ran ApplyEditSet at all.
+//
+// Targets Fsm's own private, parameterless Preprocess() rather than PlayMakerFSM.Awake(): every path that
+// initializes an Fsm for the first time - PlayMakerFSM.Awake() -> Init(), or a direct
+// Preprocess(MonoBehaviour) call some other game code might make - funnels through this exact method,
+// which is also the one that actually sets Preprocessed = true and calls action.Init(state) for every
+// action, so a Postfix here is guaranteed to run exactly once per Fsm, right after its actions' State
+// backrefs become safe to touch. Fsm.Owner (hence FsmComponent) is set before either caller reaches this
+// method, so __instance.FsmComponent is never null here.
+[HarmonyPatch(typeof(Fsm), "Preprocess", new System.Type[] { })]
+internal static class FsmActivatedPatch
+{
+    [HarmonyPostfix]
+    private static void Postfix(Fsm __instance)
+    {
+        if (FsmMasterPlugin.ActiveEditManagerForPatches is not { } editManager)
+        {
+            return;
+        }
+
+        PlayMakerFSM? component = __instance.FsmComponent;
+        if (component == null)
+        {
+            return;
+        }
+
+        string fsmKey = FsmIdentity.GetFsmKey(component);
+
+        // Must run before GetActiveEditSet/ApplyEditSet below - see ReconcileLiveInstance's own comment
+        // for why _liveInstances can otherwise still hold a stale, pre-activation Fsm reference for this
+        // exact component at this point.
+        editManager.ReconcileLiveInstance(fsmKey, __instance);
+
+        if (editManager.GetActiveEditSet(fsmKey) is { } editSet)
+        {
+            editManager.ApplyEditSet(editSet);
+        }
     }
 }

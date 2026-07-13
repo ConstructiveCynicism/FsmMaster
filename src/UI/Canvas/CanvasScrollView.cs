@@ -5,20 +5,19 @@ using UnityEngine.UI;
 
 namespace FsmMaster;
 
-// Vertical scroll viewport - concept ported from Silksong.DebugMod's CanvasScrollView
-// (agent-context/Silksong.DebugMod-main/UI/Canvas/CanvasScrollView.cs), but clipping uses a real
-// Unity RectMask2D rather than CanvasNode's own hand-rolled CanvasRenderer.EnableRectClipping (which
-// DebugMod's reference also uses). That hand-rolled clip is rendering-only - it has no effect on
-// GraphicRaycaster hit-testing - so content scrolled out of view stayed fully clickable at its real,
-// moved RectTransform position, silently swallowing clicks meant for whatever it happened to overlap
-// (e.g. rows scrolled above the viewport overlapping the button row above it). RectMask2D clips both
-// rendering and raycasts for its whole subtree, so content correctly stops being interactive once it's
-// actually scrolled out of view. SetContent supplies the single child panel whose rows a caller adds
-// to, and scrolling moves that child's LocalPosition.y within the viewport - clamped so content never
-// scrolls past its own bounds. Mouse-wheel scrolling polls Input.mouseScrollDelta directly (matching
-// the reference), independent of EventSystem/GraphicRaycaster - see FsmGraphOverlay's
-// interactiveRect/IsPointerOverGameObject gating, which exists precisely so the graph canvas's own
-// scroll-wheel zoom doesn't also fire while the pointer is over a scroll view like this one.
+// Vertical scroll viewport. Clipping uses a real Unity RectMask2D rather than CanvasNode's own
+// hand-rolled CanvasRenderer.EnableRectClipping. That hand-rolled clip is rendering-only - it has no
+// effect on GraphicRaycaster hit-testing - so content scrolled out of view stayed fully clickable at
+// its real, moved RectTransform position, silently swallowing clicks meant for whatever it happened
+// to overlap (e.g. rows scrolled above the viewport overlapping the button row above it). RectMask2D
+// clips both rendering and raycasts for its whole subtree, so content correctly stops being
+// interactive once it's actually scrolled out of view. SetContent supplies the single child panel
+// whose rows a caller adds to, and scrolling moves that child's LocalPosition.y within the viewport,
+// clamped so content never scrolls past its own bounds. Mouse-wheel scrolling polls
+// Input.mouseScrollDelta directly, independent of EventSystem/GraphicRaycaster - see
+// FsmGraphOverlay's interactiveRect/IsPointerOverGameObject gating, which exists precisely so the
+// graph canvas's own scroll-wheel zoom doesn't also fire while the pointer is over a scroll view like
+// this one.
 internal sealed class CanvasScrollView : CanvasNode, IHorizontalScrollSource
 {
     private const float ScrollSpeed = 30f;

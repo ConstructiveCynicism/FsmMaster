@@ -32,7 +32,7 @@ internal sealed class FsmSaveDialog : CanvasPanel
     {
         _anchorButton = anchorButton;
         ActiveSelf = false;
-        Size = new Vector2(Width, HeaderHeight + FieldHeight + ButtonHeight + Padding * 3f);
+        Size = new Vector2(Width, HeaderHeight + FieldHeight + ButtonHeight + Padding * 4f);
 
         CanvasImage background = Add(new CanvasImage("Background", ui) { IsBackground = true, Tint = ui.PanelBackground });
         background.AddBorder(ui.PanelBorder);

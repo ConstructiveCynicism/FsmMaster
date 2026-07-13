@@ -6,15 +6,12 @@ using UnityEngine.UI;
 namespace FsmMaster;
 
 // Scene -> Object -> FSM drill-down popup, anchored below the Open button - rebuilt fresh every time
-// it's shown rather than kept in sync incrementally, since it's only open briefly. FsmMaster's own
-// class (not a generic reusable dialog base) since this mod only has one such popup; concept modeled
-// on Silksong.DebugMod's CanvasDialog show/hide/outside-click pattern
-// (agent-context/Silksong.DebugMod-main/UI/Canvas/CanvasDialog.cs is the closest existing pattern to
-// this), reusing FsmDrilldownHierarchy for the actual scene/object/fsm grouping. Every row for the
-// current level is still built up front rather than windowed/virtualized (unlike the old IMGUI list
-// panel) - scene/object/fsm counts are small enough in practice that building them all is cheap - but
-// the row list itself scrolls within a capped-height viewport (see RebuildRows) rather than growing
-// this popup past whatever room is left inside the parent panel.
+// it's shown rather than kept in sync incrementally, since it's only open briefly. Reuses
+// FsmDrilldownHierarchy for the actual scene/object/fsm grouping. Every row for the current level is
+// still built up front rather than windowed/virtualized (unlike the old IMGUI list panel) -
+// scene/object/fsm counts are small enough in practice that building them all is cheap - but the row
+// list itself scrolls within a capped-height viewport (see RebuildRows) rather than growing this
+// popup past whatever room is left inside the parent panel.
 internal sealed class FsmOpenDropdown : CanvasPanel
 {
     private const float Width = 260f;

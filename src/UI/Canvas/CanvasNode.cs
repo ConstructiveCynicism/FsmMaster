@@ -6,12 +6,9 @@ using UnityEngine.EventSystems;
 namespace FsmMaster;
 
 // Base class for every widget in FsmMaster's right-panel uGUI tree - a RectTransform wrapper with
-// parent/child bookkeeping, concept-ported from Silksong.DebugMod's CanvasNode
-// (agent-context/Silksong.DebugMod-main/UI/Canvas/CanvasNode.cs). Deliberately without its static
-// `allNodes` registry: DebugMod's UI is a persistent whole-session singleton, while FsmMaster's
-// ScriptEngine hot-reload contract (CLAUDE.md) tears down and rebuilds this tree on every reload, so
-// nothing here is static - the tree root drives its own CollectSubtree() walk each frame instead of a shared
-// list that would need manual clearing.
+// parent/child bookkeeping. Nothing here is static: ScriptEngine hot-reload tears down and rebuilds
+// this tree on every reload, so the tree root drives its own CollectSubtree() walk each frame instead
+// of a shared list that would need manual clearing.
 internal abstract class CanvasNode
 {
     private CanvasNode? _parent;
@@ -274,12 +271,14 @@ internal abstract class CanvasNode
         }
     }
 
-    // Same top-left-origin -> bottom-left-origin conversion DebugMod's CanvasNode.IsMouseOver uses
-    // (verified at agent-context/Silksong.DebugMod-main/UI/Canvas/CanvasNode.cs:281): Position/Size
-    // are tracked in this class's own top-left, y-down convention (see UpdateAnchoredPosition's
-    // negated Y), but Input.mousePosition is bottom-left, y-up - Screen.height - Position.y - Size.y
-    // flips between the two.
-    public bool IsMouseOver()
+    public bool IsMouseOver() => IsPointOver(Input.mousePosition);
+
+    // Position/Size are tracked in this class's own top-left, y-down convention (see
+    // UpdateAnchoredPosition's negated Y), but Input.mousePosition (and any other bottom-left/y-up
+    // screen point, e.g. a PointerEventData's own position at drag-drop time) is bottom-left, y-up -
+    // Screen.height - Position.y - Size.y flips between the two. Factored out of IsMouseOver so
+    // drag-and-drop code can hit-test against a specific drop point instead of only "right now."
+    public bool IsPointOver(Vector2 screenPoint)
     {
         var bounds = new Rect(Position.x, Screen.height - Position.y - Size.y, Size.x, Size.y);
         if (ShouldClip(out Rect clipRect))
@@ -293,7 +292,7 @@ internal abstract class CanvasNode
         bounds.width += 2f;
         bounds.height += 2f;
 
-        return bounds.Contains(Input.mousePosition);
+        return bounds.Contains(screenPoint);
     }
 
     public void AddEventTrigger<T>(EventTriggerType type, Action<T> callback) where T : BaseEventData

@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using HutongGames.PlayMaker;
 
 namespace FsmMaster;
 
@@ -82,19 +83,19 @@ internal sealed class FsmTabManager
     // resolves each open tab's live PlayMakerFSM by FsmKey. A tab whose FSM isn't present in the new
     // snapshot is marked not-live rather than closed (confirmed UX decision), so it reconnects
     // automatically if the player returns to a scene containing that FsmKey again.
-    public void RebindAfterRefresh(FsmSnapshot snapshot)
+    //
+    // Takes the FsmKey groups FsmIdentity.DiscoverFsmGroups already computed for the edit manager
+    // (see FsmMasterPlugin.ApplyPersistedEditsForScene) rather than re-deriving keys itself from the
+    // snapshot - GetFsmKey does a regex match plus string allocation per live FSM, and re-walking
+    // every FSM in the room a second time just to rebuild the same key set was pure duplicated cost on
+    // every single scene transition.
+    public void RebindAfterRefresh(IReadOnlyDictionary<string, List<PlayMakerFSM>> groupsByFsmKey)
     {
-        var byKey = new Dictionary<string, PlayMakerFSM>();
-        foreach (FsmIdentityInfo fsm in snapshot.Fsms)
-        {
-            byKey[FsmIdentity.GetFsmKey(fsm.Component)] = fsm.Component;
-        }
-
         foreach (FsmTabState tab in _tabs)
         {
-            if (byKey.TryGetValue(tab.FsmKey, out PlayMakerFSM? component))
+            if (groupsByFsmKey.TryGetValue(tab.FsmKey, out List<PlayMakerFSM>? components) && components.Count > 0)
             {
-                tab.Component = component;
+                tab.Component = components[0];
                 tab.IsLive = true;
             }
             else

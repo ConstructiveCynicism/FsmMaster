@@ -10,24 +10,20 @@ using UnityEngine.UI;
 
 namespace FsmMaster;
 
-// Actions / Events / Variables sub-tabs for whichever state is currently selected. The
-// data-gathering logic here is FsmMaster's own existing code, ported (not copied from
-// agent-context) from FsmGraphOverlay.RebuildSidePanelCache/FormatActionField: FsmStateInfo.Actions/
-// Fields (already collected generically by FsmDataCollector via reflection - no hardcoded action
-// types) for the Actions tab, the raw fsm.Fsm.Variables typed arrays for Variables (FsmUtil has no
-// bulk-enumeration helper for this - confirmed directly against
-// agent-context/Silksong.FsmUtil-main/src/FsmUtil.cs), and fsm.Fsm.Events for Events.
+// Actions / Events / Variables sub-tabs for whichever state is currently selected. Actions/Fields
+// come from FsmStateInfo.Actions (already collected generically via reflection - no hardcoded action
+// types), Variables reads the raw fsm.Fsm.Variables typed arrays directly, and Events reads
+// fsm.Fsm.Events.
 //
 // Editable values (Actions/Variables) route through FsmEditManager.SetActionField/SetVariable - the
 // same override/pristine-snapshot backend the Save/Load buttons and preset system already use, so an
 // edit made here is indistinguishable from one applied by loading a saved edit set. Editability and
 // display formatting both come from FsmEditManager.TryFormatValue, so this panel never has to
-// duplicate FsmEditManager's own notion of which types are safely editable. Section header/type-value
-// color-coding is a concept ported from FSMExpress's own type/value color split
-// (agent-context/FSMExpress-master/FSMExpress/Controls/Sidebar/TypeColorConverter.cs); the literal
-// colors themselves live in UICommon, FsmMaster's own palette. Each action (Actions tab) and each
-// variable-type group (Variables tab) is drawn inside its own outlined, clickable CanvasSectionBlock -
-// see BeginBlock/EndBlock/SelectBlock below.
+// duplicate FsmEditManager's own notion of which types are safely editable. Section headers use a
+// bold type-badge color and values use a separate numeric/string color, with the literal colors
+// living in UICommon, FsmMaster's own palette. Each action (Actions tab) and each variable-type group
+// (Variables tab) is drawn inside its own outlined, clickable CanvasSectionBlock - see
+// BeginBlock/EndBlock/SelectBlock below.
 internal sealed class FsmActiveStatePanel : CanvasPanel
 {
     // Design-reference pixel values at 1920x1080 - every actual usage site reads the scaled
@@ -49,10 +45,15 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
     private const float FieldIndentDesign = 14f;
 
     // Inner top/bottom padding within a section block (CanvasSectionBlock) and the vertical gap left
-    // between one block and the next - see BeginBlock/EndBlock. Blocks span the section's full width
-    // (no horizontal inset), matching the divider they replace, which used to do the same.
+    // between one block and the next - see BeginBlock/EndBlock. Blocks themselves still span the
+    // section's full width (no horizontal inset, matching the divider they replace) - it's each block's
+    // own content (rows/headers/columns) that stops BlockRightGap short of the block's right edge,
+    // mirroring the left-side RowIndent every row already starts at, so text/buttons never run flush
+    // against the outline on either side. Reads _scrollView.Size.x, so it shrinks in step with the
+    // scrollbar's own reserved gutter (see ComputeScrollWidth) exactly like the block's own width does.
     private const float BlockPaddingDesign = 4f;
     private const float BlockGapDesign = 6f;
+    private const float BlockRightGapDesign = 4f;
 
     // Sits to the right of a Random-event-family action's header, in the same row - see
     // AddActionHeaderRow.
@@ -78,6 +79,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
     private static float ArrayElementIndent => FieldIndent + UICommon.ScaleWidth(12f);
     private static float BlockPadding => UICommon.ScaleHeight(BlockPaddingDesign);
     private static float BlockGap => UICommon.ScaleHeight(BlockGapDesign);
+    private static float BlockRightGap => UICommon.ScaleWidth(BlockRightGapDesign);
     private static float SequencerButtonWidth => UICommon.ScaleWidth(SequencerButtonWidthDesign);
     private static float ColumnGap => UICommon.ScaleWidth(ColumnGapDesign);
     private static float CloseButtonSize => UICommon.ScaleWidth(CloseButtonSizeDesign);
@@ -112,6 +114,11 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
     private FsmInfo? _cachedFsm;
     private string? _cachedStateName;
     private SubTabKind? _cachedSubTab;
+
+    // The FsmKey of whichever tab last supplied _cachedFsm/_cachedStateName - lets Refresh tell "this
+    // exact tab just went not-live" (freeze, see Refresh) apart from "a different tab, also not live,
+    // is now active" (still needs a real clear so the wrong tab's stale content doesn't linger).
+    private string? _cachedTabFsmKey;
 
     // Matches the current body font size (see UICommon.DotSize) rather than an arbitrary fixed pixel
     // value, so every toggle dot in this panel reads as part of the same line of text it sits beside.
@@ -160,12 +167,14 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
     // click on the Actions tab's own Sequencer button scroll to/select the block it just opened.
     private readonly Dictionary<(string StateName, int ActionRank), CanvasSectionBlock> _sequencerBlockWidgets = new();
 
-    // A block's own Sequence-column bounding rect (content-space, matching cursor.Y's own coordinate
-    // system) and its individual row Y-ranges within that rect - used by EndDrag to find which block (if
-    // any) a drag was dropped into and where. Cross-block drops are rejected: only a drop landing inside
-    // the SAME block the drag originated from (_dragBlockKey) is accepted.
-    private readonly Dictionary<(string StateName, int ActionRank), Rect> _sequenceColumnRects = new();
-    private readonly Dictionary<(string StateName, int ActionRank), List<(float Y, float Height)>> _sequenceRowRanges = new();
+    // A block's own Sequence-column hit area (an invisible CanvasPanel, positioned/sized the normal way)
+    // and its individual row widgets - used by EndDrag to find which block (if any) a drag was dropped
+    // into and where, by hit-testing the drop point directly against these widgets' own Position/Size
+    // (via CanvasNode.IsPointOver) rather than re-deriving content-space coordinates by hand. Cross-block
+    // drops are rejected: only a drop landing inside the SAME block the drag originated from
+    // (_dragBlockKey) is accepted.
+    private readonly Dictionary<(string StateName, int ActionRank), CanvasNode> _sequenceColumnHitAreas = new();
+    private readonly Dictionary<(string StateName, int ActionRank), List<CanvasNode>> _sequenceRowWidgets = new();
 
     private (string StateName, int ActionRank)? _dragBlockKey;
     private string? _dragEventName;
@@ -262,6 +271,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
         // safe place to decide the scrollbar's ActiveSelf - see CanvasScrollbar.ShouldBeVisible for
         // why the scrollbar can't make that call about itself.
         OnUpdate += () => _scrollbar.ActiveSelf = _scrollbar.ShouldBeVisible;
+        OnUpdate += RecheckScrollWidth;
     }
 
     public override void Build(Transform? rootParent = null)
@@ -298,15 +308,14 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
         float scrollY = tabY + SubTabButtonHeight + 4f;
         float scrollHeight = Mathf.Max(0f, Size.y - scrollY);
 
-        // The Sequencer tab's blocks reach this panel's own right edge - lining up with the tab strip's
-        // own right edge above them - rather than stopping short by the scrollbar's usual reserved
-        // gutter. This is safe to do per-subtab (not just uniformly for every tab) because the scrollbar
-        // is a sibling of _scrollView, not one of its clipped children (see its own construction below),
-        // so it can still float on top of that wider content whenever it's actually visible instead of
-        // needing a dedicated non-overlapping lane.
-        float scrollWidth = _activeSubTab == SubTabKind.Sequencer
-            ? Mathf.Max(0f, Size.x)
-            : Mathf.Max(0f, Size.x - ScrollbarWidth - 2f);
+        // Every tab's blocks/rows reach this panel's own right edge - lining up with the tab strip's own
+        // right edge above them - unless the scrollbar is actually needed, in which case content shifts
+        // over to make room for it instead of letting the two overlap. Safe to do this way (rather than
+        // always reserving the gutter, or always overlapping) because the scrollbar is a sibling of
+        // _scrollView, not one of its clipped children (see its own construction below), so it can float
+        // on top of wider content when hidden without needing a dedicated lane, and correctly gets that
+        // lane back the moment it's actually visible.
+        float scrollWidth = ComputeScrollWidth(scrollHeight);
         _scrollView.LocalPosition = new Vector2(0f, scrollY);
         _scrollView.Size = new Vector2(scrollWidth, scrollHeight);
 
@@ -315,6 +324,36 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
 
         _dragGhost.Size = new Vector2(DragGhostWidth, RowHeight);
         _dragGhostText.Size = _dragGhost.Size;
+    }
+
+    // Whether the scrollbar needs to reserve its own gutter depends on content height (from the last
+    // RebuildContent) vs. the scroll viewport's own height - not on which tab is active - so this is
+    // reused both by Layout() (on resize) and by RecheckScrollWidth (every frame, since content height
+    // can change - a sequencer block opening/closing, a loop count field appearing/disappearing - without
+    // ever going through Layout() at all).
+    private float ComputeScrollWidth(float scrollHeight)
+    {
+        bool scrollbarNeeded = _scrollView.Content is { } content && content.Size.y > scrollHeight;
+        return scrollbarNeeded ? Mathf.Max(0f, Size.x - ScrollbarWidth - 2f) : Mathf.Max(0f, Size.x);
+    }
+
+    // Content height can cross the "does the scrollbar need to reserve room" threshold without going
+    // through Layout() at all (e.g. RebuildContent adding/removing rows in response to a sequencer edit),
+    // so this is re-checked every frame rather than only on resize. A changed width forces an immediate
+    // RebuildContent, since block/row widths are only computed once, at RebuildContent time, from
+    // whatever _scrollView.Size.x was then - row/block HEIGHT never depends on width in this panel (no
+    // text wrapping), so this can never oscillate: forcing a rebuild at the new width never changes
+    // content height, so it never flips scrollbarNeeded back the other way.
+    private void RecheckScrollWidth()
+    {
+        float desiredWidth = ComputeScrollWidth(_scrollView.Size.y);
+        if (Mathf.Approximately(_scrollView.Size.x, desiredWidth))
+        {
+            return;
+        }
+
+        _scrollView.Size = new Vector2(desiredWidth, _scrollView.Size.y);
+        RebuildContent(_cachedFsm, _cachedStateName);
     }
 
     private void SetActiveSubTab(SubTabKind kind)
@@ -326,11 +365,6 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
 
         _activeSubTab = kind;
         UpdateSubTabToggles();
-
-        // Layout()'s own scroll-view width depends on _activeSubTab (see its own comment) - Layout is
-        // otherwise only re-run on an actual panel resize (Build/OnUpdateSize), so switching tabs needs
-        // its own explicit call to pick that up immediately rather than only on the next resize.
-        Layout();
     }
 
     private void UpdateSubTabToggles()
@@ -346,8 +380,34 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
     // also means an in-progress edit is never clobbered by a same-selection re-poll - RebuildContent
     // only ever runs on an actual tab/state/sub-tab change, which already tears down (and re-creates)
     // every row via CanvasPanel.ClearChildren, discarding any unsaved in-progress text deliberately.
-    public void Refresh(FsmInfo? fsm, string? stateName)
+    //
+    // fsm is null both when no tab is active and when the active tab's FSM isn't live in the current
+    // scene (see FsmTabState.IsLive) - tabFsmKey is what distinguishes those from each other and from
+    // "a different tab, itself also not live, just became active." Only the last of those actually
+    // needs a real clear: the room transition case (same tab, now disconnected) instead keeps
+    // whatever rows were last built exactly as they are, frozen, rather than tearing down (and later
+    // rebuilding from scratch) rows that might be reused unchanged the moment the player walks back
+    // into a room containing this FSM. A large FSM's Variables/Events rows are built for the whole
+    // FSM, not just one state (see BuildVariableRows/BuildEventsRows), so ClearChildren destroying
+    // all of them on every disconnect was a real, avoidable per-room-transition stall.
+    public void Refresh(FsmInfo? fsm, string? stateName, string? tabFsmKey)
     {
+        if (fsm == null)
+        {
+            if (tabFsmKey == _cachedTabFsmKey)
+            {
+                return;
+            }
+
+            _cachedFsm = null;
+            _cachedStateName = stateName;
+            _cachedSubTab = _activeSubTab;
+            _cachedTabFsmKey = tabFsmKey;
+
+            RebuildContent(null, stateName);
+            return;
+        }
+
         if (ReferenceEquals(_cachedFsm, fsm) && _cachedStateName == stateName && _cachedSubTab == _activeSubTab)
         {
             return;
@@ -356,6 +416,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
         _cachedFsm = fsm;
         _cachedStateName = stateName;
         _cachedSubTab = _activeSubTab;
+        _cachedTabFsmKey = tabFsmKey;
 
         RebuildContent(fsm, stateName);
     }
@@ -402,8 +463,8 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
         _actionBlocks.Clear();
         _selectedBlock = null;
         _sequencerBlockWidgets.Clear();
-        _sequenceColumnRects.Clear();
-        _sequenceRowRanges.Clear();
+        _sequenceColumnHitAreas.Clear();
+        _sequenceRowWidgets.Clear();
 
         FsmStateInfo? state = null;
         if (fsm != null && stateName != null)
@@ -501,8 +562,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
         Color? labelColor = field.IsHidden ? _ui.HiddenFieldLabelColor : null;
 
         // PlayMaker action fields expose an array as Fsm<Type>[] (FsmFloat[], FsmEvent[], ...), never a
-        // raw primitive array or an Array-typed FsmVariable (confirmed against
-        // agent-context/Playmaker's decompiled actions) - each element is its own NamedVariable, so
+        // raw primitive array or an Array-typed FsmVariable - each element is its own NamedVariable, so
         // this renders one row per element instead of the single joined-string read-only row
         // FormatActionField would otherwise produce for the whole array.
         if (field.FieldValue is Array array)
@@ -990,7 +1050,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
         CanvasSectionBlock block = BeginBlock(content, cursor);
 
         float gap = UICommon.ScaleWidth(4f);
-        float contentWidth = Mathf.Max(0f, _scrollView.Size.x - RowIndent);
+        float contentWidth = Mathf.Max(0f, _scrollView.Size.x - RowIndent - BlockRightGap);
         float headerWidth = Mathf.Max(0f, contentWidth - CloseButtonSize - gap);
 
         CanvasText header = content.Add(new CanvasText($"Row{cursor.Count++}", _ui));
@@ -1029,22 +1089,29 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
 
         cursor.Y = Mathf.Max(leftBottomY, rightBottomY);
 
-        // Spans down to the taller of the two columns (not just the Sequence column's own, possibly
-        // shorter, content) - covers a short Sequence column while Events is the taller one, and (via
-        // BuildSequenceColumn's own always-present blank row) still leaves real, visible catch space
-        // below the last sequence entry without needing an extra invisible buffer here on top of it.
-        _sequenceColumnRects[(stateName, actionRank)] = new Rect(leftX, columnTopY, columnWidth, cursor.Y - columnTopY);
+        // An invisible hit-area widget (no Graphic component, so it never renders or blocks raycasts -
+        // see CanvasPanel) spanning down to the taller of the two columns, not just the Sequence
+        // column's own, possibly shorter, content - covers a short Sequence column while Events is the
+        // taller one, and (via BuildSequenceColumn's own always-present blank row) still leaves real,
+        // visible catch space below the last sequence entry. Positioned/sized through the normal
+        // LocalPosition/Size pipeline so EndDrag can hit-test against its own Position/Size (via
+        // IsPointOver) exactly like every other click/hover check in this codebase already does.
+        CanvasPanel sequenceHitArea = content.Add(new CanvasPanel($"Row{cursor.Count++}"));
+        sequenceHitArea.LocalPosition = new Vector2(leftX, columnTopY);
+        sequenceHitArea.Size = new Vector2(columnWidth, cursor.Y - columnTopY);
+        sequenceHitArea.Build();
+        _sequenceColumnHitAreas[(stateName, actionRank)] = sequenceHitArea;
 
         EndBlock(block, cursor);
         _sequencerBlockWidgets[(stateName, actionRank)] = block;
     }
 
     // Left column: the ordered pattern - a draggable, reorderable, deletable row per entry. Records this
-    // block's own per-row Y-ranges (in the shared _scrollView's content-space, the same coordinate
-    // system cursor.Y already builds every row in) for EndDrag's own drop-index resolution - the
-    // column's overall drop-acceptance rect is recorded separately by the caller (BuildSequencerBlock),
-    // once it knows the taller of this column and the Loop+Events one, so a drop below the last event
-    // still lands inside the block instead of being rejected right past the last row's own bottom edge.
+    // block's own per-row widgets for EndDrag's own drop-index resolution (see ComputeDropIndex, which
+    // hit-tests directly against each row's own Position/Size) - the column's overall drop-acceptance
+    // hit area is recorded separately by the caller (BuildSequencerBlock), once it knows the taller of
+    // this column and the Loop+Events one, so a drop below the last event still lands inside the block
+    // instead of being rejected right past the last row's own bottom edge.
     private float BuildSequenceColumn(CanvasPanel content, RowCursor cursor, string fsmKey, string stateName, int actionRank, List<string> pattern, float x, float y, float width)
     {
         (string, int) blockKey = (stateName, actionRank);
@@ -1057,7 +1124,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
         header.Build();
         y += RowHeight;
 
-        var rowRanges = new List<(float Y, float Height)>();
+        var rowWidgets = new List<CanvasNode>();
 
         float dragWidth = Mathf.Max(0f, width - SeqDeleteButtonSize - SeqRowGap);
         for (int i = 0; i < pattern.Count; i++)
@@ -1086,37 +1153,35 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
             deleteButton.Build();
             deleteButton.OnClicked += () => RemovePatternEntry(fsmKey, stateName, actionRank, capturedIndex);
 
-            rowRanges.Add((y, RowHeight));
+            rowWidgets.Add(dragSurface);
             y += RowHeight + SeqRowGap;
         }
 
         // A minimum of one blank row always sits below the real entries (or alone, if the pattern is
         // still empty) - a bigger, easier-to-hit drop target than relying on empty space past the last
-        // row's own bottom edge, and (when the pattern is empty) the home for the "drag events here"
-        // hint. Not itself draggable/deletable, and deliberately NOT added to rowRanges: EndDrag's own
-        // "past the last row's midpoint -> append at the end" fallback already resolves a drop anywhere
-        // on or below it to the end of the list, so adding it there would only make that same fallback
-        // trigger one row sooner with no behavioral difference.
+        // row's own bottom edge, and always shows the "drag events here" hint so the row's own purpose
+        // (append more here) stays clear even once other entries already exist above it. Not itself
+        // draggable/deletable, and deliberately NOT added to rowWidgets: EndDrag's own "past the last
+        // row's midpoint -> append at the end" fallback already resolves a drop anywhere on or below it
+        // to the end of the list, so adding it there would only make that same fallback trigger one row
+        // sooner with no behavioral difference.
         CanvasImage blankRow = content.Add(new CanvasImage($"Row{cursor.Count++}", _ui) { Tint = Color.clear });
         blankRow.LocalPosition = new Vector2(x, y);
         blankRow.Size = new Vector2(width, RowHeight);
         blankRow.AddBorder(_ui.PanelBorder);
         blankRow.Build();
 
-        if (pattern.Count == 0)
-        {
-            CanvasText hint = content.Add(new CanvasText($"Row{cursor.Count++}", _ui) { Text = "(drag events here)" });
-            hint.Color = _ui.ReadOnlyColor;
-            hint.Alignment = TextAnchor.MiddleCenter;
-            hint.Overflow = HorizontalWrapMode.Overflow;
-            hint.LocalPosition = new Vector2(x, y);
-            hint.Size = new Vector2(width, RowHeight);
-            hint.Build();
-        }
+        CanvasText hint = content.Add(new CanvasText($"Row{cursor.Count++}", _ui) { Text = "(drag events here)" });
+        hint.Color = _ui.ReadOnlyColor;
+        hint.Alignment = TextAnchor.MiddleCenter;
+        hint.Overflow = HorizontalWrapMode.Overflow;
+        hint.LocalPosition = new Vector2(x, y);
+        hint.Size = new Vector2(width, RowHeight);
+        hint.Build();
 
         y += RowHeight;
 
-        _sequenceRowRanges[blockKey] = rowRanges;
+        _sequenceRowWidgets[blockKey] = rowWidgets;
 
         return y;
     }
@@ -1334,9 +1399,9 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
     }
 
     // Cross-block drops are rejected outright - a drop is only accepted if it lands inside the SAME
-    // block's own Sequence-column rect the drag originated from (_dragBlockKey), since a block's Events
-    // column only ever offers candidates for, and only ever makes sense to feed into, that same block's
-    // own Sequence.
+    // block's own Sequence-column hit area the drag originated from (_dragBlockKey), since a block's
+    // Events column only ever offers candidates for, and only ever makes sense to feed into, that same
+    // block's own Sequence.
     private void EndDrag(string fsmKey, PointerEventData e)
     {
         _dragGhost.ActiveSelf = false;
@@ -1353,19 +1418,13 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
             return;
         }
 
-        if (!_sequenceColumnRects.TryGetValue(blockKey.Value, out Rect columnRect))
-        {
-            return;
-        }
-
-        Vector2 contentPoint = ScreenToScrollContentPoint(e.position);
-        if (!columnRect.Contains(contentPoint))
+        if (!_sequenceColumnHitAreas.TryGetValue(blockKey.Value, out CanvasNode? hitArea) || !hitArea.IsPointOver(e.position))
         {
             return; // dropped outside this block's own Sequence column - cancel with no mutation
         }
 
         List<string> pattern = GetSequencerPattern(fsmKey, blockKey.Value.StateName, blockKey.Value.ActionRank);
-        int dropIndex = ComputeDropIndex(blockKey.Value, contentPoint.y);
+        int dropIndex = ComputeDropIndex(blockKey.Value, e.position);
 
         if (sourceIndex.HasValue)
         {
@@ -1390,38 +1449,30 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
             GetSequencerFixedExtraLoops(fsmKey, blockKey.Value.StateName, blockKey.Value.ActionRank));
     }
 
-    // Finds which row (if any) contentY landed above the midpoint of, within the given block's own
-    // recorded Sequence rows - returns ranges.Count (append) if it's past the last row's midpoint.
-    private int ComputeDropIndex((string StateName, int ActionRank) blockKey, float contentY)
+    // Finds which row (if any) the drop point landed above the midpoint of, within the given block's own
+    // recorded Sequence rows - compares screen-space Y directly against each row widget's own Position
+    // (already fully resolved, including scroll offset, via the same LocalPosition/Parent.Position chain
+    // that positions it on screen in the first place), rather than re-deriving content-space coordinates
+    // by hand. Returns rows.Count (append) if the drop landed past the last row's own midpoint.
+    private int ComputeDropIndex((string StateName, int ActionRank) blockKey, Vector2 screenPoint)
     {
-        if (!_sequenceRowRanges.TryGetValue(blockKey, out List<(float Y, float Height)>? ranges))
+        if (!_sequenceRowWidgets.TryGetValue(blockKey, out List<CanvasNode>? rows))
         {
             return 0;
         }
 
-        for (int i = 0; i < ranges.Count; i++)
+        float dropTopLeftY = Screen.height - screenPoint.y;
+
+        for (int i = 0; i < rows.Count; i++)
         {
-            (float y, float height) = ranges[i];
-            if (contentY < y + height / 2f)
+            CanvasNode row = rows[i];
+            if (dropTopLeftY < row.Position.y + row.Size.y / 2f)
             {
                 return i;
             }
         }
 
-        return ranges.Count;
-    }
-
-    // Converts a raw screen point (bottom-left/y-up, e.g. PointerEventData.position) into the shared
-    // _scrollView's content-space (top-left/y-down, unscrolled) - same conversion CanvasNode.IsMouseOver
-    // uses for Y, plus subtracting the scroll view's own content offset (Content.LocalPosition.y, which
-    // is <= 0 while scrolled down per CanvasScrollView.Poll's own clamp) to land in the same
-    // coordinate system every row's own LocalPosition/cursor.Y already uses.
-    private Vector2 ScreenToScrollContentPoint(Vector2 screenPos)
-    {
-        float viewportLocalY = (Screen.height - screenPos.y) - _scrollView.Position.y;
-        float contentY = viewportLocalY - (_scrollView.Content?.LocalPosition.y ?? 0f);
-        float contentX = screenPos.x - _scrollView.Position.x;
-        return new Vector2(contentX, contentY);
+        return rows.Count;
     }
 
     // ---------------- Shared editable-value helpers ----------------
@@ -1436,9 +1487,9 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
         _ => false,
     };
 
-    // Numeric vs. string vs. plain-text color-coding, concept from FSMExpress's type/value converter -
-    // vector/rect/quaternion/color-typed variables fall through to the numeric color, since they're
-    // ultimately just a comma-joined list of floats (see FsmEditManager.FormatFloats).
+    // Numeric vs. string value color-coding - vector/rect/quaternion/color-typed variables fall
+    // through to the numeric color, since they're ultimately just a comma-joined list of floats
+    // (see FsmEditManager.FormatFloats).
     private Color ValueColorFor(object? value)
     {
         object? unwrapped = value is NamedVariable nv ? nv.RawValue : value;
@@ -1474,10 +1525,10 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
 
     private (float LabelWidth, float ValueX, float ValueWidth) ComputeColumns(float indent)
     {
-        float available = Mathf.Max(0f, _scrollView.Size.x - indent);
+        float available = Mathf.Max(0f, _scrollView.Size.x - indent - BlockRightGap);
         float labelWidth = available * 0.52f;
         float valueX = indent + labelWidth + UICommon.ScaleWidth(6);
-        float valueWidth = Mathf.Max(0f, _scrollView.Size.x - valueX);
+        float valueWidth = Mathf.Max(0f, _scrollView.Size.x - BlockRightGap - valueX);
         return (labelWidth, valueX, valueWidth);
     }
 
@@ -1510,7 +1561,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
         header.Color = _ui.TypeBadgeColor;
         header.Overflow = HorizontalWrapMode.Overflow;
         header.LocalPosition = new Vector2(indent, cursor.Y);
-        header.Size = new Vector2(Mathf.Max(0f, _scrollView.Size.x - indent), HeaderRowHeight);
+        header.Size = new Vector2(Mathf.Max(0f, _scrollView.Size.x - indent - BlockRightGap), HeaderRowHeight);
         header.Build();
 
         cursor.Y += HeaderRowHeight;
@@ -1534,7 +1585,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
         }
 
         float gap = UICommon.ScaleWidth(4f);
-        float available = Mathf.Max(0f, _scrollView.Size.x - RowIndent);
+        float available = Mathf.Max(0f, _scrollView.Size.x - RowIndent - BlockRightGap);
         float headerWidth = Mathf.Max(0f, available - SequencerButtonWidth - gap);
 
         CanvasText header = content.Add(new CanvasText($"Row{cursor.Count++}", _ui));
@@ -1659,7 +1710,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
         row.Color = color;
         row.Overflow = HorizontalWrapMode.Overflow;
         row.LocalPosition = new Vector2(indent, cursor.Y);
-        row.Size = new Vector2(Mathf.Max(0f, _scrollView.Size.x - indent), RowHeight);
+        row.Size = new Vector2(Mathf.Max(0f, _scrollView.Size.x - indent - BlockRightGap), RowHeight);
         row.Build();
 
         cursor.Y += RowHeight;

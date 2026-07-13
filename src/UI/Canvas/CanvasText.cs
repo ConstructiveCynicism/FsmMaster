@@ -3,10 +3,8 @@ using UnityEngine.UI;
 
 namespace FsmMaster;
 
-// Text label wrapper - concept-ported from Silksong.DebugMod's CanvasText
-// (agent-context/Silksong.DebugMod-main/UI/Canvas/CanvasText.cs). Field is named _uiText (not `text`)
-// so it doesn't collide with the wrapped UnityEngine.UI.Text type name, matching that same naming
-// choice in the reference.
+// Text label wrapper around UnityEngine.UI.Text. The backing field is named _uiText (not `text`) so
+// it doesn't collide with the wrapped Text type name.
 internal class CanvasText : CanvasNode
 {
     protected Text? _uiText;

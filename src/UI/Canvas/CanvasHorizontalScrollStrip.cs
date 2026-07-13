@@ -5,15 +5,14 @@ using UnityEngine.UI;
 
 namespace FsmMaster;
 
-// Horizontal scroll viewport for the FSM tab strip - not a DebugMod port (its CanvasScrollView is
-// vertical-only, agent-context/Silksong.DebugMod-main/UI/Canvas/CanvasScrollView.cs), but the same
-// pattern rotated to the X axis: this node is the clipped viewport, SetContent supplies the single
-// child panel whose tabs a caller adds to, and scrolling moves that child's LocalPosition.x within
-// the viewport - clamped so content never scrolls past its own bounds. Clipping uses a real Unity
-// RectMask2D rather than CanvasNode's own hand-rolled CanvasRenderer.EnableRectClipping - that
-// hand-rolled clip is rendering-only and has no effect on GraphicRaycaster hit-testing, so a tab
-// scrolled out of view stayed fully clickable at its real, moved position (see CanvasScrollView's own
-// header comment for the full explanation of this same bug and fix).
+// Horizontal scroll viewport for the FSM tab strip. This node is the clipped viewport; SetContent
+// supplies the single child panel whose tabs a caller adds to, and scrolling moves that child's
+// LocalPosition.x within the viewport, clamped so content never scrolls past its own bounds.
+// Clipping uses a real Unity RectMask2D rather than CanvasNode's own hand-rolled
+// CanvasRenderer.EnableRectClipping - that hand-rolled clip is rendering-only and has no effect on
+// GraphicRaycaster hit-testing, so a tab scrolled out of view stayed fully clickable at its real,
+// moved position (see CanvasScrollView's own header comment for the full explanation of this same
+// bug and fix).
 internal sealed class CanvasHorizontalScrollStrip : CanvasNode, IHorizontalScrollSource
 {
     private const float ScrollSpeed = 30f;

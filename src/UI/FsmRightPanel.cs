@@ -6,15 +6,13 @@ using UnityEngine.EventSystems;
 
 namespace FsmMaster;
 
-// Composition root for FsmMaster's right-side uGUI panel - anchored top-right, matching where
-// Silksong.DebugMod's own MainPanel sits (agent-context/Silksong.DebugMod-main/UI/MainPanel.cs).
-// Built up incrementally across the UI overhaul's build order: the title bar (drag-to-reposition),
-// the Open/Save/Load/Undo/Reset/Graph button row, the Open button's Scene/Object/FSM dropdown, the
-// FSM tab strip, the Actions/Events/Variables active-state panel, and a resize handle in the bottom-
-// left corner (bottom-left, not bottom-right, since this panel is docked flush against the right
-// edge of the screen - see OnResizeDragged) - drag/resize handling mirrors FsmMonitorPanel's own
-// (title-bar drag surface, corner CanvasResizeHandle), the one difference being this panel has no
-// separate "locked" state to gate on.
+// Composition root for FsmMaster's right-side uGUI panel - anchored top-right. Contains the title bar
+// (drag-to-reposition), the Open/Save/Load/Undo/Reset/Graph button row, the Open button's
+// Scene/Object/FSM dropdown, the FSM tab strip, the Actions/Events/Variables active-state panel, and
+// a resize handle in the bottom-left corner (bottom-left, not bottom-right, since this panel is
+// docked flush against the right edge of the screen - see OnResizeDragged) - drag/resize handling
+// mirrors FsmMonitorPanel's own (title-bar drag surface, corner CanvasResizeHandle), the one
+// difference being this panel has no separate "locked" state to gate on.
 internal sealed class FsmRightPanel : CanvasPanel
 {
     private const int PanelWidth = 340;
@@ -462,9 +460,8 @@ internal sealed class FsmRightPanel : CanvasPanel
     // Size/LocalPosition are only ever computed from Screen.width/height at construction time -
     // re-checked every frame so a resolution/window-size change repositions the panel and cascades
     // through Size's own OnUpdateSize chain (down to ActiveStatePanel.Layout, etc.) instead of leaving
-    // it anchored to the resolution that was active when the plugin loaded. A full canvas rebuild
-    // (matching Silksong.DebugMod's debounced approach) is deferred to a later polish pass; this
-    // panel has no baked, resolution-dependent textures, so a plain in-place recompute is sufficient.
+    // it anchored to the resolution that was active when the plugin loaded. This panel has no baked,
+    // resolution-dependent textures, so a plain in-place recompute on every frame is sufficient.
     private void ReflowOnResolutionChange()
     {
         if (Screen.width == _lastScreenWidth && Screen.height == _lastScreenHeight)

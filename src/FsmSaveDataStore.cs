@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using UnityEngine;
 
 namespace FsmMaster;
@@ -110,10 +111,9 @@ internal static class FsmSaveDataStore
             Directory.Delete(fsmDirectory, recursive: true);
         }
 
-        Dictionary<string, string> manifest = LoadLastChosenManifest(sceneName);
-        if (manifest.Remove(fsmKey))
+        if (LastChosenByScene.TryGetValue(sceneName, out Dictionary<string, string>? manifest))
         {
-            SaveLastChosenManifest(sceneName, manifest);
+            manifest.Remove(fsmKey);
         }
     }
 
@@ -123,9 +123,17 @@ internal static class FsmSaveDataStore
     public static List<FsmEditSet> LoadLastChosenForScene(string sceneName, IEnumerable<string> fsmKeysPresent)
     {
         var result = new List<FsmEditSet>();
-        Dictionary<string, string> manifest = LoadLastChosenManifest(sceneName);
 
-        foreach (string fsmKey in fsmKeysPresent)
+        // fsmKeysPresent is already filtered to open tabs whose FsmKey is actually live in the scene
+        // that just loaded (see FsmMasterPlugin.ApplyPersistedEditsForScene) - most scene loads have
+        // none, and this in-memory lookup is essentially free in that case.
+        List<string> keys = fsmKeysPresent is List<string> list ? list : fsmKeysPresent.ToList();
+        if (keys.Count == 0 || !LastChosenByScene.TryGetValue(sceneName, out Dictionary<string, string>? manifest))
+        {
+            return result;
+        }
+
+        foreach (string fsmKey in keys)
         {
             if (!manifest.TryGetValue(fsmKey, out string? saveName))
             {
@@ -143,73 +151,73 @@ internal static class FsmSaveDataStore
     }
 
     public static string? GetLastChosenSaveName(string sceneName, string fsmKey) =>
-        LoadLastChosenManifest(sceneName).TryGetValue(fsmKey, out string? saveName) ? saveName : null;
+        LastChosenByScene.TryGetValue(sceneName, out Dictionary<string, string>? manifest)
+        && manifest.TryGetValue(fsmKey, out string? saveName)
+            ? saveName
+            : null;
 
     // Recorded whenever the user explicitly saves or loads a named configuration for this FsmKey (see
     // FsmRightPanel's save/load dialog handlers) - the next save/load supersedes whatever was chosen
     // before, and this is what LoadLastChosenForScene reapplies on the next scene load.
     public static void SetLastChosenSaveName(string sceneName, string fsmKey, string saveName)
     {
-        Dictionary<string, string> manifest = LoadLastChosenManifest(sceneName);
+        if (!LastChosenByScene.TryGetValue(sceneName, out Dictionary<string, string>? manifest))
+        {
+            manifest = new Dictionary<string, string>();
+            LastChosenByScene[sceneName] = manifest;
+        }
+
         manifest[fsmKey] = saveName;
-        SaveLastChosenManifest(sceneName, manifest);
     }
 
     // ---- Last-chosen-save-per-FsmKey manifest ----
-    // One small file per scene (not one file per FsmKey folder) so remembering "which save is active" for
-    // an FsmKey can never collide with a user-chosen save name in that same FsmKey's own folder.
+    // Kept in memory only, not written to disk - a "last chosen" configuration should auto-reapply across
+    // scene loads within the current game session, but not carry over into the next time the game itself
+    // is launched. Resets naturally on process exit; a fresh Dictionary here on plugin load (Awake) would
+    // be redundant since ScriptEngine reloads re-execute this static initializer along with the rest of
+    // the assembly.
+    private static readonly Dictionary<string, Dictionary<string, string>> LastChosenByScene = new();
 
-    private static string GetLastChosenManifestPath(string sceneName) =>
-        Path.Combine(GetSceneDirectory(sceneName), "_last-chosen.json");
+    // ---- In-memory serialization ----
+    // No file I/O - lets a caller snapshot/restore a set of edits as a single string it stores
+    // somewhere else entirely (e.g. FsmMaster's DebugMod savestate integration, which stashes this in a
+    // savestate's own custom data rather than a file under DataDirectory). Reuses ToWire/FromWire below
+    // rather than a second JSON shape.
 
     [Serializable]
-    private sealed class LastChosenManifestWire
+    private sealed class FsmEditSetListWire
     {
-        public List<string> Entries = new(); // "fsmKey=saveName", one per FsmKey with a remembered choice
+        // Each entry is one FsmEditSetWire already flattened to its own JSON string via JsonUtility.ToJson
+        // - see this file's opening comment on why JsonUtility drops a List<T> of a custom class outright.
+        public List<string> EditSets = new();
     }
 
-    private static Dictionary<string, string> LoadLastChosenManifest(string sceneName)
+    public static string SerializeEditSets(IEnumerable<FsmEditSet> editSets)
     {
-        var result = new Dictionary<string, string>();
-        string path = GetLastChosenManifestPath(sceneName);
-        if (!File.Exists(path))
+        var wire = new FsmEditSetListWire();
+        foreach (FsmEditSet editSet in editSets)
         {
-            return result;
+            wire.EditSets.Add(JsonUtility.ToJson(ToWire(editSet)));
         }
 
-        LastChosenManifestWire? wire = JsonUtility.FromJson<LastChosenManifestWire>(File.ReadAllText(path));
+        return JsonUtility.ToJson(wire);
+    }
+
+    public static List<FsmEditSet> DeserializeEditSets(string json)
+    {
+        var result = new List<FsmEditSet>();
+        FsmEditSetListWire? wire = JsonUtility.FromJson<FsmEditSetListWire>(json);
         if (wire == null)
         {
             return result;
         }
 
-        foreach (string entry in wire.Entries)
+        foreach (string entry in wire.EditSets)
         {
-            int eq = entry.IndexOf('=');
-            if (eq > 0)
-            {
-                result[entry[..eq]] = entry[(eq + 1)..];
-            }
+            result.Add(FromWire(JsonUtility.FromJson<FsmEditSetWire>(entry)));
         }
 
         return result;
-    }
-
-    private static void SaveLastChosenManifest(string sceneName, Dictionary<string, string> manifest)
-    {
-        string sceneDirectory = GetSceneDirectory(sceneName);
-        if (!Directory.Exists(sceneDirectory))
-        {
-            Directory.CreateDirectory(sceneDirectory);
-        }
-
-        var wire = new LastChosenManifestWire();
-        foreach (KeyValuePair<string, string> entry in manifest)
-        {
-            wire.Entries.Add($"{entry.Key}={entry.Value}");
-        }
-
-        File.WriteAllText(GetLastChosenManifestPath(sceneName), JsonUtility.ToJson(wire, prettyPrint: true));
     }
 
     // ---- Wire format conversion ----

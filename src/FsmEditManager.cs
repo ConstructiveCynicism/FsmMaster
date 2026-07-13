@@ -54,6 +54,15 @@ internal sealed class FsmEditManager
     private readonly Dictionary<string, Stack<Action>> _undoStacks = new();
     private bool _isUndoing;
 
+    // FsmKeys with an edit that couldn't be physically installed on some live instance yet because that
+    // instance's owning GameObject hasn't activated (InstallSequencer/DisableState both hit this - see
+    // their own comments). Retried every frame from PollPendingActivations rather than relying on a
+    // one-shot Harmony hook on Fsm's own Preprocess(): neither fsm.Preprocessed nor a Preprocess()
+    // postfix reliably predicts the moment a given FsmStateAction is actually safe to touch (see
+    // InstallSequencer's comment on state.Actions' lazy-load timing), whereas re-running the real apply
+    // call is correct regardless of why the earlier attempt didn't stick.
+    private readonly HashSet<string> _pendingActivationFsmKeys = new();
+
     // Bumped by every method that actually mutates a live Fsm (variable/action-field overrides, state
     // neutering, transition retargeting, sequencer installs, and ResetFsm's restore) - FsmGraphOverlay
     // compares this against the value it last rebuilt its node/transition layout cache from, so a live
@@ -111,12 +120,81 @@ internal sealed class FsmEditManager
     public IReadOnlyList<Fsm> GetLiveInstances(string fsmKey) =>
         _liveInstances.TryGetValue(fsmKey, out List<Fsm>? instances) ? instances : Array.Empty<Fsm>();
 
+    // Called by FsmActivatedPatch's Postfix (FsmMasterPlugin.cs) right before it reapplies a pending edit
+    // set, to keep _liveInstances in sync for FSMs built from an FsmTemplate. PlayMakerFSM.Awake() calls
+    // InitTemplate(), which replaces the component's Fsm field with a brand new Fsm object wrapping the
+    // template the moment its owning GameObject first activates - the placeholder Fsm the initial
+    // FindObjectsByType scan captured for this component
+    // (see ReplaceLiveInstances) becomes an orphaned object nothing in PlayMaker will ever run again.
+    // Without this, ApplyEditSet keeps reapplying edits to that discarded reference while the real,
+    // just-activated fsm never receives them - matching how FsmDataCollector.CollectFsmInfo instead always
+    // re-reads component.Fsm live rather than caching it, which is why editing the same FSM through the
+    // panel while it's still inactive already behaves correctly. Matches the existing entry to replace by
+    // owning PlayMakerFSM component, not by Fsm reference, since the reference is exactly what changed.
+    public void ReconcileLiveInstance(string fsmKey, Fsm fsm)
+    {
+        if (!_liveInstances.TryGetValue(fsmKey, out List<Fsm>? instances))
+        {
+            instances = new List<Fsm>();
+            _liveInstances[fsmKey] = instances;
+        }
+
+        instances.RemoveAll(existing => existing != fsm && existing.FsmComponent == fsm.FsmComponent);
+
+        if (!instances.Contains(fsm))
+        {
+            instances.Add(fsm);
+        }
+    }
+
+    // Called every frame from FsmMasterPlugin.Update() - retries every FsmKey that InstallSequencer or
+    // DisableState had to leave partly unapplied because some live instance's owning GameObject hadn't
+    // activated yet. This exists instead of relying solely on FsmActivatedPatch's one-shot Postfix
+    // because neither fsm.Preprocessed nor a Preprocess() hook has proven to reliably fire/predict the
+    // moment a given instance is actually safe to touch (see InstallSequencer's own comment) - re-running
+    // the real apply call converges regardless of why the earlier attempt didn't stick.
+    public void PollPendingActivations()
+    {
+        if (_pendingActivationFsmKeys.Count == 0)
+        {
+            return;
+        }
+
+        foreach (string fsmKey in _pendingActivationFsmKeys.ToArray())
+        {
+            _pendingActivationFsmKeys.Remove(fsmKey);
+
+            if (GetActiveEditSet(fsmKey) is not { } editSet)
+            {
+                continue;
+            }
+
+            // Mirrors what FsmActivatedPatch's Postfix does for the one instance it fires for: an
+            // instance built from an FsmTemplate gets a brand new Fsm object swapped into its owning
+            // PlayMakerFSM the moment it first activates (see ReconcileLiveInstance's own comment), so
+            // the Fsm reference already sitting in _liveInstances can be an orphaned placeholder even once
+            // the object is active - re-read every tracked component's current Fsm fresh (PlayMakerFSM.Fsm
+            // is never cached, unlike this class's own list) and reconcile before reapplying.
+            foreach (Fsm stale in GetLiveInstances(fsmKey).ToArray())
+            {
+                if (stale.FsmComponent is { } component && component.Fsm is { } fresh)
+                {
+                    ReconcileLiveInstance(fsmKey, fresh);
+                }
+            }
+
+            ApplyEditSet(editSet);
+        }
+    }
+
     // Every FsmKey with at least one edit currently in effect this session.
     public IReadOnlyCollection<string> GetEditedFsmKeys() => _activeEdits.Keys;
 
     public FsmEditSet? GetActiveEditSet(string fsmKey) =>
         _activeEdits.TryGetValue(fsmKey, out FsmEditSet? set) ? set : null;
 
+    // Applies every variable override, action field override, disabled state, transition retarget, and
+    // sequencer override in editSet to every live Fsm instance sharing editSet.FsmKey.
     public void ApplyEditSet(FsmEditSet editSet)
     {
         if (!_liveInstances.TryGetValue(editSet.FsmKey, out List<Fsm>? instances) || instances.Count == 0)
@@ -125,35 +203,50 @@ internal sealed class FsmEditManager
             return;
         }
 
+        // editSet is frequently the exact same FsmEditSet instance tracked in _activeEdits (e.g.
+        // FsmActivatedPatch's Postfix calls GetActiveEditSet then feeds the result straight back in
+        // here), and every Apply*/DisableState/InstallSequencer call below mutates that live instance's
+        // own override lists via RemoveAll+Add. Enumerating editSet's lists directly in that case means
+        // mutating a List<T> while foreach is iterating it, which throws InvalidOperationException on
+        // the very first entry. Snapshotting each list up front decouples the enumeration from whatever
+        // GetOrCreateActiveEditSet(fsmKey) further down mutates, whether or not it's the same object.
+        var variableOverrides = editSet.VariableOverrides.ToArray();
+        var actionFieldOverrides = editSet.ActionFieldOverrides.ToArray();
+        var disabledStates = editSet.DisabledStates.ToArray();
+        var transitionRetargets = editSet.TransitionRetargets.ToArray();
+        var sequencerOverrides = editSet.SequencerOverrides.ToArray();
+
         foreach (Fsm fsm in instances)
         {
-            foreach (VariableOverride ov in editSet.VariableOverrides)
+            foreach (VariableOverride ov in variableOverrides)
             {
                 ApplyVariableOverride(editSet.FsmKey, fsm, ov);
             }
 
-            foreach (ActionFieldOverride ov in editSet.ActionFieldOverrides)
+            foreach (ActionFieldOverride ov in actionFieldOverrides)
             {
                 ApplyActionFieldOverride(editSet.FsmKey, fsm, ov);
             }
 
-            foreach (string stateName in editSet.DisabledStates)
+            foreach (string stateName in disabledStates)
             {
                 DisableState(editSet.FsmKey, fsm, stateName);
             }
 
-            foreach (TransitionRetarget retarget in editSet.TransitionRetargets)
+            foreach (TransitionRetarget retarget in transitionRetargets)
             {
                 ApplyTransitionRetarget(editSet.FsmKey, fsm, retarget);
             }
 
-            foreach (SequencerOverride seq in editSet.SequencerOverrides)
+            foreach (SequencerOverride seq in sequencerOverrides)
             {
                 InstallSequencer(editSet.FsmKey, fsm, seq);
             }
         }
     }
 
+    // Restores every live instance of fsmKey to its pristine snapshot and drops all edit/undo bookkeeping
+    // for that key, so a subsequent edit starts from a clean slate.
     public void ResetFsm(string fsmKey)
     {
         if (!_pristine.TryGetValue(fsmKey, out FsmPristineSnapshot? snapshot))
@@ -248,6 +341,7 @@ internal sealed class FsmEditManager
         }
     }
 
+    // Same shape as SetVariable, for one field on a specific state's action instead of a whole variable.
     public void SetActionField(string fsmKey, string stateName, int actionIndex, string expectedActionTypeName, string fieldName, string stringValue)
     {
         string? previousValue = GetCurrentActionFieldValue(fsmKey, stateName, actionIndex, expectedActionTypeName, fieldName);
@@ -415,6 +509,8 @@ internal sealed class FsmEditManager
 
     // ---- Variables ----
 
+    // Applies one variable override to a single live Fsm instance: captures the pristine value on first
+    // touch, assigns the new value, and records the override in that instance's active edit set.
     public void ApplyVariableOverride(string fsmKey, Fsm fsm, VariableOverride ov)
     {
         NamedVariable? variable = fsm.Variables.FindVariable(ov.Name);
@@ -540,6 +636,9 @@ internal sealed class FsmEditManager
 
     // ---- Action fields ----
 
+    // Applies one field-level override to a specific action on a single live Fsm instance: captures the
+    // pristine value on first touch, assigns the new value via reflection, and records the override in
+    // that instance's active edit set.
     public void ApplyActionFieldOverride(string fsmKey, Fsm fsm, ActionFieldOverride ov)
     {
         FsmState? state = fsm.GetState(ov.StateName);
@@ -601,9 +700,9 @@ internal sealed class FsmEditManager
     }
 
     // A Fsm<Type>[] field's elements already ARE NamedVariable instances (PlayMaker action fields never
-    // expose a raw primitive array - confirmed against agent-context/Playmaker's decompiled actions),
-    // so this reuses TryFormatValue/AssignNamedVariable exactly as the whole-field path does, just
-    // applied to one element instead of the field itself - the field reference never changes.
+    // expose a raw primitive array), so this reuses TryFormatValue/AssignNamedVariable exactly as the
+    // whole-field path does, just applied to one element instead of the field itself - the field
+    // reference never changes.
     private void ApplyActionFieldArrayElementOverride(string fsmKey, ActionFieldOverride ov, object? fieldValue)
     {
         if (fieldValue is not Array array || ov.ArrayIndex >= array.Length)
@@ -743,6 +842,8 @@ internal sealed class FsmEditManager
         BumpEditGeneration();
     }
 
+    // Neuters one state on a single live Fsm instance: disables every action that was enabled and injects
+    // a synthetic exit action so the state still transitions out via FindExitEvent's chosen event.
     public void DisableState(string fsmKey, Fsm fsm, string stateName)
     {
         FsmState? state = fsm.GetState(stateName);
@@ -759,17 +860,24 @@ internal sealed class FsmEditManager
 
         FsmPristineSnapshot snapshot = GetOrCreateSnapshot(fsmKey);
 
-        var disabledByUs = new List<int>();
-        for (int i = 0; i < state.Actions.Length; i++)
+        // Skipped on a catch-up re-invocation (see below) - the first pass already disabled everything
+        // that was enabled, so re-scanning "what's currently enabled" here a second time would find
+        // nothing and silently overwrite the recorded indices with an empty list, leaving EnableState/
+        // ResetFsm unable to restore them.
+        if (!snapshot.NeuteredActionIndices.ContainsKey(stateName))
         {
-            if (state.Actions[i].Enabled)
+            var disabledByUs = new List<int>();
+            for (int i = 0; i < state.Actions.Length; i++)
             {
-                state.Actions[i].Enabled = false;
-                disabledByUs.Add(i);
+                if (state.Actions[i].Enabled)
+                {
+                    state.Actions[i].Enabled = false;
+                    disabledByUs.Add(i);
+                }
             }
-        }
 
-        snapshot.NeuteredActionIndices[stateName] = disabledByUs;
+            snapshot.NeuteredActionIndices[stateName] = disabledByUs;
+        }
 
         FsmEvent? exitEvent = FindExitEvent(state);
         if (exitEvent != null)
@@ -777,6 +885,18 @@ internal sealed class FsmEditManager
             var exitAction = new SendExitEventAction(exitEvent);
             state.AddAction(exitAction);
             snapshot.InjectedExitActions.Add(exitAction);
+        }
+        else if (!state.IsInitialized)
+        {
+            // FindExitEvent can't check global transitions yet - state.Fsm (FsmState's own owning-Fsm
+            // backref, set by Fsm.InitData()) is still null because this instance's owning GameObject
+            // hasn't been active yet, so PlayMakerFSM.Awake() never ran. Actions are already disabled
+            // above; FsmActivatedPatch (FsmMasterPlugin.cs) reapplies this edit set once this instance's
+            // own Fsm.Preprocess() actually runs, which is preceded by InitData() setting state.Fsm - the
+            // re-invocation above then skips straight to this exit-event lookup and (assuming a
+            // CANCEL/FINISHED/NEXT transition exists) completes the wiring then.
+            _logger.LogWarning($"[FsmMaster] Fsm '{fsm.Name}' hasn't activated yet (owning object inactive); state '{stateName}' has its actions disabled but its exit event can't be resolved until this instance activates.");
+            _pendingActivationFsmKeys.Add(fsmKey);
         }
         else
         {
@@ -803,7 +923,18 @@ internal sealed class FsmEditManager
     {
         foreach (string candidate in ExitEventPriority)
         {
-            FsmTransition? transition = state.GetTransition(candidate) ?? state.Fsm.GetGlobalTransition(candidate);
+            // state.Transitions is populated straight from scene deserialization, so a state-level
+            // match works even on an FSM that has never run Preprocess. state.Fsm, by contrast, is
+            // [NonSerialized] on FsmState and stays null until Fsm.InitData() runs (Preprocess()'s own
+            // owning Fsm reference is unrelated to this) - only reachable once the FSM's owning
+            // GameObject has been active at least once. Guard the global-transition fallback on
+            // state.IsInitialized instead of dereferencing state.Fsm directly (its own getter logs an
+            // error and returns null rather than throwing, but calling GetGlobalTransition on that null
+            // result would NRE) - an inactive FSM with only a global CANCEL/FINISHED/NEXT transition
+            // just can't resolve its exit event yet; see DisableState's own IsInitialized branch for how
+            // that gets caught up once the FSM activates.
+            FsmTransition? transition = state.GetTransition(candidate)
+                ?? (state.IsInitialized ? state.Fsm.GetGlobalTransition(candidate) : null);
             if (transition != null)
             {
                 return transition.FsmEvent;
@@ -848,6 +979,9 @@ internal sealed class FsmEditManager
 
     // ---- Transitions (also covers "disable an event" and relocating a transition's origin state) ----
 
+    // Applies one transition retarget to a single live Fsm instance: locates the transition (state-level
+    // or global), captures the instructions to restore it on first touch, then relocates/retargets it or
+    // removes it outright if retarget.NewToState is the disabled marker.
     public void ApplyTransitionRetarget(string fsmKey, Fsm fsm, TransitionRetarget retarget)
     {
         bool isGlobal = string.IsNullOrEmpty(retarget.StateName);
@@ -1146,7 +1280,35 @@ internal sealed class FsmEditManager
             return;
         }
 
+        // Recorded up front, before the original.State guard below - a fsmKey can have multiple live
+        // instances (e.g. several copies of the same enemy in a room), and this bookkeeping is shared
+        // across all of them rather than per-instance, so an instance that can't be physically mutated
+        // right now shouldn't stop the override from being recorded (and later reapplied via ApplyEditSet)
+        // for every instance that can.
+        FsmEditSet active = GetOrCreateActiveEditSet(fsmKey);
+        active.SequencerOverrides.RemoveAll(s => s.StateName == seq.StateName && s.ActionIndex == seq.ActionIndex);
+        active.SequencerOverrides.Add(seq);
+
         FsmStateAction original = state.Actions[idx];
+
+        // Checked directly on the action rather than via fsm.Preprocessed: that flag was tried first and
+        // turned out not to reliably predict this in practice (still saw the NRE below with it reading
+        // true), most likely because state.Actions lazily builds its action array on first access -
+        // something else in FsmMaster reading Actions before this Fsm's own Preprocess()/Awake() ever
+        // runs would leave a fresh, un-Init'd action here even once Preprocessed later flips true.
+        // FsmStateAction.State is only ever set by the action's own Init(FsmState) call, which is exactly
+        // what FsmUtil's InsertActionAfter dereferences, so checking it directly guarantees this can't NRE
+        // regardless of why it's still unset. Skip the physical mutation and leave the override
+        // recorded above; FsmActivatedPatch (FsmMasterPlugin.cs) reapplies it via ApplyEditSet once this
+        // Fsm's own Preprocess() actually runs and Init's every action, so the override still lands on
+        // this instance the moment it activates within the same scene - it just can't happen right now.
+        if (original.State == null)
+        {
+            _logger.LogWarning($"[FsmMaster] Fsm '{fsm.Name}' hasn't activated yet (owning object inactive); sequencer override for state '{seq.StateName}' recorded but not installed on this instance.");
+            _pendingActivationFsmKeys.Add(fsmKey);
+            BumpEditGeneration();
+            return;
+        }
 
         // Tears down any sequencer already installed against this exact original action before
         // reinstalling, so this method doubles as a live-update path (reorder/add/remove a block,
@@ -1166,9 +1328,6 @@ internal sealed class FsmEditManager
         FsmPristineSnapshot snapshot = GetOrCreateSnapshot(fsmKey);
         snapshot.InstalledSequencers.Add((original, sequencer));
 
-        FsmEditSet active = GetOrCreateActiveEditSet(fsmKey);
-        active.SequencerOverrides.RemoveAll(s => s.StateName == seq.StateName && s.ActionIndex == seq.ActionIndex);
-        active.SequencerOverrides.Add(seq);
         BumpEditGeneration();
     }
 

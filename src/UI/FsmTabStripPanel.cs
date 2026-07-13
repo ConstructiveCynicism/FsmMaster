@@ -6,10 +6,10 @@ namespace FsmMaster;
 // Row of FSM tabs below the button row - one composite widget per FsmTabManager.Tabs entry, with a
 // close "x" button pinned to its top-right corner and a pin toggle-dot (the same widget/size as the
 // "add to monitor" dots in FsmActiveStatePanel - see UICommon.DotSize) pinned to its top-left. A
-// horizontal scrollbar sits above the tab row (per the original design) and only appears once there
-// are more tabs than fit in the available width; the tabs themselves live inside a
-// CanvasHorizontalScrollStrip's clipped viewport rather than being added straight to this panel, so
-// overflow tabs are hidden/scrollable instead of trailing off the edge of the right panel.
+// horizontal scrollbar sits above the tab row and only appears once there are more tabs than fit in
+// the available width; the tabs themselves live inside a CanvasHorizontalScrollStrip's clipped
+// viewport rather than being added straight to this panel, so overflow tabs are hidden/scrollable
+// instead of trailing off the edge of the right panel.
 internal sealed class FsmTabStripPanel : CanvasPanel
 {
     private const float TabWidth = 170f;
@@ -139,11 +139,10 @@ internal sealed class FsmTabStripPanel : CanvasPanel
     }
 
     // Every tab defaults to TabWidth; the active tab alone grows past it (never shrinks below it) just
-    // enough to fit its own two-line label without clipping - matching the task's "no longer cutoff
-    // text" ask without permanently widening every closed/inactive tab too. Runs every frame (not just
-    // after RebuildWidgets) since switching the active tab alone - no open/close - still needs this to
-    // re-run, and it's cheap: no GameObject churn, just position/size math over however many tabs are
-    // currently open.
+    // enough to fit its own two-line label without clipping, without permanently widening every
+    // closed/inactive tab too. Runs every frame (not just after RebuildWidgets) since switching the
+    // active tab alone - no open/close - still needs this to re-run, and it's cheap: no GameObject
+    // churn, just position/size math over however many tabs are currently open.
     private void LayoutWidgets(FsmTabState? active)
     {
         float x = 0f;

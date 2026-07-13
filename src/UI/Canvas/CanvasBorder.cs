@@ -2,12 +2,9 @@ using UnityEngine;
 
 namespace FsmMaster;
 
-// A thin (1px) rectangular outline drawn as four separate solid-color strip images rather than a
-// single baked border texture (contrast Silksong.DebugMod's CanvasBorder,
-// agent-context/Silksong.DebugMod-main/UI/Canvas/CanvasBorder.cs, which bakes and caches a per-size
-// Texture2D/Sprite) - every strip just reuses UICommon's one shared solid-color sprite (see
-// CanvasImage), tinted to this border's own color, so no border ever needs its own generated texture
-// to track through a ScriptEngine reload.
+// A thin (1px) rectangular outline drawn as four separate solid-color strip images. Every strip
+// reuses UICommon's one shared solid-color sprite (see CanvasImage), tinted to this border's own
+// color, so no border ever needs its own generated texture to track through a ScriptEngine reload.
 internal sealed class CanvasBorder : CanvasPanel
 {
     private const float Thickness = 1f;
