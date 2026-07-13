@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
@@ -18,12 +19,14 @@ namespace FsmMaster;
 // the reference), independent of EventSystem/GraphicRaycaster - see FsmGraphOverlay's
 // interactiveRect/IsPointerOverGameObject gating, which exists precisely so the graph canvas's own
 // scroll-wheel zoom doesn't also fire while the pointer is over a scroll view like this one.
-internal sealed class CanvasScrollView : CanvasNode
+internal sealed class CanvasScrollView : CanvasNode, IHorizontalScrollSource
 {
     private const float ScrollSpeed = 30f;
 
     private CanvasNode? _content;
     private float _contentHeightAtLastCheck;
+    private float _contentWidthAtLastCheck;
+    private CanvasNode[] _childList = Array.Empty<CanvasNode>();
 
     public CanvasNode? Content => _content;
 
@@ -43,16 +46,14 @@ internal sealed class CanvasScrollView : CanvasNode
     {
         _content = content;
         content.Parent = this;
+        _childList = new CanvasNode[] { content };
         return content;
     }
 
-    protected override IEnumerable<CanvasNode> ChildList()
-    {
-        if (_content != null)
-        {
-            yield return _content;
-        }
-    }
+    // _childList (built once in SetContent, rather than a yield-return here) - see
+    // CanvasNode.ChildList's own comment on why the iterator form was a continuous per-frame GC
+    // source once CollectSubtree started walking it every frame.
+    protected override IEnumerable<CanvasNode> ChildList() => _childList;
 
     public override void Build(Transform? rootParent = null)
     {
@@ -74,6 +75,17 @@ internal sealed class CanvasScrollView : CanvasNode
             float clampedY = Mathf.Clamp(_content.LocalPosition.y, Mathf.Min(-GetScrollableHeight(), 0f), 0f);
             _content.LocalPosition = new Vector2(_content.LocalPosition.x, clampedY);
             _contentHeightAtLastCheck = _content.Size.y;
+        }
+
+        // Same reclamp on the X axis - content here is normally only as wide as the viewport, but
+        // FsmActiveStatePanel widens it past that whenever a row's own text measures wider than its
+        // assigned column (see that panel's RowCursor.MaxWidth), which is what a paired
+        // CanvasHorizontalScrollbar is for.
+        if (!Mathf.Approximately(_content.Size.x, _contentWidthAtLastCheck))
+        {
+            float clampedX = Mathf.Clamp(_content.LocalPosition.x, Mathf.Min(-GetScrollableWidth(), 0f), 0f);
+            _content.LocalPosition = new Vector2(clampedX, _content.LocalPosition.y);
+            _contentWidthAtLastCheck = _content.Size.x;
         }
 
         if (!Mathf.Approximately(Input.mouseScrollDelta.y, 0f) && IsMouseOver())
@@ -125,4 +137,21 @@ internal sealed class CanvasScrollView : CanvasNode
     }
 
     public float GetScrollableHeight() => Mathf.Max(0f, (_content?.Size.y ?? 0f) - Size.y);
+
+    public float GetScrollableWidth() => Mathf.Max(0f, (_content?.Size.x ?? 0f) - Size.x);
+
+    // Explicit implementation, not a public overload - a public `SetScrollPercentage(float)` here would
+    // be ambiguous with the vertical one above (same name, same signature, different axis). Only
+    // CanvasHorizontalScrollbar (via IHorizontalScrollSource) ever needs to drive the X axis; every
+    // other caller keeps using the public vertical member unchanged.
+    void IHorizontalScrollSource.SetScrollPercentage(float percentage)
+    {
+        if (_content == null)
+        {
+            return;
+        }
+
+        percentage = Mathf.Clamp01(percentage);
+        _content.LocalPosition = new Vector2(-percentage * GetScrollableWidth(), _content.LocalPosition.y);
+    }
 }

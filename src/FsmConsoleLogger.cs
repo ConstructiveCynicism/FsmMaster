@@ -20,9 +20,17 @@ internal sealed class FsmConsoleLogger
     {
         _logger.LogInfo($"[FsmMaster] Scene \"{snapshot.SceneName}\": {snapshot.Fsms.Count} live PlayMakerFSM instance(s)");
 
-        foreach (FsmInfo fsm in snapshot.Fsms)
+        // snapshot.Fsms is only the cheap identity-only list (see FsmIdentityInfo) - the full
+        // reflection walk is done here, on demand, per entry, rather than snapshot collection eagerly
+        // paying for it on every scene load whether this dump is ever requested or not.
+        foreach (FsmIdentityInfo identity in snapshot.Fsms)
         {
-            LogFsm(fsm);
+            if (identity.Component == null)
+            {
+                continue;
+            }
+
+            LogFsm(FsmDataCollector.CollectFsmInfo(identity.Component));
         }
     }
 
@@ -134,13 +142,21 @@ internal sealed class FsmConsoleLogger
     // FsmOwnerDefault only carries the "use owner" / "specify object" *option*, not an
     // identity on its own - Fsm.GetOwnerDefaultTarget resolves it to the actual GameObject
     // PlayMaker would target at runtime, which is far more useful to log than the option name.
-    internal static string FormatOwnerDefault(Fsm fsm, FsmOwnerDefault ownerDefault)
+    internal static string FormatOwnerDefault(Fsm? fsm, FsmOwnerDefault ownerDefault)
     {
+        // fsm is null when the action's owning FSM has never initialized (e.g. the FSM's
+        // GameObject was still disabled when the panel snapshot was taken) - PlayMaker only
+        // assigns FsmStateAction.Fsm during its own init, so this isn't an error case to log.
+        if (fsm == null)
+        {
+            return "[uninitialized]";
+        }
+
         GameObject resolvedGameObject = fsm.GetOwnerDefaultTarget(ownerDefault);
         return resolvedGameObject != null ? $"[{resolvedGameObject.name}]" : "[none]";
     }
 
-    internal static string FormatEventTarget(Fsm fsm, FsmEventTarget eventTarget)
+    internal static string FormatEventTarget(Fsm? fsm, FsmEventTarget eventTarget)
     {
         switch (eventTarget.target)
         {

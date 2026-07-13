@@ -19,6 +19,11 @@ internal class CanvasButton : CanvasImage
     private readonly CanvasBorder _hoverBorder;
     private bool _toggled;
 
+    // Rebuilt only when the own border is added/removed (RebuildOwnChildList) rather than on every
+    // ChildList() call - see CanvasNode.ChildList's own comment on why a yield-return version of this
+    // was a continuous per-frame GC source.
+    private CanvasNode[] _ownChildList = Array.Empty<CanvasNode>();
+
     public CanvasText Text => _text;
 
     public event Action? OnClicked;
@@ -49,18 +54,39 @@ internal class CanvasButton : CanvasImage
 
         _hoverBorder = new CanvasBorder("HoverBorder", ui, ui.AccentColor) { ActiveSelf = false };
         _hoverBorder.Parent = this;
+
+        RebuildOwnChildList();
     }
 
-    protected override IEnumerable<CanvasNode> ChildList()
+    public override CanvasBorder AddBorder(Color color)
     {
-        foreach (CanvasNode child in base.ChildList())
+        CanvasBorder result = base.AddBorder(color);
+        RebuildOwnChildList();
+        return result;
+    }
+
+    public override void RemoveBorder()
+    {
+        base.RemoveBorder();
+        RebuildOwnChildList();
+    }
+
+    // _text/_hoverBorder are still null the first time this runs - AddBorder(ui.PanelBorder) in the
+    // constructor above triggers this via the override before either field is assigned. Skipped there;
+    // the constructor's own trailing call (after both are constructed) builds the real combined list.
+    private void RebuildOwnChildList()
+    {
+        if (_text == null || _hoverBorder == null)
         {
-            yield return child;
+            return;
         }
 
-        yield return _hoverBorder;
-        yield return _text;
+        _ownChildList = Border != null
+            ? new CanvasNode[] { Border, _hoverBorder, _text }
+            : new CanvasNode[] { _hoverBorder, _text };
     }
+
+    protected override IEnumerable<CanvasNode> ChildList() => _ownChildList;
 
     protected override void OnUpdateSize()
     {

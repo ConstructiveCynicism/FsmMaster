@@ -15,10 +15,14 @@ internal class CanvasText : CanvasNode
     // comment for why) can hand this Text component straight to UnityEngine.UI.InputField.textComponent
     // for a child label it owns, rather than duplicating a second Text sibling.
     public Text? TextComponent => _uiText;
+    private readonly UICommon _ui;
     private string _text = "";
     private Font? _font;
     private int _fontSize;
-    private TextAnchor _alignment = TextAnchor.UpperLeft;
+    // MiddleLeft (not UpperLeft) so any row/label that never sets Alignment explicitly still reads as
+    // vertically centered within whatever height its caller assigned - most single-line rows throughout
+    // the panels only ever override this to MiddleCenter, never to change the vertical component.
+    private TextAnchor _alignment = TextAnchor.MiddleLeft;
     private Color _color;
     private HorizontalWrapMode _overflow = HorizontalWrapMode.Wrap;
     private FontStyle _fontStyle = FontStyle.Normal;
@@ -27,9 +31,26 @@ internal class CanvasText : CanvasNode
 
     public CanvasText(string name, UICommon ui) : base(name)
     {
+        _ui = ui;
         _font = ui.BodyFont;
         _fontSize = ui.FontSize;
         _color = ui.TextColor;
+
+        // ui.FontSize is a live Screen.height-scaled value (UICommon.ScaleHeight), not a constant -
+        // re-synced every frame (mirroring FsmRightPanel/FsmMonitorPanel's own resolution-change
+        // reflow) rather than only read once here, since Screen.width/height has been observed
+        // returning 0 on the frame this UI is first built (before the game window finishes sizing
+        // itself), which would otherwise bake in a permanent near-zero font size that never recovers
+        // even after the panel's own geometry reflows to the correct resolution.
+        OnUpdate += SyncFontSizeToScale;
+    }
+
+    private void SyncFontSizeToScale()
+    {
+        if (_fontSize != _ui.FontSize)
+        {
+            FontSize = _ui.FontSize;
+        }
     }
 
     public string Text

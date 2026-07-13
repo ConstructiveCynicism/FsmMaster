@@ -15,7 +15,7 @@ internal static class FsmDrilldownHierarchy
 
         for (int i = 0; i < snapshot.Fsms.Count; i++)
         {
-            FsmInfo fsm = snapshot.Fsms[i];
+            FsmIdentityInfo fsm = snapshot.Fsms[i];
 
             // fsm.Component can already be destroyed (Unity fake-null) if this snapshot is being
             // rebuilt from a stale FsmSnapshot mid scene-transition, before RefreshSnapshot has

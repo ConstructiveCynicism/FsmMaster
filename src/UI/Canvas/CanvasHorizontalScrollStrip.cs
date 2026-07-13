@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
@@ -13,12 +14,13 @@ namespace FsmMaster;
 // hand-rolled clip is rendering-only and has no effect on GraphicRaycaster hit-testing, so a tab
 // scrolled out of view stayed fully clickable at its real, moved position (see CanvasScrollView's own
 // header comment for the full explanation of this same bug and fix).
-internal sealed class CanvasHorizontalScrollStrip : CanvasNode
+internal sealed class CanvasHorizontalScrollStrip : CanvasNode, IHorizontalScrollSource
 {
     private const float ScrollSpeed = 30f;
 
     private CanvasNode? _content;
     private float _contentWidthAtLastCheck;
+    private CanvasNode[] _childList = Array.Empty<CanvasNode>();
 
     public CanvasNode? Content => _content;
 
@@ -38,16 +40,14 @@ internal sealed class CanvasHorizontalScrollStrip : CanvasNode
     {
         _content = content;
         content.Parent = this;
+        _childList = new CanvasNode[] { content };
         return content;
     }
 
-    protected override IEnumerable<CanvasNode> ChildList()
-    {
-        if (_content != null)
-        {
-            yield return _content;
-        }
-    }
+    // _childList (built once in SetContent, rather than a yield-return here) - see
+    // CanvasNode.ChildList's own comment on why the iterator form was a continuous per-frame GC
+    // source once CollectSubtree started walking it every frame.
+    protected override IEnumerable<CanvasNode> ChildList() => _childList;
 
     public override void Build(Transform? rootParent = null)
     {

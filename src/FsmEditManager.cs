@@ -85,6 +85,27 @@ internal sealed class FsmEditManager
         {
             _liveInstances[entry.Key] = entry.Value;
         }
+
+        PruneStaleSnapshotEntries();
+    }
+
+    // Drops InjectedExitActions/InstalledSequencers entries left behind by a previous scene visit.
+    // Each scene (re)load hands DisableState/InstallSequencer a brand new PlayMakerFSM/Fsm/FsmState/
+    // FsmStateAction object graph for the same FsmKey (see FsmIdentity), and both of those methods
+    // unconditionally append to these lists rather than replace - without this, reapplying a persisted
+    // DisableState/Sequencer edit on every revisit (see FsmMasterPlugin.ApplyPersistedEditsForScene)
+    // would keep appending forever while the previous scene's now-destroyed Fsm graph stays reachable,
+    // and therefore un-collectible, through the reference this class itself holds. Called right after
+    // _liveInstances is replaced above, so "alive" always reflects the freshly (re)scanned scene.
+    private void PruneStaleSnapshotEntries()
+    {
+        foreach (KeyValuePair<string, FsmPristineSnapshot> entry in _pristine)
+        {
+            var alive = new HashSet<Fsm>(GetLiveInstances(entry.Key));
+
+            entry.Value.InjectedExitActions.RemoveAll(action => !alive.Contains(action.State.Fsm));
+            entry.Value.InstalledSequencers.RemoveAll(pair => !alive.Contains(pair.Sequencer.State.Fsm));
+        }
     }
 
     public IReadOnlyList<Fsm> GetLiveInstances(string fsmKey) =>
@@ -1086,6 +1107,23 @@ internal sealed class FsmEditManager
 
     // ---- Sequencer ----
 
+    // UI entry point (the Sequencer window's own "apply immediately" convention, matching
+    // SetVariable/SetActionField) - install-or-replace applied to every live instance sharing fsmKey.
+    public void InstallSequencer(string fsmKey, SequencerOverride seq)
+    {
+        foreach (Fsm fsm in GetLiveInstances(fsmKey))
+        {
+            InstallSequencer(fsmKey, fsm, seq);
+        }
+    }
+
+    // seq.ActionIndex is a RANK, not a raw array index: "the Nth action in this state whose type name
+    // contains 'Random'" (see FsmActionSequencer.IndexRandomEventAction). A raw array index would shift
+    // out from under a second sequencer the moment a first one gets installed elsewhere in the same
+    // state (InsertActionAfter shifts every later action's index by one) - rank stays stable regardless,
+    // since a synthetic SequenceSendEventAction's own type name never contains "Random" and so never
+    // participates in the count. This is what lets a state with more than one Random-event-family action
+    // have each one independently installed/updated/removed without disturbing the others.
     public void InstallSequencer(string fsmKey, Fsm fsm, SequencerOverride seq)
     {
         FsmState? state = fsm.GetState(seq.StateName);
@@ -1095,29 +1133,30 @@ internal sealed class FsmEditManager
             return;
         }
 
-        if (state.Actions.Any(a => a is SequenceSendEventAction))
-        {
-            return; // this instance already has a sequencer installed this session
-        }
-
         if (seq.Pattern.Count == 0)
         {
             _logger.LogWarning($"[FsmMaster] Sequencer pattern for state '{seq.StateName}' on fsm '{fsm.Name}' is empty; skipping.");
             return;
         }
 
-        bool explicitIndexLooksValid = seq.ActionIndex >= 0
-            && seq.ActionIndex < state.Actions.Length
-            && state.Actions[seq.ActionIndex].GetType().Name.Contains("Random");
-        int idx = explicitIndexLooksValid ? seq.ActionIndex : FsmActionSequencer.IndexFirstRandomEventAction(state);
-
+        int idx = FsmActionSequencer.IndexRandomEventAction(state, seq.ActionIndex);
         if (idx < 0)
         {
-            _logger.LogWarning($"[FsmMaster] No random-event action found on state '{seq.StateName}' on fsm '{fsm.Name}'; skipping sequencer install.");
+            _logger.LogWarning($"[FsmMaster] No random-event action at rank {seq.ActionIndex} on state '{seq.StateName}' on fsm '{fsm.Name}'; skipping sequencer install.");
             return;
         }
 
         FsmStateAction original = state.Actions[idx];
+
+        // Tears down any sequencer already installed against this exact original action before
+        // reinstalling, so this method doubles as a live-update path (reorder/add/remove a block,
+        // change loop count) rather than only a one-shot "install if absent" - matched by object
+        // reference (not state alone), so replacing this rank's sequencer never disturbs a different
+        // rank's independently-installed one in the same state. The empty-pattern check above must stay
+        // ahead of this call, or a would-be-empty replace would leave the original action disabled with
+        // nothing installed in its place.
+        RemoveInstalledSequencerFor(fsmKey, original, restoreOriginalEnabled: false);
+
         original.Enabled = false;
 
         FsmEvent[] pattern = seq.Pattern.Select(FsmEvent.GetFsmEvent).ToArray();
@@ -1128,9 +1167,78 @@ internal sealed class FsmEditManager
         snapshot.InstalledSequencers.Add((original, sequencer));
 
         FsmEditSet active = GetOrCreateActiveEditSet(fsmKey);
-        active.SequencerOverrides.RemoveAll(s => s.StateName == seq.StateName);
+        active.SequencerOverrides.RemoveAll(s => s.StateName == seq.StateName && s.ActionIndex == seq.ActionIndex);
         active.SequencerOverrides.Add(seq);
         BumpEditGeneration();
+    }
+
+    // Fully removes the sequencer installed at (stateName, actionRank) and restores the original
+    // random-event action's Enabled=true, on every live instance sharing fsmKey - the Sequencer tab's
+    // own entry point both for "the pattern list went empty" and for a block's own close button,
+    // distinct from a live-update (see InstallSequencer's own RemoveInstalledSequencerFor call, which
+    // tears down without restoring since it's about to reinstall a fresh sequencer immediately after).
+    // No PushUndo counterpart - InstallSequencer never wired one up either, so sequencer edits stay
+    // outside the undo stack.
+    public void RemoveSequencer(string fsmKey, string stateName, int actionRank)
+    {
+        foreach (Fsm fsm in GetLiveInstances(fsmKey))
+        {
+            FsmState? state = fsm.GetState(stateName);
+            if (state == null)
+            {
+                continue;
+            }
+
+            int idx = FsmActionSequencer.IndexRandomEventAction(state, actionRank);
+            if (idx < 0)
+            {
+                continue;
+            }
+
+            RemoveInstalledSequencerFor(fsmKey, state.Actions[idx], restoreOriginalEnabled: true);
+        }
+
+        if (_activeEdits.TryGetValue(fsmKey, out FsmEditSet? active))
+        {
+            active.SequencerOverrides.RemoveAll(s => s.StateName == stateName && s.ActionIndex == actionRank);
+        }
+
+        BumpEditGeneration();
+    }
+
+    // Removes whichever SequenceSendEventAction is currently installed against this exact original
+    // action (if any) and drops its FsmPristineSnapshot.InstalledSequencers bookkeeping entry - matched
+    // by object reference, not by state alone, so a state with more than one independently-sequenced
+    // Random-event-family action never has one's install/remove disturb another's.
+    // restoreOriginalEnabled=false is used by InstallSequencer, which is about to disable the original
+    // action again immediately anyway; true is used by RemoveSequencer's full "put it back" path.
+    private void RemoveInstalledSequencerFor(string fsmKey, FsmStateAction original, bool restoreOriginalEnabled)
+    {
+        if (!_pristine.TryGetValue(fsmKey, out FsmPristineSnapshot? snapshot))
+        {
+            return;
+        }
+
+        int pairIndex = snapshot.InstalledSequencers.FindIndex(p => p.Original == original);
+        if (pairIndex < 0)
+        {
+            return;
+        }
+
+        (FsmStateAction originalAction, FsmStateAction sequencer) = snapshot.InstalledSequencers[pairIndex];
+        snapshot.InstalledSequencers.RemoveAt(pairIndex);
+
+        if (restoreOriginalEnabled)
+        {
+            originalAction.Enabled = true;
+        }
+
+        FsmState state = sequencer.State;
+        int idx = Array.IndexOf(state.Actions, sequencer);
+        if (idx >= 0)
+        {
+            state.RemoveAction(idx);
+        }
     }
 
     // ---- Snapshot plumbing ----

@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
@@ -15,6 +16,11 @@ internal class CanvasImage : CanvasNode
     private readonly UICommon _ui;
     private Color _tint = Color.white;
     private CanvasBorder? _border;
+
+    // Rebuilt only in AddBorder/RemoveBorder (rare, setup-time calls) rather than on every ChildList()
+    // call - see CanvasNode.ChildList's own comment on why a yield-return version of this was a
+    // continuous per-frame GC source.
+    private CanvasNode[] _childList = Array.Empty<CanvasNode>();
 
     public CanvasBorder? Border => _border;
     public bool IsBackground { get; set; }
@@ -39,26 +45,27 @@ internal class CanvasImage : CanvasNode
         }
     }
 
-    public CanvasBorder AddBorder(Color color)
+    public virtual CanvasBorder AddBorder(Color color)
     {
         _border ??= new CanvasBorder("Border", _ui, color);
         _border.Parent = this;
         _border.Size = Size;
+        RebuildChildList();
         return _border;
     }
 
-    public void RemoveBorder()
+    public virtual void RemoveBorder()
     {
         _border = null;
+        RebuildChildList();
     }
 
-    protected override IEnumerable<CanvasNode> ChildList()
+    private void RebuildChildList()
     {
-        if (_border != null)
-        {
-            yield return _border;
-        }
+        _childList = _border != null ? new CanvasNode[] { _border } : Array.Empty<CanvasNode>();
     }
+
+    protected override IEnumerable<CanvasNode> ChildList() => _childList;
 
     protected override void OnUpdateSize()
     {

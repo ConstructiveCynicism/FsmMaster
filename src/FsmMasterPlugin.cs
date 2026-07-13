@@ -30,6 +30,20 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
     private FsmPanelLayoutConfig? _monitorPanelLayout;
     private ConfigEntry<bool>? _autoLoadConfig;
 
+    // Reused every frame by Update's CanvasNode.CollectSubtree calls below, instead of a fresh
+    // List<CanvasNode> (or the old yield-return Subtree() iterator's per-node enumerator) every
+    // single tick regardless of whether either panel is even visible.
+    private readonly List<CanvasNode> _rightPanelSubtreeBuffer = new();
+    private readonly List<CanvasNode> _monitorPanelSubtreeBuffer = new();
+
+    // Last CanvasPanel.StructureVersion each buffer above was actually rebuilt from - CollectSubtree
+    // itself is skipped entirely (not just re-run into the same buffer) whenever neither tree's shape
+    // has changed since the previous frame, since several composite widgets' own ChildList() overrides
+    // still allocate a small enumerator per call (see CanvasPanel.StructureVersion's own comment) and
+    // there is no reason to pay that cost on a frame where nothing was added, removed, or cleared.
+    private int _rightPanelSubtreeVersion = -1;
+    private int _monitorPanelSubtreeVersion = -1;
+
     private static Harmony? _harmony;
 
     internal FsmVariableTracker? VariableTracker => _variableTracker;
@@ -52,6 +66,7 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
             "While the overlay is visible, switches between the full selection UI and a minimal graph-only view.");
 
         FsmGraphColorConfig graphColors = FsmGraphColorConfig.Bind(Config);
+        FsmGraphPerformanceConfig graphPerformance = FsmGraphPerformanceConfig.Bind(Config);
         _rightPanelLayout = FsmPanelLayoutConfig.Bind(Config, "FsmMaster Panel");
         _monitorPanelLayout = FsmPanelLayoutConfig.Bind(Config, "Monitor Panel");
 
@@ -65,10 +80,15 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
         _editManager = new FsmEditManager(Logger);
         _variableTracker = new FsmVariableTracker(fsmKey => _editManager.GetLiveInstances(fsmKey));
         _tabManager = new FsmTabManager();
-        _graphOverlay = new FsmGraphOverlay(Logger, _editManager, _tabManager, toggleOverlayHotkey, toggleMinimalViewHotkey, graphColors);
+        _graphOverlay = new FsmGraphOverlay(Logger, _editManager, _tabManager, toggleOverlayHotkey, toggleMinimalViewHotkey, graphColors, graphPerformance);
 
-        string sceneName = SceneManager.GetActiveScene().name;
-        PlayMakerFSM[] fsms = Object.FindObjectsByType<PlayMakerFSM>(FindObjectsSortMode.None);
+        // Scene.name has been observed to return null (not "") when Awake fires before the initial
+        // scene has finished loading - a timing race, not something confirmed to be platform-specific,
+        // but reported so far only on Linux. Falls back to string.Empty so FsmSaveDataStore's path
+        // building never NREs on it; OnSceneLoaded re-runs this same call with the real scene name once
+        // it's actually available, so this fallback only ever matters for this one redundant call.
+        string sceneName = SceneManager.GetActiveScene().name ?? string.Empty;
+        PlayMakerFSM[] fsms = Object.FindObjectsByType<PlayMakerFSM>(FindObjectsInactive.Include, FindObjectsSortMode.None);
 
         ApplyPersistedEditsForScene(sceneName, fsms);
         _graphOverlay.RefreshSnapshot(sceneName, fsms);
@@ -133,7 +153,14 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
             // current value every frame regardless of whether Refresh() just rebuilt anything.
             _rightPanel.ActiveStatePanel.RefreshLiveValues();
 
-            foreach (CanvasNode node in _rightPanel.Subtree())
+            if (_rightPanelSubtreeVersion != CanvasPanel.StructureVersion)
+            {
+                _rightPanelSubtreeBuffer.Clear();
+                _rightPanel.CollectSubtree(_rightPanelSubtreeBuffer);
+                _rightPanelSubtreeVersion = CanvasPanel.StructureVersion;
+            }
+
+            foreach (CanvasNode node in _rightPanelSubtreeBuffer)
             {
                 if (node.ActiveInHierarchy)
                 {
@@ -151,7 +178,14 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
             _monitorPanel.Locked = _graphOverlay != null && !_graphOverlay.SelectionUiVisible;
             _monitorPanel.RefreshRows(_variableTracker!);
 
-            foreach (CanvasNode node in _monitorPanel.Subtree())
+            if (_monitorPanelSubtreeVersion != CanvasPanel.StructureVersion)
+            {
+                _monitorPanelSubtreeBuffer.Clear();
+                _monitorPanel.CollectSubtree(_monitorPanelSubtreeBuffer);
+                _monitorPanelSubtreeVersion = CanvasPanel.StructureVersion;
+            }
+
+            foreach (CanvasNode node in _monitorPanelSubtreeBuffer)
             {
                 if (node.ActiveInHierarchy)
                 {
@@ -264,14 +298,14 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
 
     private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
     {
-        PlayMakerFSM[] fsms = Object.FindObjectsByType<PlayMakerFSM>(FindObjectsSortMode.None);
+        PlayMakerFSM[] fsms = Object.FindObjectsByType<PlayMakerFSM>(FindObjectsInactive.Include, FindObjectsSortMode.None);
         ApplyPersistedEditsForScene(scene.name, fsms);
 
         // The overlay's own snapshot goes stale on every scene load - PlayMakerFSM instances from the
         // previous scene are destroyed and need re-collecting. Uses SceneManager.GetActiveScene().name
         // (matching Awake), not the loaded `scene` parameter, since that's what RefreshSnapshot's own
         // FsmDataCollector.CollectSnapshot call has always keyed its snapshot by.
-        _graphOverlay?.RefreshSnapshot(SceneManager.GetActiveScene().name, fsms);
+        _graphOverlay?.RefreshSnapshot(SceneManager.GetActiveScene().name ?? string.Empty, fsms);
 
         // Re-resolves every open tab's live PlayMakerFSM by FsmKey against the fresh snapshot - a tab
         // whose FSM isn't present here gets marked not-live (kept open as a placeholder) rather than
@@ -284,12 +318,17 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
 
     // Groups the freshly discovered live FSMs by FsmKey (see FsmIdentity, which also covers scene-authored
     // duplicate objects sharing an FSM), registers them with the edit manager, and - while the Auto button
-    // is on - reapplies whichever named save was last chosen for each key that's actually present. Multiple
-    // named saves can exist per FsmKey (see FsmSaveDataStore), so this deliberately only ever reapplies the
-    // one remembered choice, not every save ever made for that FsmKey.
+    // is on - reapplies whichever named save was last chosen for each key that has a graph tab currently
+    // open (see FsmTabManager) and is actually present in this scan. Restricted to open tabs rather than
+    // every FSM the scan discovers: silently reapplying a saved preset onto an FSM the player has never
+    // looked at was both surprising and, combined with DisableState/InstallSequencer's per-live-instance
+    // object bookkeeping (see FsmEditManager.PruneStaleSnapshotEntries), meant every such FSM accumulated
+    // pristine-snapshot state on every scene revisit for the rest of the session regardless of whether the
+    // player cared about it. Multiple named saves can exist per FsmKey (see FsmSaveDataStore), so this
+    // deliberately only ever reapplies the one remembered choice, not every save ever made for that FsmKey.
     private void ApplyPersistedEditsForScene(string sceneName, PlayMakerFSM[] components)
     {
-        if (_editManager == null)
+        if (_editManager == null || _tabManager == null)
         {
             return;
         }
@@ -302,7 +341,11 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
             return;
         }
 
-        foreach (FsmEditSet editSet in FsmSaveDataStore.LoadLastChosenForScene(sceneName, groups.Keys))
+        IEnumerable<string> openFsmKeysPresent = _tabManager.Tabs
+            .Select(tab => tab.FsmKey)
+            .Where(groups.ContainsKey);
+
+        foreach (FsmEditSet editSet in FsmSaveDataStore.LoadLastChosenForScene(sceneName, openFsmKeysPresent))
         {
             _editManager.ApplyEditSet(editSet);
         }

@@ -37,6 +37,7 @@ internal sealed class CanvasTextField : CanvasNode
 
     private readonly UICommon _ui;
     private readonly InteractiveLabel _label;
+    private readonly CanvasNode[] _childList;
     private InputField? _inputField;
     private Color _baseColor;
 
@@ -70,11 +71,27 @@ internal sealed class CanvasTextField : CanvasNode
         set => _label.Overflow = value;
     }
 
+    // Exposes the underlying label's Text component read-only, so a caller can measure preferredWidth
+    // (see FsmActiveStatePanel's horizontal-scrollbar content-width tracking) without this class having
+    // to duplicate that measurement itself.
+    public Text? TextComponent => _label.TextComponent;
+
     public CanvasTextField(string name, UICommon ui) : base(name)
     {
         _ui = ui;
         _label = new InteractiveLabel("Label", ui);
         _label.Parent = this;
+
+        // _label's own constructor already picked up ui.TextColor - mirror that into _baseColor so
+        // UpdateSelectionTextColor's per-frame restore (see below) doesn't stomp it back to
+        // Color's default (fully transparent black) the instant this field exists.
+        _baseColor = _label.Color;
+
+        // Fixed for this node's whole lifetime - built once here instead of a yield-return ChildList()
+        // override, which allocated a fresh compiler-generated enumerator on every call (see
+        // CanvasNode.ChildList's own comment; this is walked every frame by CollectSubtree).
+        _childList = new CanvasNode[] { _label };
+
         OnUpdate += UpdateSelectionTextColor;
     }
 
@@ -94,10 +111,7 @@ internal sealed class CanvasTextField : CanvasNode
         _label.Color = hasSelection ? Color.black : _baseColor;
     }
 
-    protected override IEnumerable<CanvasNode> ChildList()
-    {
-        yield return _label;
-    }
+    protected override IEnumerable<CanvasNode> ChildList() => _childList;
 
     protected override void OnUpdateSize()
     {

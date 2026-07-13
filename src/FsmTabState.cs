@@ -16,6 +16,12 @@ internal sealed class FsmTabState
     public PlayMakerFSM? Component;
     public bool IsLive = true;
 
+    // Pinned tabs keep their graph drawn by FsmGraphOverlay even while a different tab is active -
+    // see FsmGraphOverlay.OnGUI, which draws every pinned-but-inactive tab's graph as a non-interactive
+    // "ghost" behind the active tab's own interactive one. Unrelated to IsLive/Component above (a
+    // pinned tab whose FSM has gone not-live simply draws nothing, same as an unpinned one would).
+    public bool IsPinned;
+
     // Captured at open time so the tab's label survives a moment where Component is transiently null
     // (e.g. mid scene-transition, before RebindAfterRefresh runs).
     public string GameObjectNameForLabel = "";

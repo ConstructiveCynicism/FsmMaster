@@ -4,7 +4,19 @@ using UnityEngine.EventSystems;
 
 namespace FsmMaster;
 
-// Horizontal scrollbar paired with a CanvasHorizontalScrollStrip - the same track+grip design as
+// Shared by anything a CanvasHorizontalScrollbar can drive - CanvasHorizontalScrollStrip (the FSM tab
+// strip) and CanvasScrollView (FsmActiveStatePanel's own vertical scroll view, which also needs
+// horizontal panning whenever a row's text measures wider than its column - see that panel's
+// RowCursor.MaxWidth). CanvasScrollView already has an unrelated public vertical SetScrollPercentage,
+// so it implements this member explicitly rather than exposing a second, ambiguous overload.
+internal interface IHorizontalScrollSource
+{
+    CanvasNode? Content { get; }
+    float GetScrollableWidth();
+    void SetScrollPercentage(float percentage);
+}
+
+// Horizontal scrollbar paired with an IHorizontalScrollSource - the same track+grip design as
 // CanvasScrollbar (see that file's own header comment), rotated to the X axis.
 internal sealed class CanvasHorizontalScrollbar : CanvasNode
 {
@@ -12,8 +24,9 @@ internal sealed class CanvasHorizontalScrollbar : CanvasNode
 
     private readonly CanvasButton _dragSurface;
     private readonly CanvasImage _grip;
+    private readonly CanvasNode[] _childList;
 
-    public CanvasHorizontalScrollStrip? ScrollStrip { get; set; }
+    public IHorizontalScrollSource? Source { get; set; }
 
     protected override bool Interactable => true;
 
@@ -27,14 +40,15 @@ internal sealed class CanvasHorizontalScrollbar : CanvasNode
         _grip.AddBorder(ui.AccentColor);
         _grip.Parent = this;
 
+        // Fixed for this node's whole lifetime - built once here instead of a yield-return ChildList()
+        // override, which allocated a fresh compiler-generated enumerator on every call (see
+        // CanvasNode.ChildList's own comment; this is walked every frame by CollectSubtree).
+        _childList = new CanvasNode[] { _dragSurface, _grip };
+
         OnUpdate += Refresh;
     }
 
-    protected override IEnumerable<CanvasNode> ChildList()
-    {
-        yield return _dragSurface;
-        yield return _grip;
-    }
+    protected override IEnumerable<CanvasNode> ChildList() => _childList;
 
     protected override void OnUpdateSize()
     {
@@ -53,7 +67,7 @@ internal sealed class CanvasHorizontalScrollbar : CanvasNode
 
     private void OnTrackClicked()
     {
-        if (ScrollStrip == null)
+        if (Source == null)
         {
             return;
         }
@@ -67,40 +81,40 @@ internal sealed class CanvasHorizontalScrollbar : CanvasNode
 
         float travel = Mathf.Max(1f, Size.x - _grip.Size.x);
         float x = Mathf.Clamp(mouseX - Position.x - _grip.Size.x / 2f, 0f, travel);
-        ScrollStrip.SetScrollPercentage(x / travel);
+        Source.SetScrollPercentage(x / travel);
     }
 
     private void OnDragged(PointerEventData eventData)
     {
-        if (ScrollStrip == null)
+        if (Source == null)
         {
             return;
         }
 
         float travel = Mathf.Max(1f, Size.x - _grip.Size.x);
         float x = Mathf.Clamp(_grip.LocalPosition.x + eventData.delta.x, 0f, travel);
-        ScrollStrip.SetScrollPercentage(x / travel);
+        Source.SetScrollPercentage(x / travel);
     }
 
     // Whether ActiveSelf *should* be true right now - a plain query, not a mutation, for the same
     // reason CanvasScrollbar.ShouldBeVisible is: this class's own OnUpdate only runs while it's
     // already active, so it can never turn itself back on if it decided to turn itself off. The
     // owning panel (whose own OnUpdate always runs) polls this every frame instead.
-    public bool ShouldBeVisible => ScrollStrip?.Content != null && ScrollStrip.Content.Size.x > Size.x;
+    public bool ShouldBeVisible => Source?.Content != null && Source.Content.Size.x > Size.x;
 
     private void Refresh()
     {
-        if (ScrollStrip?.Content == null)
+        if (Source?.Content == null)
         {
             return;
         }
 
-        float contentWidth = ScrollStrip.Content.Size.x;
+        float contentWidth = Source.Content.Size.x;
         float gripWidth = Mathf.Clamp(Size.x * Size.x / Mathf.Max(1f, contentWidth), MinGripWidth, Size.x);
         _grip.Size = new Vector2(gripWidth, Size.y);
 
-        float scrollable = ScrollStrip.GetScrollableWidth();
-        float percentage = scrollable > 0f ? Mathf.Clamp01(-ScrollStrip.Content.LocalPosition.x / scrollable) : 0f;
+        float scrollable = Source.GetScrollableWidth();
+        float percentage = scrollable > 0f ? Mathf.Clamp01(-Source.Content.LocalPosition.x / scrollable) : 0f;
         _grip.LocalPosition = new Vector2(percentage * (Size.x - gripWidth), 0f);
     }
 }

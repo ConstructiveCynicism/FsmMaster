@@ -16,6 +16,7 @@ internal sealed class CanvasScrollbar : CanvasNode
 
     private readonly CanvasButton _dragSurface;
     private readonly CanvasImage _grip;
+    private readonly CanvasNode[] _childList;
 
     public CanvasScrollView? ScrollView { get; set; }
 
@@ -31,14 +32,15 @@ internal sealed class CanvasScrollbar : CanvasNode
         _grip.AddBorder(ui.AccentColor);
         _grip.Parent = this;
 
+        // Fixed for this node's whole lifetime - built once here instead of a yield-return ChildList()
+        // override, which allocated a fresh compiler-generated enumerator on every call (see
+        // CanvasNode.ChildList's own comment; this is walked every frame by CollectSubtree).
+        _childList = new CanvasNode[] { _dragSurface, _grip };
+
         OnUpdate += Refresh;
     }
 
-    protected override IEnumerable<CanvasNode> ChildList()
-    {
-        yield return _dragSurface;
-        yield return _grip;
-    }
+    protected override IEnumerable<CanvasNode> ChildList() => _childList;
 
     protected override void OnUpdateSize()
     {

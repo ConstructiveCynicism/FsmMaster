@@ -8,6 +8,15 @@ namespace FsmMaster;
 // across DebugMod's much larger settings UI, which FsmMaster's single small right panel doesn't need.
 internal class CanvasPanel : CanvasNode
 {
+    // Bumped by every Add/Remove/ClearChildren across every CanvasPanel in the tree - lets
+    // FsmMasterPlugin.Update cache its flattened CollectSubtree result across frames and only recompute
+    // it when some panel's child list actually changed (a rare, discrete, user-driven event - a row
+    // rebuild, a tab opening/closing), instead of re-walking the whole tree - and re-invoking every
+    // composite widget's own ChildList() override, several of which still build their result via a
+    // yield-return iterator that allocates a fresh enumerator object per call - every single frame
+    // regardless of whether anything about the tree's shape changed since the last one.
+    internal static int StructureVersion { get; private set; }
+
     private readonly List<CanvasNode> _elements = new();
     private readonly Dictionary<string, CanvasNode> _byName = new();
 
@@ -22,6 +31,7 @@ internal class CanvasPanel : CanvasNode
         element.Parent = this;
         _elements.Add(element);
         _byName[element.Name] = element;
+        StructureVersion++;
         return element;
     }
 
@@ -32,6 +42,7 @@ internal class CanvasPanel : CanvasNode
     {
         _elements.Remove(element);
         _byName.Remove(element.Name);
+        StructureVersion++;
     }
 
     // Destroys and forgets every current child - used by panels that rebuild their row content
@@ -45,6 +56,7 @@ internal class CanvasPanel : CanvasNode
 
         _elements.Clear();
         _byName.Clear();
+        StructureVersion++;
     }
 
     public override void Destroy()

@@ -17,8 +17,10 @@ internal sealed class FsmTabManager
         ActiveTabIndex >= 0 && ActiveTabIndex < _tabs.Count ? _tabs[ActiveTabIndex] : null;
 
     // Focuses an already-open tab for this FSM if one exists, otherwise opens a new one seeded with a
-    // fresh fit-to-view pan/zoom.
-    public FsmTabState OpenOrFocus(FsmInfo fsm)
+    // fresh fit-to-view pan/zoom. Takes the cheap identity-only entry (see FsmIdentityInfo) rather than
+    // a full FsmInfo - the reflection-heavy state walk FitViewToFsm needs is only ever done here, once,
+    // for the specific FSM actually being opened, via FsmDataCollector.CollectFsmInfo.
+    public FsmTabState OpenOrFocus(FsmIdentityInfo fsm)
     {
         string fsmKey = FsmIdentity.GetFsmKey(fsm.Component);
 
@@ -38,7 +40,7 @@ internal sealed class FsmTabManager
             GameObjectNameForLabel = fsm.GameObjectName,
             FsmNameForLabel = fsm.FsmName,
         };
-        (tab.PanWorldCenter, tab.Zoom) = FsmGraphOverlay.FitViewToFsm(fsm);
+        (tab.PanWorldCenter, tab.Zoom) = FsmGraphOverlay.FitViewToFsm(FsmDataCollector.CollectFsmInfo(fsm.Component));
 
         _tabs.Add(tab);
         ActiveTabIndex = _tabs.Count - 1;
@@ -82,17 +84,17 @@ internal sealed class FsmTabManager
     // automatically if the player returns to a scene containing that FsmKey again.
     public void RebindAfterRefresh(FsmSnapshot snapshot)
     {
-        var byKey = new Dictionary<string, FsmInfo>();
-        foreach (FsmInfo fsm in snapshot.Fsms)
+        var byKey = new Dictionary<string, PlayMakerFSM>();
+        foreach (FsmIdentityInfo fsm in snapshot.Fsms)
         {
-            byKey[FsmIdentity.GetFsmKey(fsm.Component)] = fsm;
+            byKey[FsmIdentity.GetFsmKey(fsm.Component)] = fsm.Component;
         }
 
         foreach (FsmTabState tab in _tabs)
         {
-            if (byKey.TryGetValue(tab.FsmKey, out FsmInfo? fsm))
+            if (byKey.TryGetValue(tab.FsmKey, out PlayMakerFSM? component))
             {
-                tab.Component = fsm.Component;
+                tab.Component = component;
                 tab.IsLive = true;
             }
             else

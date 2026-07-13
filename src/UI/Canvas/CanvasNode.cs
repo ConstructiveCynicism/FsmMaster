@@ -10,7 +10,7 @@ namespace FsmMaster;
 // (agent-context/Silksong.DebugMod-main/UI/Canvas/CanvasNode.cs). Deliberately without its static
 // `allNodes` registry: DebugMod's UI is a persistent whole-session singleton, while FsmMaster's
 // ScriptEngine hot-reload contract (CLAUDE.md) tears down and rebuilds this tree on every reload, so
-// nothing here is static - the tree root drives its own Subtree() walk each frame instead of a shared
+// nothing here is static - the tree root drives its own CollectSubtree() walk each frame instead of a shared
 // list that would need manual clearing.
 internal abstract class CanvasNode
 {
@@ -92,21 +92,25 @@ internal abstract class CanvasNode
         Name = name;
     }
 
-    protected virtual IEnumerable<CanvasNode> ChildList()
-    {
-        yield break;
-    }
+    // Array.Empty<T>() rather than a yield-return iterator - a yield method allocates a fresh
+    // compiler-generated enumerator object on every single call, and this is invoked every frame,
+    // for every leaf node, by CollectSubtree below (see that method's own comment on this same
+    // cost for the recursion itself).
+    protected virtual IEnumerable<CanvasNode> ChildList() => Array.Empty<CanvasNode>();
 
-    public IEnumerable<CanvasNode> Subtree()
+    // Appends this node and every descendant into `results` via plain recursion rather than a
+    // yield-return iterator. FsmMasterPlugin.Update walks this every single frame against a reused
+    // buffer regardless of whether the panel is even visible - the previous nested-iterator version
+    // allocated a fresh compiler-generated enumerator object for every node at every level of the
+    // recursion on every call, which was a continuous, unconditional source of GC pressure for the
+    // entire time the plugin is loaded.
+    public void CollectSubtree(List<CanvasNode> results)
     {
-        yield return this;
+        results.Add(this);
 
         foreach (CanvasNode child in ChildList())
         {
-            foreach (CanvasNode node in child.Subtree())
-            {
-                yield return node;
-            }
+            child.CollectSubtree(results);
         }
     }
 

@@ -25,8 +25,17 @@ internal static class FsmSaveDataStore
 {
     private static readonly string DataDirectory = Path.Combine(Application.persistentDataPath, "FsmMasterData");
 
+    // value has been observed null in the wild (Scene.name returning null instead of "" when queried
+    // before the initial scene finishes loading - see FsmMasterPlugin.Awake) - treated the same as
+    // empty rather than thrown on, since every caller here is building a folder/file name, not
+    // validating user input.
     private static string SanitizeForFileName(string value)
     {
+        if (string.IsNullOrEmpty(value))
+        {
+            return string.Empty;
+        }
+
         foreach (char c in Path.GetInvalidFileNameChars())
         {
             value = value.Replace(c, '_');

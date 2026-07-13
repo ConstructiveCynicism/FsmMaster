@@ -8,7 +8,20 @@ namespace FsmMaster;
 internal sealed class FsmSnapshot
 {
     public string SceneName { get; set; } = "";
-    public IReadOnlyList<FsmInfo> Fsms { get; set; } = Array.Empty<FsmInfo>();
+    public IReadOnlyList<FsmIdentityInfo> Fsms { get; set; } = Array.Empty<FsmIdentityInfo>();
+}
+
+// Cheap identity-only entry for one live PlayMakerFSM - RefreshSnapshot builds one of these per FSM
+// unconditionally on every scene load, so it deliberately carries no reflected state/action/field data
+// (see FsmInfo for that). The full, reflection-heavy walk (FsmDataCollector.CollectFsmInfo) only ever
+// runs on demand, for whichever one FSM a graph tab is actually open/focused on - see
+// FsmGraphOverlay.ResolveFsmInfo - instead of eagerly for every FSM the scene scan discovers whether
+// it's ever viewed or not.
+internal sealed class FsmIdentityInfo
+{
+    public PlayMakerFSM Component { get; set; } = null!;
+    public string FsmName { get; set; } = "";
+    public string GameObjectName { get; set; } = "";
 }
 
 internal sealed class FsmInfo

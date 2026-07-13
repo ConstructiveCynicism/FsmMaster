@@ -73,12 +73,33 @@ internal sealed class SequenceSendEventAction : FsmStateAction
 
 internal static class FsmActionSequencer
 {
-    // Finds the first action in a state that looks like a RandomEvent-family action (RandomEvent,
-    // SendRandomEvent, V2/V3/V3ActiveBool/V4, SendRandomEventFair/FairConditional, or any future variant).
-    // All of PlayMaker's built-in random-event actions follow the naming convention of containing "Random"
-    // in the type name, so this generalizes across variants instead of hardcoding one specific type.
-    public static int IndexFirstRandomEventAction(FsmState state) =>
-        state.IndexFirstActionMatching(action => action.GetType().Name.Contains("Random"));
+    // Finds the array index of the rank-th (0-based) action in a state that looks like a RandomEvent-
+    // family action (RandomEvent, SendRandomEvent, V2/V3/V3ActiveBool/V4, SendRandomEventFair/
+    // FairConditional, or any future variant). All of PlayMaker's built-in random-event actions follow
+    // the naming convention of containing "Random" in the type name, so this generalizes across variants
+    // instead of hardcoding one specific type. Ranking (rather than a raw array index) is what lets a
+    // state with more than one such action have each one independently sequenced: a synthetic
+    // SequenceSendEventAction's own type name never contains "Random", so installing/removing sequencers
+    // elsewhere in the same state only ever shifts array positions, never the rank order among the
+    // actions that actually match.
+    public static int IndexRandomEventAction(FsmState state, int rank)
+    {
+        int seen = 0;
+        for (int i = 0; i < state.Actions.Length; i++)
+        {
+            if (state.Actions[i].GetType().Name.Contains("Random"))
+            {
+                if (seen == rank)
+                {
+                    return i;
+                }
+
+                seen++;
+            }
+        }
+
+        return -1;
+    }
 
     // Finds the ordered list of candidate FsmEvents a RandomEvent-family action would have picked from.
     // Works via reflection over the action's own public FsmEvent[] field (the shape shared by

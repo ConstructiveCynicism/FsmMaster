@@ -51,7 +51,14 @@ internal sealed class UICommon
     public Color NumericValueColor { get; } = new(140f / 255f, 190f / 255f, 225f / 255f, 1f);
     public Color StringValueColor { get; } = new(210f / 255f, 160f / 255f, 120f / 255f, 1f);
     public Color ReadOnlyColor { get; } = new(140f / 255f, 140f / 255f, 145f / 255f, 0.75f);
-    public Color DividerColor => PanelBorder;
+
+    // FsmActiveStatePanel's per-action/per-variable-type outline blocks (CanvasSectionBlock) - a subtle
+    // step up from PanelBackground so a block reads as its own surface without competing with
+    // AccentColor/ButtonActive's stronger blue, which already means "focused/toggled-on" elsewhere in
+    // this panel. Selected is "a bit lighter" than normal, not a color swap, so selection reads as the
+    // same block raised up rather than a different kind of highlight.
+    public Color SectionBlockColor { get; } = new(36f / 255f, 39f / 255f, 46f / 255f, 0.5f);
+    public Color SectionBlockSelectedColor { get; } = new(58f / 255f, 62f / 255f, 72f / 255f, 0.75f);
 
     // Label color for an action field PlayMaker never serializes/shows in its own editor (private
     // runtime bookkeeping like Wait's startTime/timer) - see FsmActionFieldInfo.IsHidden. A muted
@@ -59,8 +66,19 @@ internal sealed class UICommon
     // editable row types as any other field) and shouldn't look like one at a glance.
     public Color HiddenFieldLabelColor { get; } = new(170f / 255f, 145f / 255f, 210f / 255f, 0.9f);
 
+    // FsmRightPanel's transient save/load status line (ConfirmSave/ConfirmLoad) - distinct from
+    // ButtonActive's blue (which already means "toggled on" elsewhere in this panel), so a completed
+    // save/load reads as its own kind of feedback rather than another selection highlight.
+    public Color SuccessColor { get; } = new(130f / 255f, 205f / 255f, 140f / 255f, 1f);
+    public Color ErrorColor { get; } = new(225f / 255f, 120f / 255f, 120f / 255f, 1f);
+
     public int FontSize => ScaleHeight(13);
     public int HeaderFontSize => ScaleHeight(15);
+
+    // CanvasToggleDot's on-screen diameter - kept equal to the current body font size so a toggle dot
+    // (the "add to monitor" dots in FsmActiveStatePanel, the pin dot in FsmTabStripPanel) reads as part
+    // of the same line of text it sits beside rather than a separately-scaled control.
+    public float DotSize => FontSize;
 
     public UICommon()
     {

@@ -34,6 +34,7 @@ internal sealed class FsmOpenDropdown : CanvasPanel
     private readonly FsmTabManager _tabManager;
     private readonly Func<FsmSnapshot?> _getSnapshot;
     private readonly CanvasButton _anchorButton;
+    private readonly Action<string> _showStatus;
 
     private readonly CanvasButton _backButton;
     private readonly CanvasText _headerText;
@@ -47,13 +48,14 @@ internal sealed class FsmOpenDropdown : CanvasPanel
     private int _selectedSceneIndex = -1;
     private int _selectedObjectIndex = -1;
 
-    public FsmOpenDropdown(UICommon ui, FsmTabManager tabManager, Func<FsmSnapshot?> getSnapshot, CanvasButton anchorButton)
+    public FsmOpenDropdown(UICommon ui, FsmTabManager tabManager, Func<FsmSnapshot?> getSnapshot, CanvasButton anchorButton, Action<string> showStatus)
         : base("OpenDropdown")
     {
         _ui = ui;
         _tabManager = tabManager;
         _getSnapshot = getSnapshot;
         _anchorButton = anchorButton;
+        _showStatus = showStatus;
         ActiveSelf = false;
         Size = new Vector2(Width, HeaderHeight + RowHeight);
 
@@ -279,6 +281,7 @@ internal sealed class FsmOpenDropdown : CanvasPanel
         }
 
         _tabManager.OpenOrFocus(snapshot.Fsms[snapshotIndex]);
+        _showStatus("FSM Opened");
         Hide();
     }
 
