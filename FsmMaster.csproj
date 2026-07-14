@@ -42,6 +42,10 @@
     <None Include="README.md" Pack="True" PackagePath="README.md" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include=".config\dotnet-tools.json" />
+  </ItemGroup>
+
   <PropertyGroup>
     <CopyDestinationFolder Condition="'$(HotReload)' == 'true'">$(SilksongPluginsFolder)/</CopyDestinationFolder>
     <CopyDestinationFolder Condition="'$(HotReload)' != 'true'">$(SilksongPluginsFolder)/ConstructiveCynicism-$(AssemblyTitle)/</CopyDestinationFolder>
@@ -53,5 +57,42 @@
       <Binaries Include="$(TargetDir)/$(TargetName).pdb" />
     </ItemGroup>
     <Copy SourceFiles="@(Binaries)" DestinationFolder="$(CopyDestinationFolder)" Condition="'$(SilksongPluginsFolder)' != '' And Exists('$(SilksongPluginsFolder)')" />
+  </Target>
+
+  <!-- Release packaging: builds the Thunderstore package and a manual-install zip, both
+       bundling Silksong.ModList the same way DebugMod's release process does. Gated to
+       Release so hot-reload debug builds during live gameplay stay fast and offline. -->
+  <Target Name="PackageThunderstoreMod" AfterTargets="PostBuildEvent" Condition="'$(Configuration)' == 'Release'">
+    <ItemGroup>
+      <ThunderstoreBinaries Include="$(TargetPath)" LocalDir="/" PackDir="/plugins" />
+      <ThunderstoreBinaries Include="$(TargetDir)/$(TargetName).pdb" LocalDir="/" PackDir="/plugins" />
+    </ItemGroup>
+    <PropertyGroup>
+      <ThunderstoreDir>$(ProjectDir)/thunderstore</ThunderstoreDir>
+    </PropertyGroup>
+    <RemoveDir Directories="$(ThunderstoreDir)/temp;$(ThunderstoreDir)/build" />
+    <MakeDir Directories="$(ThunderstoreDir)/temp" />
+    <Copy SourceFiles="@(ThunderstoreBinaries)" DestinationFolder="$(ThunderstoreDir)/temp/%(ThunderstoreBinaries.PackDir)" />
+    <Exec Command="dotnet tool restore" WorkingDirectory="$(ProjectDir)" />
+    <Exec Command="dotnet tcli build --config-path &quot;$(ThunderstoreDir)/thunderstore.toml&quot; --package-name &quot;$(AssemblyTitle)&quot; --package-version $(Version)" StandardOutputImportance="High" StandardErrorImportance="High" WorkingDirectory="$(ProjectDir)" />
+  </Target>
+
+  <Target Name="CreateReleaseZip" AfterTargets="PostBuildEvent" Condition="'$(Configuration)' == 'Release'">
+    <ItemGroup>
+      <ReleaseBinaries Include="$(TargetPath)" LocalDir="/" />
+      <ReleaseBinaries Include="$(TargetDir)/$(TargetName).pdb" LocalDir="/" />
+    </ItemGroup>
+    <PropertyGroup>
+      <ThunderstoreDir>$(ProjectDir)/thunderstore</ThunderstoreDir>
+      <ModlistVersion>0.3.1</ModlistVersion>
+      <ModlistUrl>https://github.com/silksong-modding/Silksong.ModList/releases/download/v$(ModlistVersion)/silksong_modding-Modlist-$(ModlistVersion).zip/</ModlistUrl>
+    </PropertyGroup>
+    <RemoveDir Directories="$(IntermediateOutputPath)/archive" />
+    <Copy SourceFiles="@(ReleaseBinaries)" DestinationFolder="$(IntermediateOutputPath)/archive/$(TargetName)/%(ReleaseBinaries.LocalDir)" />
+    <DownloadFile Condition="!Exists('$(IntermediateOutputPath)/Silksong.Modlist.$(ModlistVersion).zip')" SourceUrl="$(ModlistUrl)" DestinationFolder="$(IntermediateOutputPath)" DestinationFileName="Silksong.Modlist.$(ModlistVersion).zip" />
+    <Unzip SourceFiles="$(IntermediateOutputPath)/Silksong.Modlist.$(ModlistVersion).zip" DestinationFolder="$(IntermediateOutputPath)/archive/Silksong.Modlist" />
+    <MakeDir Directories="$(ThunderstoreDir)/manual" />
+    <Delete Files="$(ThunderstoreDir)/manual/$(TargetName)_MANUAL.zip" />
+    <ZipDirectory SourceDirectory="$(IntermediateOutputPath)/archive" DestinationFile="$(ThunderstoreDir)/manual/$(TargetName)_MANUAL.zip" Overwrite="True" />
   </Target>
 </Project>

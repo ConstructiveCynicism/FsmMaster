@@ -12,6 +12,7 @@ For any questions or bug reports, please join the [Modding Discord](https://disc
 ---
 - [FsmMaster for Silksong](#fsmmaster-for-silksong)
   - [Features](#features)
+  - [Coming Soon](#coming-soon)
   - [Controls](#controls)
     - [Panel Controls](#panel-controls)
     - [Graph Controls](#graph-controls)
@@ -36,6 +37,12 @@ For any questions or bug reports, please join the [Modding Discord](https://disc
 - Interactable graph - click and drag your way through an FSM's states,
   transitions, and events instead of reading raw data.
 - Custom config saving/loading, with optional auto-load on scene change.
+
+## Coming Soon
+- Adaptive RNG, to make practicing attacks faster based on what you're struggling with
+- Timer Mod integration, starting and stopping the timer based on Fsm values
+- Hollow Knight backport
+- Sequencers for more actions
 
 ## Controls
 
@@ -67,18 +74,16 @@ For any questions or bug reports, please join the [Modding Discord](https://disc
 ## Installation
 
 > [!IMPORTANT]
-> For moderation reasons, this mod requires [Silksong.ModList](https://github.com/silksong-modding/Silksong.ModList) to be installed. This mod is included in the [release download](<https://github.com/constructivecynicism/releases/latest>).
+> For moderation reasons, this mod requires [Silksong.ModList](https://github.com/silksong-modding/Silksong.ModList) to be installed. This mod is included in the [release download](<https://github.com/ConstructiveCynicism/Silksong.FsmMaster/releases/latest>).
 If Silksong.ModList is not installed, FsmMaster will silently fail to load.
 
-FsmMaster can be installed via [Cogfly](), [Thunderstore](), or manually installed with the latest release.
+FsmMaster can be installed via [Cogfly](), [Thunderstore](), or manually installed with the latest [release download](<https://github.com/ConstructiveCynicism/Silksong.FsmMaster/releases/latest>).
+
 > [!TIP]
 > FsmMaster works standalone, but installing [DebugMod](https://github.com/hk-speedrunning/Silksong.DebugMod) alongside it gives you
 > savestate support - active FSM edits are automatically captured and restored
-> when you save or load a savestate. We recommend installing DebugMod for the
+> when you save or load a savestate. I recommend installing DebugMod for the
 > best experience.
-
-## Building/Development
-- 
 
 ## Credits
 

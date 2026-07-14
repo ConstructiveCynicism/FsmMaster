@@ -9,6 +9,12 @@ CLAUDE.md
 # / dotnet new silksongpath — holds paths like $(SilksongPluginsFolder))
 SilksongPath.props
 
+# Thunderstore/manual-zip release packaging output (regenerated on Release build)
+thunderstore/temp/
+thunderstore/dist/
+thunderstore/build/
+thunderstore/manual/
+
 # Standard build output
 bin/
 obj/

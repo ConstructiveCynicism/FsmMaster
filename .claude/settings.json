@@ -4,7 +4,11 @@
       "Bash(echo \"EXIT:$?\")",
       "Bash(find \"/c/Program Files \\(x86\\)/Steam/steamapps/common/Silksong TE Debug/BepInEx/plugins\" -iname \"*configurationmanager*\" 2>/dev/null)",
       "Read(//c/Program Files \\\\\\(x86\\\\\\)/Steam/steamapps/common/Silksong TE Debug/BepInEx/plugins/**)",
-      "Bash(dotnet build *)"
+      "Bash(dotnet build *)",
+      "PowerShell(dotnet build FsmMaster.csproj -c Debug 2>&1)",
+      "WebSearch",
+      "Bash(gh api *)",
+      "WebFetch(domain:github.com)"
     ]
   }
 }

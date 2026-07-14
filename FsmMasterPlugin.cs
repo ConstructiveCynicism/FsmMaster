@@ -15,6 +15,7 @@ namespace FsmMaster;
 // TODO - adjust the plugin guid as needed
 [BepInAutoPlugin(id: "io.github.constructivecynicism.fsmmaster")]
 [BepInDependency("org.silksong-modding.fsmutil")]
+[BepInDependency("org.silksong-modding.modlist", "0.2.0")]
 [BepInDependency(DebugMod.DebugMod.Id, BepInDependency.DependencyFlags.SoftDependency)]
 public partial class FsmMasterPlugin : BaseUnityPlugin
 {

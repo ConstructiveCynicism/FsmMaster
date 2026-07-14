@@ -30,10 +30,24 @@ jobs:
           name: FsmMaster-build
           path: bin/Release/netstandard2.1/**
 
+      - name: Upload Thunderstore package
+        uses: actions/upload-artifact@v4
+        with:
+          name: FsmMaster-thunderstore-package
+          path: thunderstore/build/*.zip
+
+      - name: Upload manual install zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: FsmMaster-manual-zip
+          path: thunderstore/manual/*.zip
+
   publish:
     needs: build
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -41,18 +55,20 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
+      - name: Resolve release version
+        run: echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
       - name: Restore & Build
         run: |
           dotnet restore
-          dotnet build --configuration Release --no-restore
-
-      - name: Install tcli
-        run: dotnet tool install --global ThunderstoreCLI
-
-      - name: Build Thunderstore package
-        run: tcli build --package-version ${{ github.event.release.tag_name }}
+          dotnet build --configuration Release --no-restore /p:Version=${{ env.RELEASE_VERSION }}
 
       - name: Publish to Thunderstore
         env:
           TCLI_AUTH_TOKEN: ${{ secrets.TCLI_AUTH_TOKEN }}
-        run: tcli publish --file ./build/*.zip
+        run: dotnet tcli publish --config-path thunderstore/thunderstore.toml --file thunderstore/build/*.zip
+
+      - name: Attach release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$GITHUB_REF_NAME" thunderstore/manual/*.zip thunderstore/build/*.zip --clobber
