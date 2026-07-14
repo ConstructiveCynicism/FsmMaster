@@ -478,6 +478,9 @@ internal sealed class FsmEditManager
         return null;
     }
 
+    // Looks up the action at (stateName, actionIndex) and the named field on it, failing if the action's
+    // runtime type no longer matches expectedActionTypeName (the FSM was edited since the override was
+    // recorded) or the field doesn't exist.
     private static bool TryFindActionField(Fsm fsm, string stateName, int actionIndex, string expectedActionTypeName, string fieldName,
         [NotNullWhen(true)] out FsmStateAction? action, [NotNullWhen(true)] out FieldInfo? field)
     {
@@ -743,6 +746,9 @@ internal sealed class FsmEditManager
         BumpEditGeneration();
     }
 
+    // Writes ov's recorded pristine value back onto the live action field (or array element), undoing
+    // whatever ApplyActionFieldOverride/ApplyActionFieldArrayElementOverride did. No-ops quietly if the
+    // state/action/field no longer matches, since a snapshot can outlive the action it was captured from.
     private static void RestoreActionField(Fsm fsm, ActionFieldOverride ov)
     {
         FsmState? state = fsm.GetState(ov.StateName);
@@ -1219,6 +1225,8 @@ internal sealed class FsmEditManager
         }
     }
 
+    // Retargets the transition at (stateName, eventName) if one already exists there; otherwise creates
+    // it fresh, since ChangeTransition/ChangeGlobalTransition return false rather than creating one.
     private static void AddOrChangeTransitionAt(Fsm fsm, string stateName, string eventName, string toState)
     {
         bool isGlobal = string.IsNullOrEmpty(stateName);
@@ -1424,6 +1432,10 @@ internal sealed class FsmEditManager
         return set;
     }
 
+    // The core revert engine behind ResetFsm and RevertAllForUnload: puts every live instance in
+    // instances back to snapshot's pristine state - reassigns overridden variables/action fields,
+    // restores relocated transitions, re-enables actions DisableState neutered, and removes the exit
+    // actions and sequencers this class injected.
     private static void RestoreSnapshot(FsmPristineSnapshot snapshot, List<Fsm> instances)
     {
         foreach (Fsm fsm in instances)

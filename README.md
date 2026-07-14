@@ -66,11 +66,11 @@ For any questions or bug reports, please join the [Modding Discord](https://disc
 
 ## Installation
 
-FsmMaster is not distributed on Thunderstore - build it from source and copy
-the output DLL (and `.pdb`) into your `BepInEx/plugins` folder, or point the
-project's `SilksongPath.props` at your game's plugins folder so the build
-copies it there for you.
+> [!IMPORTANT]
+> For moderation reasons, this mod requires [Silksong.ModList](https://github.com/silksong-modding/Silksong.ModList) to be installed. This mod is included in the [release download](<https://github.com/constructivecynicism/releases/latest>).
+If Silksong.ModList is not installed, FsmMaster will silently fail to load.
 
+FsmMaster can be installed via [Cogfly], [Thunderstore](),
 > [!TIP]
 > FsmMaster works standalone, but installing [DebugMod](https://github.com/hk-speedrunning/Silksong.DebugMod) alongside it gives you
 > savestate support - active FSM edits are automatically captured and restored

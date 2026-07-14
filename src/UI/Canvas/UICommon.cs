@@ -4,11 +4,9 @@ namespace FsmMaster;
 
 // Runtime-generated style resources + palette for FsmMaster's right panel - instance-owned (built in
 // FsmMasterPlugin.Awake, torn down via Destroy() in OnDestroy) rather than static, so a ScriptEngine
-// reload can never accumulate orphaned Texture2D/Sprite instances across reloads (see CLAUDE.md's
-// Awake/OnDestroy symmetry contract). Every widget constructor takes a UICommon reference rather than
-// reading shared static fields, for the same reason. Palette is FsmMaster's own dark/translucent
-// theme - a distinct set of literal color values from Silksong.DebugMod's Catppuccin Macchiato
-// palette (agent-context/Silksong.DebugMod-main/UI/UICommon.cs), not copied from it.
+// reload can never accumulate orphaned Texture2D/Sprite instances across reloads. Every widget
+// constructor takes a UICommon reference rather than reading shared static fields, for the same
+// reason. Palette is FsmMaster's own dark/translucent theme.
 internal sealed class UICommon
 {
     public Texture2D SolidTexture { get; }
@@ -43,10 +41,7 @@ internal sealed class UICommon
     public Color SelectionColor { get; } = new(120f / 255f, 170f / 255f, 235f / 255f, 1.0f);
     public Color CaretColor { get; } = new(120f / 255f, 170f / 255f, 235f / 255f, 1f);
 
-    // Type/value color-coding for the Actions/Events/Variables panel (FsmActiveStatePanel) - concept
-    // ported from FSMExpress's own type-vs-value color split
-    // (agent-context/FSMExpress-master/FSMExpress/Controls/Sidebar/TypeColorConverter.cs), literal
-    // values are FsmMaster's own, not copied from its palette.
+    // Type/value color-coding for the Actions/Events/Variables panel (FsmActiveStatePanel).
     public Color TypeBadgeColor { get; } = new(110f / 255f, 196f / 255f, 182f / 255f, 1f);
     public Color NumericValueColor { get; } = new(140f / 255f, 190f / 255f, 225f / 255f, 1f);
     public Color StringValueColor { get; } = new(210f / 255f, 160f / 255f, 120f / 255f, 1f);
@@ -97,11 +92,9 @@ internal sealed class UICommon
         // Resources.FindObjectsOfTypeAll<Font>() actually finds loaded and switch to one of those).
         BodyFont = Resources.GetBuiltinResource<Font>("Arial.ttf");
 
-        // Silksong's own bold display font, matching Silksong.DebugMod's own font-discovery convention
-        // (agent-context/Silksong.DebugMod-main/UI/UICommon.cs's LoadResources, which finds this same
-        // font name loaded for this same game). Falls back silently to BodyFont if not found - an
-        // unverified assumption until confirmed in-game (see this mod's own working notes), but a
-        // missing header font is a cosmetic degradation, not a crash.
+        // Looks up Silksong's own bold display font by name among the game's currently loaded fonts.
+        // Falls back silently to BodyFont if not found - a missing header font is a cosmetic
+        // degradation, not a crash.
         HeaderFont = FindLoadedFont("TrajanPro-Bold") ?? BodyFont;
     }
 

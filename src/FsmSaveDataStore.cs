@@ -11,10 +11,9 @@ namespace FsmMaster;
 // subfolder - so a single FsmKey can hold several independently named configurations (e.g. "aggressive" vs
 // "passive" variants of the same enemy FSM) rather than exactly one save overwriting itself every time. Uses
 // UnityEngine.JsonUtility rather than a third-party JSON library, since JsonUtility ships inside
-// UnityEngine.Modules (already a dependency here) and needs nothing new added to the fixed dependency list
-// in CLAUDE.md. Silksong.DebugMod follows the same JsonUtility-based approach and the same
-// Application.persistentDataPath-rooted storage convention (agent-context/Silksong.DebugMod-main/DebugMod.cs,
-// ModBaseDirectory; agent-context/Silksong.DebugMod-main/SaveStates/SaveStateManager.cs).
+// UnityEngine.Modules (already a dependency here) and needs nothing new added to the mod's dependency list.
+// Storage is rooted under Application.persistentDataPath rather than the BepInEx config folder, so a
+// player's saved FSM edits travel with their game save data.
 //
 // Confirmed in-game: JsonUtility silently drops a List<T> field entirely (not even an empty "[]") whenever
 // T is a custom class, regardless of nesting depth or whether the list is populated - List<string> serializes
@@ -24,7 +23,10 @@ namespace FsmMaster;
 // JsonUtility-safe List<string> shape - readable directly in the file and independent of field order.
 internal static class FsmSaveDataStore
 {
-    private static readonly string DataDirectory = Path.Combine(Application.persistentDataPath, "FsmMasterData");
+    // Also where FsmMasterPlugin points its own ConfigFile (see FsmMasterPlugin.Awake) - both the mod's
+    // settings and its FSM edit presets live under this one folder rather than settings sitting under
+    // BepInEx/config while presets sit under persistentDataPath.
+    internal static readonly string DataDirectory = Path.Combine(Application.persistentDataPath, "FsmMasterData");
 
     // value has been observed null in the wild (Scene.name returning null instead of "" when queried
     // before the initial scene finishes loading - see FsmMasterPlugin.Awake) - treated the same as
@@ -54,6 +56,7 @@ internal static class FsmSaveDataStore
     public static string GetFilePath(string sceneName, string fsmKey, string saveName) =>
         Path.Combine(GetFsmDirectory(sceneName, fsmKey), $"{SanitizeForFileName(saveName)}.json");
 
+    // Loads one named save from disk, or null if no such (scene, fsmKey, saveName) file exists.
     public static FsmEditSet? Load(string sceneName, string fsmKey, string saveName)
     {
         string filePath = GetFilePath(sceneName, fsmKey, saveName);

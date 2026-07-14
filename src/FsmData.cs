@@ -5,6 +5,7 @@ using HutongGames.PlayMaker;
 
 namespace FsmMaster;
 
+// Cheap, per-scene collection of every live FSM's identity, without any per-state/action detail.
 internal sealed class FsmSnapshot
 {
     public string SceneName { get; set; } = "";
@@ -24,6 +25,8 @@ internal sealed class FsmIdentityInfo
     public string GameObjectName { get; set; } = "";
 }
 
+// Full reflected snapshot of one FSM's states/actions/transitions, collected on demand for whichever
+// FSM a graph tab actually has open.
 internal sealed class FsmInfo
 {
     public PlayMakerFSM Component { get; set; } = null!;
@@ -35,6 +38,7 @@ internal sealed class FsmInfo
     public IReadOnlyList<FsmTransitionInfo> GlobalTransitions { get; set; } = Array.Empty<FsmTransitionInfo>();
 }
 
+// One state's own actions and outgoing transitions.
 internal sealed class FsmStateInfo
 {
     public FsmState State { get; set; } = null!;
@@ -43,6 +47,7 @@ internal sealed class FsmStateInfo
     public IReadOnlyList<FsmTransitionInfo> Transitions { get; set; } = Array.Empty<FsmTransitionInfo>();
 }
 
+// One state action instance plus its reflected field list.
 internal sealed class FsmActionInfo
 {
     public FsmStateAction Action { get; set; } = null!;
@@ -50,6 +55,7 @@ internal sealed class FsmActionInfo
     public IReadOnlyList<FsmActionFieldInfo> Fields { get; set; } = Array.Empty<FsmActionFieldInfo>();
 }
 
+// One reflected field on an action, with its current value and display metadata.
 internal sealed class FsmActionFieldInfo
 {
     public string FieldName { get; set; } = "";
@@ -67,6 +73,7 @@ internal sealed class FsmActionFieldInfo
     public bool IsHidden { get; set; }
 }
 
+// One outgoing transition's triggering event and target state.
 internal sealed class FsmTransitionInfo
 {
     public string EventName { get; set; } = "";

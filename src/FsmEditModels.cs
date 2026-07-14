@@ -3,8 +3,8 @@ using System.Collections.Generic;
 
 namespace FsmMaster;
 
-// Plain, flat DTOs for UnityEngine.JsonUtility, which is the only JSON serializer available under this
-// project's fixed dependency list (see CLAUDE.md - no Newtonsoft/System.Text.Json package reference).
+// Plain, flat DTOs for UnityEngine.JsonUtility, the only JSON serializer available given this mod's
+// dependencies (no Newtonsoft/System.Text.Json package reference).
 // JsonUtility cannot serialize Dictionary<> or polymorphic fields, so every value - regardless of the
 // underlying PlayMaker variable/field CLR type - is round-tripped as an invariant-culture string and parsed
 // back against the recorded type tag on load, instead of modelling one field per possible PlayMaker type.
@@ -32,6 +32,7 @@ internal sealed class FsmEditSet
     public List<SequencerOverride> SequencerOverrides = new();
 }
 
+// A live-edited value for a single FSM variable (or one array element of it).
 [Serializable]
 internal sealed class VariableOverride
 {
@@ -44,6 +45,7 @@ internal sealed class VariableOverride
     public string StringValue = "";
 }
 
+// A live-edited value for a single field on a specific state's action (or one array element of it).
 [Serializable]
 internal sealed class ActionFieldOverride
 {
@@ -84,6 +86,8 @@ internal sealed class TransitionRetarget
     public string NewEventName = "";
 }
 
+// A custom ordered event sequence installed in place of a RandomEvent-family action on a specific
+// state's action (see FsmActionSequencer). Pattern is the flattened list of event names to cycle through.
 [Serializable]
 internal sealed class SequencerOverride
 {

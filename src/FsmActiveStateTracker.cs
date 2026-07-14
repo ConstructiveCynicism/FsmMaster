@@ -6,13 +6,12 @@ using UnityEngine;
 namespace FsmMaster;
 
 // Tracks which states an FSM's live Fsm instance has actually entered since the last reconciliation,
-// via Fsm.StateChanged - a plain public Action<FsmState> field (not a Harmony patch target; confirmed
-// against agent-context/Playmaker/decompiled/HutongGames.PlayMaker/Fsm.cs:169) invoked synchronously
-// from EnterState right before state.OnEnter() (Fsm.cs:2751-2754). PlayMaker can chain several state
-// entries within a single Unity Update() call - one event immediately causing another transition, and
-// so on - so polling Fsm.ActiveStateName once per rendered frame (the graph overlay's previous
-// approach) silently drops every intermediate state a multi-hop chain passed through within that same
-// frame. Hooking StateChanged instead observes every one of them, in order, as they happen.
+// via Fsm.StateChanged - a plain public Action<FsmState> field, invoked synchronously from EnterState
+// right before state.OnEnter() runs. PlayMaker can chain several state entries within a single Unity
+// Update() call - one event immediately causing another transition, and so on - so polling
+// Fsm.ActiveStateName once per rendered frame (the graph overlay's previous approach) silently drops
+// every intermediate state a multi-hop chain passed through within that same frame. Hooking
+// StateChanged instead observes every one of them, in order, as they happen.
 //
 // Only ever tracks whichever FSMs FsmGraphOverlay is actually drawing this frame (EnsureTracked is
 // called once per DrawGraph pass, for the active tab plus any pinned tabs) - not every live FSM in the

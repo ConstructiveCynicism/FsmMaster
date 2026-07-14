@@ -51,7 +51,7 @@ internal sealed class FsmGraphPerformanceConfig
         ConfigEntry<GraphLineStyle> lineStyle = config.Bind(
             section,
             "Line Style",
-            GraphLineStyle.Thick,
+            GraphLineStyle.Thin,
             "How transition lines are drawn. Thick: antialiased curved lines with arrowheads (most "
                 + "detailed, most expensive). Thin: the same curves drawn as hard-edged 1px lines with "
                 + "arrowheads. Straight: a plain straight segment between each transition's endpoints, no "

@@ -7,8 +7,8 @@ using HutongGames.PlayMaker;
 namespace FsmMaster;
 
 // Walks the live PlayMakerFSM/Fsm object graph and returns plain structured data.
-// No logging here - this is shared by the console logger today and will be shared
-// by the overlay/graph UI later, so it must not know or care how its output is displayed.
+// Shared by both the console logger and the graph overlay, so it must not know or
+// care how its output is displayed.
 internal static class FsmDataCollector
 {
     // Deliberately cheap - no reflection, no state/action walk - since this runs unconditionally on

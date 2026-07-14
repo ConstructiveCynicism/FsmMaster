@@ -1,0 +1,21 @@
+[config]
+schemaVersion = "0.0.1"
+
+[package]
+namespace = "Cynic_SR"
+name = "FsmMaster"
+description = "Visual FSM graph inspection, live editing, and debugging for PlayMaker FSMs in Silksong. Best used with DebugMod"
+websiteUrl = "https://github.com/ConstructiveCynicism/Silksong.FsmMaster"
+containsNsfwContent = false
+
+[package.dependencies]
+"BepInEx-BepInExPack" = "5.4.2100"
+
+[build]
+icon = "icon.png"
+readme = "README.md"
+outdir = "./build"
+
+[[build.copy]]
+source = "bin/Release/netstandard2.1"
+target = ""

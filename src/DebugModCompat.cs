@@ -16,24 +16,26 @@ internal sealed class DebugModCompat
     private const string ActiveEditsCustomDataKey = "FsmMaster.ActiveEdits";
 
     private readonly FsmEditManager _editManager;
+    private readonly Action _rescanLiveFsms;
     private readonly ManualLogSource _logger;
 
-    private DebugModCompat(FsmEditManager editManager, ManualLogSource logger)
+    private DebugModCompat(FsmEditManager editManager, Action rescanLiveFsms, ManualLogSource logger)
     {
         _editManager = editManager;
+        _rescanLiveFsms = rescanLiveFsms;
         _logger = logger;
     }
 
     // Returns null whenever DebugMod isn't installed - the caller then holds no reference to this class
     // at all, so OnDestroy has nothing to unhook.
-    public static DebugModCompat? TryCreate(FsmEditManager editManager, ManualLogSource logger)
+    public static DebugModCompat? TryCreate(FsmEditManager editManager, Action rescanLiveFsms, ManualLogSource logger)
     {
         if (!Chainloader.PluginInfos.ContainsKey(DebugMod.DebugMod.Id))
         {
             return null;
         }
 
-        var compat = new DebugModCompat(editManager, logger);
+        var compat = new DebugModCompat(editManager, rescanLiveFsms, logger);
         compat.Hook();
         return compat;
     }
@@ -83,14 +85,19 @@ internal sealed class DebugModCompat
         }
     }
 
-    // Fires only once DebugMod has finished its own scene-transition and post-load fixups - by this
-    // point FsmMasterPlugin's own SceneManager.sceneLoaded handler has already re-scanned and registered
-    // the newly loaded scene's live FSMs (FsmMasterPlugin.ApplyPersistedEditsForScene), so ApplyEditSet
-    // below has live instances to apply to.
+    // Fires once DebugMod has finished its own scene-transition and post-load fixups. FsmMasterPlugin's
+    // own SceneManager.sceneLoaded handler has usually already re-scanned and registered the newly
+    // loaded scene's live FSMs by this point, but not always: when a savestate's target room is the room
+    // already active, DebugMod's loader doesn't reliably tear the scene down and reload it, so Unity's
+    // sceneLoaded event - and therefore that handler - may never fire for this load. Forcing the same
+    // rescan here first keeps ApplyEditSet below from working off a stale or missing live instance
+    // regardless of which case this load turned out to be.
     private void HandleAfterLoad(SaveState state)
     {
         try
         {
+            _rescanLiveFsms();
+
             if (!state.data.customData.TryGetValue(ActiveEditsCustomDataKey, out string json) || string.IsNullOrEmpty(json))
             {
                 return;

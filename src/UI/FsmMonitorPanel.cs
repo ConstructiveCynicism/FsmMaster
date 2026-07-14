@@ -15,9 +15,9 @@ namespace FsmMaster;
 // FsmGraphOverlay.SelectionUiVisible instead of gating ActiveSelf on it.
 internal sealed class FsmMonitorPanel : CanvasPanel
 {
-    private const int PanelWidth = 300;
-    private const int PanelHeight = 200;
-    private const int ScreenMargin = 10;
+    private const int PanelWidth = 355;
+    private const int PanelHeight = 231;
+    private const int ScreenMargin = 0;
     private const float TitleBarHeightDesign = 20f;
     private const float RowHeightDesign = 18f;
     private const float ScrollbarWidthDesign = 10f;

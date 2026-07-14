@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(find \"/c/Program Files \\(x86\\)/Steam/steamapps/common/Silksong TE Debug/BepInEx/plugins\" -iname \"*configurationmanager*\" 2>/dev/null)",
+      "Read(//c/Program Files \\\\\\(x86\\\\\\)/Steam/steamapps/common/Silksong TE Debug/BepInEx/plugins/**)",
+      "Bash(dotnet build *)"
+    ]
+  }
+}

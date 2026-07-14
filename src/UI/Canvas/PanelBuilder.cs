@@ -7,10 +7,8 @@ namespace FsmMaster;
 // One-axis flow layout: positions each appended element end-to-end along the panel's own Horizontal
 // axis (or Vertical, if false) while filling the other axis (breadth) to fit within outer/inner
 // padding - FsmMaster's replacement for GUILayout.BeginHorizontal/Vertical in the uGUI panel.
-// Concept-ported from Silksong.DebugMod's PanelBuilder
-// (agent-context/Silksong.DebugMod-main/UI/Canvas/PanelBuilder.cs), trimmed to the slot kinds
-// FsmMaster's button row/tab strip actually use (Fixed/Square/Flex/Padding) - no Lazy slots or
-// IDisposable Build-on-Dispose sugar, since nothing here needs them yet.
+// Supports four slot kinds (Fixed/Square/Flex/Padding); there are no Lazy slots or IDisposable
+// Build-on-Dispose sugar since nothing here needs them.
 internal sealed class PanelBuilder
 {
     private readonly CanvasPanel _panel;

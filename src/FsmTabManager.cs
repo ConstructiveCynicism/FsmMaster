@@ -4,9 +4,8 @@ using HutongGames.PlayMaker;
 namespace FsmMaster;
 
 // Owns the set of currently "open" FSM tabs and which one is active - the single source of truth
-// both the old IMGUI list panel (until it's deleted) and the new uGUI tab strip/Open dropdown drive
-// selection through, so there's exactly one notion of "what's currently being viewed" rather than two
-// parallel selection mechanisms during the UI overhaul's transition period.
+// both the IMGUI list panel and the uGUI tab strip/Open dropdown drive selection through, so there's
+// exactly one notion of "what's currently being viewed" rather than two parallel selection mechanisms.
 internal sealed class FsmTabManager
 {
     private readonly List<FsmTabState> _tabs = new();
@@ -81,8 +80,8 @@ internal sealed class FsmTabManager
 
     // Called after every FsmDataCollector snapshot refresh (initial Awake, each scene load) - re-
     // resolves each open tab's live PlayMakerFSM by FsmKey. A tab whose FSM isn't present in the new
-    // snapshot is marked not-live rather than closed (confirmed UX decision), so it reconnects
-    // automatically if the player returns to a scene containing that FsmKey again.
+    // snapshot is marked not-live rather than closed, so it reconnects automatically if the player
+    // returns to a scene containing that FsmKey again.
     //
     // Takes the FsmKey groups FsmIdentity.DiscoverFsmGroups already computed for the edit manager
     // (see FsmMasterPlugin.ApplyPersistedEditsForScene) rather than re-deriving keys itself from the

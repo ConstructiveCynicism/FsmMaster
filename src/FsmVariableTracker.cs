@@ -6,11 +6,10 @@ using Silksong.FsmUtil;
 
 namespace FsmMaster;
 
-// Live variable-tracking registry - the data layer a future overlay will read from. Nothing here renders
-// anything; per the "to be used in the overlay later" scoping this pass only builds the "what's tracked"
-// list and an on-demand "what's its current value right now" resolver, targeting one specific field by
+// Live variable-tracking registry. Maintains the set of variables/state-watches/action-fields the user
+// has chosen to monitor and resolves each one's current value on demand, targeting one specific field by
 // reflection rather than walking every action field the way FsmDataCollector.CollectActions does for
-// full-snapshot display.
+// full-snapshot display. Does not render anything itself - FsmMonitorPanel is what displays this data.
 internal sealed class FsmVariableTracker
 {
     private readonly Func<string, IReadOnlyList<Fsm>> _getLiveInstances;

@@ -15,9 +15,9 @@ namespace FsmMaster;
 // difference being this panel has no separate "locked" state to gate on.
 internal sealed class FsmRightPanel : CanvasPanel
 {
-    private const int PanelWidth = 340;
-    private const int PanelHeight = 500;
-    private const int ScreenMargin = 10;
+    private const int PanelWidth = 355;
+    private const int PanelHeight = 850;
+    private const int ScreenMargin = 0;
     private const float TitleBarHeightDesign = 22f;
     private const float ButtonRowHeight = 28f;
     private const float ButtonGap = 4f;
@@ -339,15 +339,17 @@ internal sealed class FsmRightPanel : CanvasPanel
         }
     }
 
-    // Drives the top-of-panel save/load status line - shown for StatusDurationSeconds then hidden by
+    // Drives the top-of-panel save/load status line - shown for durationSeconds then hidden by
     // UpdateStatusTimeout below. Unscaled time, not Time.time, so the message still counts down and
-    // clears normally even if something elsewhere sets Time.timeScale to 0.
-    private void ShowStatus(string text, Color color)
+    // clears normally even if something elsewhere sets Time.timeScale to 0. Internal rather than
+    // private so FsmMasterPlugin can also surface a one-off message here (the first-run hotkey hint,
+    // which passes a longer duration than the default save/load feedback below).
+    internal void ShowStatus(string text, Color color, float durationSeconds = StatusDurationSeconds)
     {
         _statusText.Text = text;
         _statusText.Color = color;
         _statusText.ActiveSelf = true;
-        _statusHideAtUnscaledTime = Time.unscaledTime + StatusDurationSeconds;
+        _statusHideAtUnscaledTime = Time.unscaledTime + durationSeconds;
     }
 
     private void UpdateStatusTimeout()

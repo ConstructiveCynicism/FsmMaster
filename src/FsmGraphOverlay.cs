@@ -81,13 +81,6 @@ internal sealed class FsmGraphOverlay
     private float _textStyleBuiltForZoom = -1f;
 
     private bool _isVisible;
-
-    // Set true whenever SyncCursorState last forced the cursor unlocked/visible for the overlay
-    // (i.e. _isVisible was true that call), cleared once that override has been restored. Lets
-    // Shutdown (a ScriptEngine reload/unload) and the close-transition branch in SyncCursorState
-    // share the same "was this overlay the one holding the cursor open" check, rather than
-    // restoring unconditionally on every close and stomping on a cursor state something else owns.
-    private bool _cursorOverrideActive;
     private bool _selectionUiVisible = true;
     private bool _graphVisible = true;
     private FsmSnapshot? _snapshot;
@@ -318,7 +311,8 @@ internal sealed class FsmGraphOverlay
         ConfigEntry<KeyboardShortcut> toggleOverlayHotkey,
         ConfigEntry<KeyboardShortcut> toggleMinimalViewHotkey,
         FsmGraphColorConfig colors,
-        FsmGraphPerformanceConfig performance)
+        FsmGraphPerformanceConfig performance,
+        bool startVisible = false)
     {
         _logger = logger;
         _editManager = editManager;
@@ -327,15 +321,11 @@ internal sealed class FsmGraphOverlay
         _toggleMinimalViewHotkey = toggleMinimalViewHotkey;
         _colors = colors;
         _performance = performance;
+        _isVisible = startVisible;
     }
 
     public void Shutdown()
     {
-        // Symmetric with SyncCursorState forcing the cursor unlocked/visible while the overlay was
-        // open - a ScriptEngine reload/unload with the overlay still open must not leave the cursor
-        // stuck unlocked/visible over live gameplay just because nothing ever ran the close branch.
-        RestoreCursorForCurrentPauseState();
-
         // Must run on every reload (see FsmActiveStateTracker.UnsubscribeAll's own comment) - a
         // ScriptEngine reload otherwise leaves this instance's StateChanged handlers subscribed to
         // still-live Fsm instances forever, stacked underneath whatever the next Awake's own tracker
@@ -368,45 +358,6 @@ internal sealed class FsmGraphOverlay
     // IMGUI presence of its own for these hotkeys to toggle directly.
     internal bool IsVisible => _isVisible;
     internal bool SelectionUiVisible => _selectionUiVisible;
-
-    // Called from FsmMasterPlugin.LateUpdate - deliberately LateUpdate rather than alongside the
-    // _isVisible toggle in Update above, so this always runs after whatever the game's own Update
-    // methods do to the cursor that same frame, including a pause/unpause transition that happens
-    // while the overlay is open. Forcing the cursor from Update alone would still risk being
-    // overwritten later the same frame by the game reclaiming it.
-    internal void SyncCursorState()
-    {
-        if (_isVisible)
-        {
-            Cursor.lockState = CursorLockMode.None;
-            Cursor.visible = true;
-            _cursorOverrideActive = true;
-            return;
-        }
-
-        RestoreCursorForCurrentPauseState();
-    }
-
-    // Restores the cursor to whatever the game's current paused/menu-or-not state calls for, but
-    // only if this overlay is the one that last forced it open - otherwise this would stomp on a
-    // cursor state neither the overlay nor the game's own pause handling set. Shared by
-    // SyncCursorState's close branch and Shutdown (a reload/unload while the overlay was left open).
-    //
-    // GameManager.instance.isPaused is the real pause/menu flag - Time.timeScale is deliberately not
-    // used to decide this, since gameplay can legitimately drive timeScale to 0 outside of an actual
-    // pause, which would otherwise misidentify normal gameplay as "paused" here.
-    private void RestoreCursorForCurrentPauseState()
-    {
-        if (!_cursorOverrideActive)
-        {
-            return;
-        }
-
-        bool pausedOrMenu = GameManager.instance != null && GameManager.instance.isPaused;
-        Cursor.lockState = pausedOrMenu ? CursorLockMode.None : CursorLockMode.Locked;
-        Cursor.visible = pausedOrMenu;
-        _cursorOverrideActive = false;
-    }
 
     // Independent of IsVisible/SelectionUiVisible above - those are driven by the toggle-overlay/
     // toggle-minimal-view hotkeys and hide the whole tool (graph + uGUI right panel) together. This

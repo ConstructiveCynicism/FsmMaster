@@ -74,11 +74,10 @@ internal sealed class FsmGraphColorConfig
 
     public static FsmGraphColorConfig Bind(ConfigFile config)
     {
-        // Translated from FSMExpress's own state-color palette, indexed by FsmState.ColorIndex - EXCEPT
-        // index 1: FSMExpress's original blue (116,143,201) collided visually with the active state's
-        // own blue/cyan highlighting (see the Active State Color default below), so it's rotated to an
-        // otherwise-unused magenta/pink hue instead, keeping the same saturation and value (brightness)
-        // as the original blue.
+        // Default fill colors indexed by FsmState.ColorIndex - EXCEPT index 1: a plain blue would
+        // collide visually with the active state's own blue/cyan highlighting (see the Active State
+        // Color default below), so it's rotated to an otherwise-unused magenta/pink hue instead,
+        // keeping the same saturation and value (brightness) a plain blue would have had.
         var stateDefaults = new[]
         {
             new Color(128f / 255f, 128f / 255f, 128f / 255f),
@@ -91,9 +90,9 @@ internal sealed class FsmGraphColorConfig
             new Color(117f / 255f, 53f / 255f, 164f / 255f),
         };
 
-        // FSMExpress's paired lighter palette for the same colorIndex - used for a state's own
-        // transition names/lines by default, so they read as visually associated with that state's node
-        // color while staying less saturated than the node itself. Index 0 (PlayMaker's "no color set"
+        // A lighter palette paired to the same colorIndex - used for a state's own transition
+        // names/lines by default, so they read as visually associated with that state's node color
+        // while staying less saturated than the node itself. Index 0 (PlayMaker's "no color set"
         // default) pairs with plain white rather than a tinted entry.
         var transitionDefaults = new[]
         {
