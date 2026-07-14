@@ -4,8 +4,7 @@ A live PlayMaker FSM inspector and editor for Hollow Knight: Silksong. View any
 FSM in the game as an interactive graph, edit its states, variables, and
 transitions while the game runs, and save your edits to reapply them later.
 
-Press `Alpha0` to toggle the overlay, and `Alpha1` to switch to a minimal
-graph-only view. Both are rebindable in-game via BepInEx's Configuration Manager.
+Press `F3` to toggle the overlay. You can bind a key for a monitor only mode. Both are rebindable in-game via BepInEx's Configuration Manager.
 
 For any questions or bug reports, please join the [Modding Discord](https://discord.gg/F6Y5TeFQ8j) or [Speedrunning Discord](https://discord.gg/3JtHPsBjHD).
 
@@ -77,7 +76,7 @@ For any questions or bug reports, please join the [Modding Discord](https://disc
 > For moderation reasons, this mod requires [Silksong.ModList](https://github.com/silksong-modding/Silksong.ModList) to be installed. This mod is included in the [release download](<https://github.com/ConstructiveCynicism/Silksong.FsmMaster/releases/latest>).
 If Silksong.ModList is not installed, FsmMaster will silently fail to load.
 
-FsmMaster can be installed via [Cogfly](), [Thunderstore](), or manually installed with the latest [release download](<https://github.com/ConstructiveCynicism/Silksong.FsmMaster/releases/latest>).
+FsmMaster can be installed via [Cogfly](), [Thunderstore](https://thunderstore.io/c/hollow-knight-silksong/p/ConstructiveCynicism/FsmMaster), or manually installed with the latest [release download](<https://github.com/ConstructiveCynicism/Silksong.FsmMaster/releases/latest>).
 
 > [!TIP]
 > FsmMaster works standalone, but installing [DebugMod](https://github.com/hk-speedrunning/Silksong.DebugMod) alongside it gives you
