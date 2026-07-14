@@ -2,10 +2,10 @@
 schemaVersion = "0.0.1"
 
 [package]
-namespace = "Cynic_SR"
+namespace = "ConstructiveCynicism"
 name = "FsmMaster"
 description = "Visual FSM graph inspection, live editing, and debugging for PlayMaker FSMs in Silksong. Best used with DebugMod"
-websiteUrl = "https://github.com/ConstructiveCynicism/Silksong.FsmMaster"
+websiteUrl = "https://github.com/ConstructiveCynicism/FsmMaster"
 containsNsfwContent = false
 
 [package.dependencies]
