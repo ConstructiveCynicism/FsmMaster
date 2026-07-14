@@ -8,7 +8,11 @@
       "PowerShell(dotnet build FsmMaster.csproj -c Debug 2>&1)",
       "WebSearch",
       "Bash(gh api *)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(where gh *)",
+      "Bash(gh --version)",
+      "PowerShell(winget install --id GitHub.cli --accept-source-agreements --accept-package-agreements)",
+      "PowerShell($env:PATH = [System.Environment]::GetEnvironmentVariable\\(\"PATH\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"PATH\",\"User\"\\); gh --version)"
     ]
   }
 }

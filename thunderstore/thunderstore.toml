@@ -14,7 +14,7 @@ containsNsfwContent = false
 
 [build]
 icon = "icon.png"
-readme = "README.md"
+readme = "../README.md"
 outdir = "./build"
 
 [[build.copy]]
