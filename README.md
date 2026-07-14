@@ -70,12 +70,15 @@ For any questions or bug reports, please join the [Modding Discord](https://disc
 > For moderation reasons, this mod requires [Silksong.ModList](https://github.com/silksong-modding/Silksong.ModList) to be installed. This mod is included in the [release download](<https://github.com/constructivecynicism/releases/latest>).
 If Silksong.ModList is not installed, FsmMaster will silently fail to load.
 
-FsmMaster can be installed via [Cogfly], [Thunderstore](),
+FsmMaster can be installed via [Cogfly](), [Thunderstore](), or manually installed with the latest release.
 > [!TIP]
 > FsmMaster works standalone, but installing [DebugMod](https://github.com/hk-speedrunning/Silksong.DebugMod) alongside it gives you
 > savestate support - active FSM edits are automatically captured and restored
 > when you save or load a savestate. We recommend installing DebugMod for the
 > best experience.
+
+## Building/Development
+- 
 
 ## Credits
 
