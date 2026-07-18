@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using BepInEx;
 using BepInEx.Configuration;
 using HarmonyLib;
@@ -33,6 +34,8 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
     private FsmPanelLayoutConfig? _rightPanelLayout;
     private FsmPanelLayoutConfig? _monitorPanelLayout;
     private ConfigEntry<bool>? _autoLoadConfig;
+    private ConfigEntry<KeyboardShortcut>? _toggleOverlayHotkey;
+    private ConfigEntry<bool>? _firstRunComplete;
 
     // Second ConfigFile, separate from the inherited BaseUnityPlugin.Config, for settings that are
     // never meant to be hand-tuned via ConfigurationManager - the panel layout floats (auto-saved by
@@ -70,11 +73,33 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
     // symmetrically alongside _editManager in Awake/OnDestroy per this project's hot-reload contract.
     internal static FsmEditManager? ActiveEditManagerForPatches { get; private set; }
 
+    // Read by GameFileLoadedPatch (bottom of this file) - Harmony patches are static and can't reach
+    // this instance's own fields, so this is the one static handle it needs to fire the first-run
+    // hotkey hint once a save file actually loads. Set/cleared symmetrically alongside
+    // ActiveEditManagerForPatches in Awake/OnDestroy per this project's hot-reload contract.
+    internal static FsmMasterPlugin? ActiveInstanceForPatches { get; private set; }
+
     // Read by ForceCursorVisiblePatch (bottom of this file) - Harmony patches are static, so this is
     // the one static handle it needs to check whether the overlay currently wants the cursor forced
     // visible. Set every frame in Update from the graph overlay's own IsVisible, and reset false in
     // OnDestroy alongside everything else torn down there, per this project's hot-reload contract.
     internal static bool ForceCursorVisible { get; private set; }
+
+    // ForceCursorVisiblePatch is patched/unpatched on demand (see PatchCursorOverride/UnpatchCursorOverride)
+    // rather than left installed for the plugin's whole lifetime like FsmActivatedPatch - unlike
+    // Fsm.Preprocess (which only fires once per FSM activation), InputHandler.SetCursorVisible runs every
+    // single frame regardless of whether the overlay is even open, so leaving this prefix permanently
+    // installed means every frame pays a Harmony trampoline call just to check one bool. Tracks whether
+    // the patch is currently installed so Update only calls Patch/Unpatch on an actual visibility change,
+    // not every frame.
+    private bool _cursorPatchInstalled;
+
+    private static readonly MethodInfo SetCursorVisibleMethod = AccessTools.Method(typeof(InputHandler), nameof(InputHandler.SetCursorVisible));
+    private static readonly HarmonyMethod ForceCursorVisiblePrefix = new(typeof(ForceCursorVisiblePatch), nameof(ForceCursorVisiblePatch.Prefix));
+
+    private void PatchCursorOverride() => _harmony?.Patch(SetCursorVisibleMethod, prefix: ForceCursorVisiblePrefix);
+
+    private void UnpatchCursorOverride() => _harmony?.Unpatch(SetCursorVisibleMethod, HarmonyPatchType.Prefix, _harmony.Id);
 
     internal FsmVariableTracker? VariableTracker => _variableTracker;
 
@@ -82,9 +107,13 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
     {
         Logger.LogInfo($"Plugin {Name} ({Id}) has loaded!");
 
-        _harmony = Harmony.CreateAndPatchAll(typeof(FsmMasterPlugin).Assembly);
+        // Only FsmActivatedPatch and GameFileLoadedPatch are attribute-patched here -
+        // ForceCursorVisiblePatch is patched/unpatched on demand instead (see
+        // PatchCursorOverride/UnpatchCursorOverride).
+        _harmony = Harmony.CreateAndPatchAll(typeof(FsmActivatedPatch));
+        _harmony.PatchAll(typeof(GameFileLoadedPatch));
 
-        ConfigEntry<KeyboardShortcut> toggleOverlayHotkey = Config.Bind(
+        _toggleOverlayHotkey = Config.Bind(
             "Hotkeys",
             "Toggle Overlay",
             new KeyboardShortcut(KeyCode.F3),
@@ -101,7 +130,7 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
         _autoLoadConfig = Config.Bind(
             "General",
             "Auto Load Last Configuration",
-            true,
+            false,
             "When enabled, each FSM's most recently saved/loaded named configuration is automatically "
                 + "reapplied whenever a scene containing that FSM loads. Toggled in-game by the panel's Auto button.");
 
@@ -114,22 +143,22 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
         _monitorPanelLayout = FsmPanelLayoutConfig.Bind(_uiStateConfig, "Monitor Panel");
 
         var hiddenFromConfigManager = new ConfigurationManagerAttributes { Browsable = false };
-        ConfigEntry<bool> firstRunComplete = _uiStateConfig.Bind(
+        _firstRunComplete = _uiStateConfig.Bind(
             "General",
             "First Run Complete",
             false,
             new ConfigDescription(
-                "Set automatically once the mod has shown its first-run hotkey hint. Not meant to be hand-edited.",
+                "Set automatically once the mod has shown its first-run hotkey hint after a save file loads. Not meant to be hand-edited.",
                 null,
                 hiddenFromConfigManager));
-        bool isFirstRun = !firstRunComplete.Value;
 
         _editManager = new FsmEditManager(Logger);
         ActiveEditManagerForPatches = _editManager;
+        ActiveInstanceForPatches = this;
         _debugModCompat = DebugModCompat.TryCreate(_editManager, RescanLiveFsmsForDebugModLoad, Logger);
         _variableTracker = new FsmVariableTracker(fsmKey => _editManager.GetLiveInstances(fsmKey));
         _tabManager = new FsmTabManager();
-        _graphOverlay = new FsmGraphOverlay(Logger, _editManager, _tabManager, toggleOverlayHotkey, toggleMinimalViewHotkey, graphColors, graphPerformance, startVisible: isFirstRun);
+        _graphOverlay = new FsmGraphOverlay(Logger, _editManager, _tabManager, _toggleOverlayHotkey, toggleMinimalViewHotkey, graphColors, graphPerformance);
 
         // Scene.name has been observed to return null (not "") when Awake fires before the initial
         // scene has finished loading - a timing race, not something confirmed to be platform-specific,
@@ -145,16 +174,24 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
 
         BuildRightPanel();
 
-        // First-run hint: the overlay above already started visible (startVisible: isFirstRun) so the
-        // panel this message lands on is actually on-screen to show it. Marked complete right away so
-        // it never repeats on a later session even if the player never touches the hotkey.
-        if (isFirstRun)
+        SceneManager.sceneLoaded += OnSceneLoaded;
+    }
+
+    // First-run hint: opens the overlay and shows the toggle-hotkey hint the first time a save file
+    // actually loads, rather than immediately at plugin Awake (which also runs at the main menu,
+    // before any file is loaded). Called from GameFileLoadedPatch below. No-ops on every load after
+    // the first, since firstRunComplete.Value is set true right away so it never repeats even if the
+    // player loads several different files in one session.
+    internal void ShowFirstRunUiIfNeeded()
+    {
+        if (_firstRunComplete is not { Value: false } || _graphOverlay == null || _rightPanel == null || _uiCommon == null || _toggleOverlayHotkey == null)
         {
-            _rightPanel!.ShowStatus($"{toggleOverlayHotkey.Value} to toggle UI", _uiCommon!.AccentColor, durationSeconds: 12f);
-            firstRunComplete.Value = true;
+            return;
         }
 
-        SceneManager.sceneLoaded += OnSceneLoaded;
+        _graphOverlay.Show();
+        _rightPanel.ShowStatus($"{_toggleOverlayHotkey.Value} to toggle UI", _uiCommon.AccentColor, durationSeconds: 12f);
+        _firstRunComplete.Value = true;
     }
 
     private void OnDestroy()
@@ -167,6 +204,7 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
         _editManager?.RevertAllForUnload();
         _editManager = null;
         ActiveEditManagerForPatches = null;
+        ActiveInstanceForPatches = null;
         _variableTracker = null;
         _tabManager = null;
 
@@ -176,8 +214,12 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
 
         DestroyRightPanel();
 
+        // UnpatchSelf removes every patch owned by this Harmony instance's Id, including
+        // ForceCursorVisiblePatch's manually-applied prefix if it was still installed - no separate
+        // UnpatchCursorOverride call needed here.
         _harmony?.UnpatchSelf();
         _harmony = null;
+        _cursorPatchInstalled = false;
 
         _uiStateConfig = null;
     }
@@ -185,6 +227,7 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
     private void Update()
     {
         _editManager?.PollPendingActivations();
+        _debugModCompat?.PollPendingReload();
 
         _graphOverlay?.Update();
 
@@ -194,7 +237,26 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
         // InputHandler.SetCursorVisible, patched below), so forcing Cursor.visible ourselves from
         // Update/LateUpdate/OnGUI would just race that per-frame write and flicker. Forcing the one
         // value InputHandler itself ends up writing has no second writer to race against.
-        ForceCursorVisible = _graphOverlay?.IsVisible ?? false;
+        bool overlayVisible = _graphOverlay?.IsVisible ?? false;
+
+        // Only patched in while the overlay is actually open - see _cursorPatchInstalled's own comment.
+        // Compared against the previous frame's state so Patch/Unpatch is only ever called on an actual
+        // visibility change, not every frame.
+        if (overlayVisible != _cursorPatchInstalled)
+        {
+            if (overlayVisible)
+            {
+                PatchCursorOverride();
+            }
+            else
+            {
+                UnpatchCursorOverride();
+            }
+
+            _cursorPatchInstalled = overlayVisible;
+        }
+
+        ForceCursorVisible = overlayVisible;
 
         if (_rightPanel != null)
         {
@@ -328,14 +390,22 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
             _editManager!,
             _variableTracker!,
             () => _graphOverlay?.CurrentSnapshot,
-            () => _graphOverlay?.GraphVisible ?? true,
-            visible => { if (_graphOverlay != null) _graphOverlay.GraphVisible = visible; },
             Logger,
             _rightPanelLayout!,
-            _autoLoadConfig!);
+            _autoLoadConfig!,
+            () => _graphOverlay?.Hide());
+
+        // CanvasNode defaults ActiveSelf to true, so without this, Build() below instantiates both
+        // panels' GameObjects already active - visible for one frame on a ScriptEngine hot reload
+        // (Awake's AddComponent-driven Build runs immediately; Update, which is what actually syncs
+        // ActiveSelf to the overlay's own default-off visibility, doesn't run until Unity's next
+        // Update phase) even while the overlay is toggled off. Setting this before Build() means the
+        // very first SetActive call already passes false, matching Update's own steady-state value.
+        _rightPanel.ActiveSelf = false;
         _rightPanel.Build(_canvasGameObject.transform);
 
         _monitorPanel = new FsmMonitorPanel(_uiCommon, _variableTracker!, _monitorPanelLayout!);
+        _monitorPanel.ActiveSelf = false;
         _monitorPanel.Build(_canvasGameObject.transform);
     }
 
@@ -495,6 +565,26 @@ internal static class FsmActivatedPatch
     }
 }
 
+// Fires the first-run hotkey hint once a save file actually loads - continuing an existing save or
+// starting a new one both funnel through this same call - rather than at plugin Awake, which also
+// runs at the main menu before any file is loaded and would otherwise pop the overlay open over the
+// title screen. [HarmonyPatch] here is attribute-driven like FsmActivatedPatch (registered explicitly
+// in Awake via _harmony.PatchAll(typeof(GameFileLoadedPatch)) since CreateAndPatchAll above only scans
+// FsmActivatedPatch), not on-demand like ForceCursorVisiblePatch below, since this only ever needs to
+// be installed/removed once per plugin lifetime.
+[HarmonyPatch(typeof(GameManager), nameof(GameManager.SetLoadedGameData), typeof(SaveGameData), typeof(int))]
+internal static class GameFileLoadedPatch
+{
+    [HarmonyPostfix]
+    private static void Postfix()
+    {
+        if (FsmMasterPlugin.ActiveInstanceForPatches is { } instance)
+        {
+            instance.ShowFirstRunUiIfNeeded();
+        }
+    }
+}
+
 // Forces the cursor visible while the graph overlay is open, without fighting Silksong's own
 // per-frame cursor handling. InputHandler.SetCursorVisible is the single call site the game's own
 // InputHandler uses to (re-)apply Cursor.visible every frame based on its own pause/menu state, so
@@ -503,11 +593,13 @@ internal static class FsmActivatedPatch
 // wrote it - raced that per-frame write and produced visible flicker, worse the later in the frame
 // the second write happened. Forcing the one value InputHandler itself ends up writing removes the
 // second writer entirely.
-[HarmonyPatch(typeof(InputHandler), nameof(InputHandler.SetCursorVisible))]
+// Patched/unpatched on demand by FsmMasterPlugin.PatchCursorOverride/UnpatchCursorOverride rather than
+// via attribute-driven PatchAll - see FsmMasterPlugin._cursorPatchInstalled's own comment for why. No
+// [HarmonyPatch] target attribute needed here since the patch is applied manually against
+// SetCursorVisibleMethod instead.
 internal static class ForceCursorVisiblePatch
 {
-    [HarmonyPrefix]
-    private static void Prefix(ref bool value)
+    internal static void Prefix(ref bool value)
     {
         if (FsmMasterPlugin.ForceCursorVisible)
         {

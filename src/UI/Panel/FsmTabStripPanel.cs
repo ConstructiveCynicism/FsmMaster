@@ -4,17 +4,20 @@ using UnityEngine;
 namespace FsmMaster;
 
 // Row of FSM tabs below the button row - one composite widget per FsmTabManager.Tabs entry, with a
-// close "x" button pinned to its top-right corner and a pin toggle-dot (the same widget/size as the
-// "add to monitor" dots in FsmActiveStatePanel - see UICommon.DotSize) pinned to its top-left. A
-// horizontal scrollbar sits above the tab row and only appears once there are more tabs than fit in
-// the available width; the tabs themselves live inside a CanvasHorizontalScrollStrip's clipped
-// viewport rather than being added straight to this panel, so overflow tabs are hidden/scrollable
-// instead of trailing off the edge of the right panel.
+// close "x" button and a minimize "-" button pinned to its top-right corner (minimize just left of
+// close) and a pin toggle-dot (the same widget/size as the "add to monitor" dots in
+// FsmActiveStatePanel - see UICommon.DotSize) pinned to its top-left. A horizontal scrollbar sits
+// above the tab row and only appears once there are more tabs than fit in the available width; the
+// tabs themselves live inside a CanvasHorizontalScrollStrip's clipped viewport rather than being
+// added straight to this panel, so overflow tabs are hidden/scrollable instead of trailing off the
+// edge of the right panel.
 internal sealed class FsmTabStripPanel : CanvasPanel
 {
     private const float TabWidth = 170f;
     private const float TabGap = 4f;
     private const float CloseButtonSize = 14f;
+    private const float MinimizeButtonSize = 14f;
+    private const float TabButtonGap = 2f;
     private const float ScrollbarHeight = 10f;
     private const float ScrollbarGap = 2f;
 
@@ -104,6 +107,7 @@ internal sealed class FsmTabStripPanel : CanvasPanel
         {
             widget.SelectButton.Toggled = ReferenceEquals(widget.Tab, active);
             widget.PinDot.On = widget.Tab.IsPinned;
+            widget.MinimizeButton.Toggled = widget.Tab.IsMinimized;
         }
 
         LayoutWidgets(active);
@@ -155,6 +159,7 @@ internal sealed class FsmTabStripPanel : CanvasPanel
             widget.Root.Size = new Vector2(width, TabRowHeight);
             widget.SelectButton.Size = new Vector2(width, TabRowHeight);
             widget.CloseButton.LocalPosition = new Vector2(width - CloseButtonSize - 2f, 2f);
+            widget.MinimizeButton.LocalPosition = new Vector2(width - CloseButtonSize - TabButtonGap - MinimizeButtonSize - 2f, 2f);
 
             x += width + TabGap;
         }
@@ -182,8 +187,31 @@ internal sealed class FsmTabStripPanel : CanvasPanel
         CanvasButton closeButton = root.Add(new CanvasButton("Close", _ui));
         closeButton.LocalPosition = new Vector2(TabWidth - CloseButtonSize - 2f, 2f);
         closeButton.Size = new Vector2(CloseButtonSize, CloseButtonSize);
+        closeButton.NormalTint = _ui.ErrorColor;
+        closeButton.ToggledTint = _ui.ErrorColor;
+        closeButton.Tint = _ui.ErrorColor;
         closeButton.Text.Text = "x";
+        closeButton.Text.Color = Color.white;
         closeButton.OnClicked += () => _tabManager.Close(tab);
+
+        // Sits just left of Close, same reasoning for draw/hit-test order and per-frame repositioning.
+        // Toggles this tab's own FsmTabState.IsMinimized rather than the old single global graph
+        // Hide/Show button that used to live in the button row above the tab strip - suppresses only
+        // this tab's graph drawing (see FsmGraphOverlay.OnGUI), leaving every other open tab's graph
+        // (and this tab's own selection/pin state) untouched.
+        CanvasButton minimizeButton = root.Add(new CanvasButton("Minimize", _ui));
+        minimizeButton.LocalPosition = new Vector2(TabWidth - CloseButtonSize - TabButtonGap - MinimizeButtonSize - 2f, 2f);
+        minimizeButton.Size = new Vector2(MinimizeButtonSize, MinimizeButtonSize);
+        // Yellow while the tab's graph is showing (not minimized), grey once toggled off (minimized) -
+        // the background itself is the on/off indicator, same as CanvasButton.Toggled's usual
+        // ButtonActive/ButtonNormal swap, just with this button's own warning/read-only palette instead.
+        minimizeButton.NormalTint = _ui.WarningColor;
+        minimizeButton.ToggledTint = _ui.ReadOnlyColor;
+        minimizeButton.Tint = tab.IsMinimized ? minimizeButton.ToggledTint : minimizeButton.NormalTint;
+        minimizeButton.Text.Text = "-";
+        minimizeButton.Text.Color = Color.white;
+        minimizeButton.Toggled = tab.IsMinimized;
+        minimizeButton.OnClicked += () => tab.IsMinimized = !tab.IsMinimized;
 
         // Opposite corner from Close, same reasoning for draw/hit-test order - a circular toggle-dot
         // (matching the "add to monitor" dots elsewhere, see UICommon.DotSize) rather than a labeled
@@ -198,7 +226,7 @@ internal sealed class FsmTabStripPanel : CanvasPanel
         pinDot.On = tab.IsPinned;
         pinDot.OnClicked += () => tab.IsPinned = !tab.IsPinned;
 
-        return new TabWidget(tab, root, selectButton, closeButton, pinDot);
+        return new TabWidget(tab, root, selectButton, closeButton, minimizeButton, pinDot);
     }
 
     private sealed class TabWidget
@@ -207,15 +235,17 @@ internal sealed class FsmTabStripPanel : CanvasPanel
         public CanvasPanel Root { get; }
         public CanvasButton SelectButton { get; }
         public CanvasButton CloseButton { get; }
+        public CanvasButton MinimizeButton { get; }
         public CanvasToggleDot PinDot { get; }
         public float PreferredTextWidth { get; set; }
 
-        public TabWidget(FsmTabState tab, CanvasPanel root, CanvasButton selectButton, CanvasButton closeButton, CanvasToggleDot pinDot)
+        public TabWidget(FsmTabState tab, CanvasPanel root, CanvasButton selectButton, CanvasButton closeButton, CanvasButton minimizeButton, CanvasToggleDot pinDot)
         {
             Tab = tab;
             Root = root;
             SelectButton = selectButton;
             CloseButton = closeButton;
+            MinimizeButton = minimizeButton;
             PinDot = pinDot;
         }
     }

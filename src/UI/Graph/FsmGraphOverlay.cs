@@ -82,7 +82,6 @@ internal sealed class FsmGraphOverlay
 
     private bool _isVisible;
     private bool _selectionUiVisible = true;
-    private bool _graphVisible = true;
     private FsmSnapshot? _snapshot;
 
     // Lazily-collected full FsmInfo (the reflection-heavy state/action/field walk - see
@@ -359,16 +358,22 @@ internal sealed class FsmGraphOverlay
     internal bool IsVisible => _isVisible;
     internal bool SelectionUiVisible => _selectionUiVisible;
 
-    // Independent of IsVisible/SelectionUiVisible above - those are driven by the toggle-overlay/
-    // toggle-minimal-view hotkeys and hide the whole tool (graph + uGUI right panel) together. This
-    // only suppresses the graph's own node/line drawing (see its gate in OnGUI), so the right panel's
-    // Hide/Show button (FsmRightPanel) stays visible and clickable to bring the graph back, rather
-    // than hiding itself along with the graph the way the toggle-overlay hotkey does.
-    internal bool GraphVisible
+    // Called by FsmMasterPlugin for the first-run hotkey hint, once a save file actually loads rather
+    // than at plugin Awake - never called from anywhere else, so it doesn't need to be paired with a
+    // Hide() the way the hotkey's own toggle in Update is.
+    internal void Show()
     {
-        get => _graphVisible;
-        set => _graphVisible = value;
+        bool wasVisible = _isVisible;
+        _isVisible = true;
+        if (!wasVisible)
+        {
+            AutoOpenEditedTabs();
+        }
     }
+
+    // Called by the right panel's own title-bar close button - a one-way "turn the whole tool off"
+    // action, mirroring what the toggle-overlay hotkey does when it flips _isVisible from on to off.
+    internal void Hide() => _isVisible = false;
 
     public void Update()
     {
@@ -380,7 +385,12 @@ internal sealed class FsmGraphOverlay
         // these hotkeys' default bindings, which would otherwise toggle this overlay mid-edit.
         if (!CanvasTextField.AnyFieldFocused && _toggleOverlayHotkey.Value.IsDown())
         {
+            bool wasVisible = _isVisible;
             _isVisible = !_isVisible;
+            if (_isVisible && !wasVisible)
+            {
+                AutoOpenEditedTabs();
+            }
         }
 
         // Hides the uGUI right panel entirely (via IsVisible/SelectionUiVisible above) for a more
@@ -419,6 +429,50 @@ internal sealed class FsmGraphOverlay
         InvalidateGraphCaches();
     }
 
+    // Called only on the hidden -> visible edge (Show, and the toggle-overlay hotkey in Update) - opens
+    // a graph tab for every FSM that currently has at least one edit in effect (see
+    // FsmEditManager.GetEditedFsmKeys, tracked continuously regardless of overlay visibility) but isn't
+    // already an open tab, so edits picked up while the UI was closed (an auto-loaded preset reapplied
+    // on scene load, or edits left over from earlier in the session) are immediately visible without
+    // the player having to remember which FSMs to reopen through the Open dropdown. Reads only the edit
+    // manager's already-maintained live-instance bookkeeping - no new scanning of the scene - and skips
+    // any edited key with no live instance right now, since there's no PlayMakerFSM component to build
+    // a tab's label from.
+    private void AutoOpenEditedTabs()
+    {
+        List<FsmIdentityInfo>? editedLiveFsms = null;
+        foreach (string fsmKey in _editManager.GetEditedFsmKeys())
+        {
+            PlayMakerFSM? component = null;
+            foreach (Fsm liveInstance in _editManager.GetLiveInstances(fsmKey))
+            {
+                if (liveInstance.FsmComponent != null)
+                {
+                    component = liveInstance.FsmComponent;
+                    break;
+                }
+            }
+
+            if (component == null)
+            {
+                continue;
+            }
+
+            editedLiveFsms ??= new List<FsmIdentityInfo>();
+            editedLiveFsms.Add(new FsmIdentityInfo
+            {
+                Component = component,
+                FsmName = component.FsmName,
+                GameObjectName = component.gameObject.name,
+            });
+        }
+
+        if (editedLiveFsms != null)
+        {
+            _tabManager.EnsureOpen(editedLiveFsms);
+        }
+    }
+
     // rightPanelScreenRect/monitorPanelScreenRect/openDropdownScreenRect are the uGUI panels' current
     // screen rects (top-left origin, matching both this Rect's own convention and IMGUI's
     // Event.current.mousePosition - no axis flip needed, unlike CanvasNode.IsMouseOver's conversion to
@@ -449,20 +503,17 @@ internal sealed class FsmGraphOverlay
             DrawVignette(rightPanelScreenRect, monitorPanelScreenRect, openDropdownScreenRect);
         }
 
-        if (!_graphVisible)
-        {
-            return;
-        }
-
         // Pinned tabs other than the active one draw first (so the active tab's own graph, drawn
         // last/on top below, is never hidden behind one) - each as a frozen, non-interactive "ghost"
         // using that tab's own last pan/zoom/selection, dimmed while the right panel/tab strip is up
         // (_selectionUiVisible) so it reads as background reference rather than something you could
         // currently be editing. In minimal view (_selectionUiVisible false, no tab strip to show which
         // tab is even "active"), every drawn graph - pinned or active - renders at full color instead.
+        // A tab's own IsMinimized flag (set by its minimize button in the tab strip) suppresses just
+        // that tab's graph, independent of every other open tab.
         foreach (FsmTabState tab in _tabManager.Tabs)
         {
-            if (!tab.IsPinned || !tab.IsLive || ReferenceEquals(tab, activeTab))
+            if (!tab.IsPinned || !tab.IsLive || tab.IsMinimized || ReferenceEquals(tab, activeTab))
             {
                 continue;
             }
@@ -476,8 +527,9 @@ internal sealed class FsmGraphOverlay
 
         // A tab stays open even once its backing FSM disappears from the scene (see
         // FsmTabManager.RebindAfterRefresh) - IsLive false / an unresolvable FsmKey both mean "draw
-        // nothing for the graph this frame," not "drop the tab."
-        FsmInfo? activeFsm = activeTab is { IsLive: true } ? ResolveFsmInfo(activeTab.FsmKey) : null;
+        // nothing for the graph this frame," not "drop the tab." IsMinimized is the same suppression
+        // the pinned-ghost loop above applies, just for whichever tab happens to be active.
+        FsmInfo? activeFsm = activeTab is { IsLive: true, IsMinimized: false } ? ResolveFsmInfo(activeTab.FsmKey) : null;
 
         if (activeFsm != null)
         {
@@ -1246,7 +1298,13 @@ internal sealed class FsmGraphOverlay
                 // actual stroked-outline shape, this just re-emits the same curve underneath, thicker
                 // and in SelectedStateColor, so it peeks out from behind the normal line and arrowhead
                 // drawn on top of it right after (see the append order into _currentCache.LineDrawBuffer below).
+                // Thin/Straight ignore each line's own Thickness (GL.LINES has no per-vertex width
+                // control - see DrawLineBufferGL), so that outline has nothing to grow into and the
+                // underlying re-emitted curve just gets fully overdrawn by the real line on top,
+                // invisible. Those styles recolor the line and arrowhead directly instead.
                 bool nodeIsSelectedForLines = _selectedStateName != null && node.Name == _selectedStateName;
+                bool selectionUsesOutline = nodeIsSelectedForLines && _performance.LineStyle.Value == GraphLineStyle.Thick;
+                bool selectionUsesColor = nodeIsSelectedForLines && !selectionUsesOutline;
 
                 foreach (TransitionRow row in node.Rows)
                 {
@@ -1257,12 +1315,14 @@ internal sealed class FsmGraphOverlay
 
                     // A disabled row (either the whole state's cascading effect, minus the one
                     // FindExitEvent-picked survivor, or a directly right-click-disabled single
-                    // transition) always greys out regardless of active/theme coloring.
-                    Color rowColor = row.IsDisabled ? _colors.DisabledTransitionLineColor.Value : lineColor;
+                    // transition) always greys out regardless of active/theme/selection coloring.
+                    Color rowColor = row.IsDisabled ? _colors.DisabledTransitionLineColor.Value
+                        : selectionUsesColor ? _colors.SelectedStateColor.Value
+                        : lineColor;
                     float rowThickness = row.IsDisabled ? TransitionLineThickness : lineThickness;
                     float rowArrowLength = ArrowheadLength * (rowThickness / TransitionLineThickness);
 
-                    if (nodeIsSelectedForLines)
+                    if (selectionUsesOutline)
                     {
                         // Same arrowLength as the real line below - only Thickness and OutlineMargin
                         // grow, both by the same margin on each side/direction, so the outline reads

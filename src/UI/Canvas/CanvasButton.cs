@@ -9,7 +9,6 @@ namespace FsmMaster;
 // shown only while the pointer is over it. Each button owns its own hover-border child instance.
 internal class CanvasButton : CanvasImage
 {
-    private readonly UICommon _ui;
     private readonly CanvasText _text;
     private readonly CanvasBorder _hoverBorder;
     private bool _toggled;
@@ -23,6 +22,13 @@ internal class CanvasButton : CanvasImage
 
     public event Action? OnClicked;
 
+    // Colors Toggled below swaps Tint between - default to the shared normal/active palette so every
+    // existing caller (which never touches these) keeps its current look. A caller that wants a fixed
+    // background regardless of toggle state (e.g. the tab strip's minimize button, styled to match its
+    // sibling close button) sets both to the same color instead.
+    public Color NormalTint { get; set; }
+    public Color ToggledTint { get; set; }
+
     public bool Toggled
     {
         get => _toggled;
@@ -31,7 +37,7 @@ internal class CanvasButton : CanvasImage
             if (_toggled != value)
             {
                 _toggled = value;
-                Tint = _toggled ? _ui.ButtonActive : _ui.ButtonNormal;
+                Tint = _toggled ? ToggledTint : NormalTint;
             }
         }
     }
@@ -40,8 +46,9 @@ internal class CanvasButton : CanvasImage
 
     public CanvasButton(string name, UICommon ui) : base(name, ui)
     {
-        _ui = ui;
-        Tint = ui.ButtonNormal;
+        NormalTint = ui.ButtonNormal;
+        ToggledTint = ui.ButtonActive;
+        Tint = NormalTint;
         AddBorder(ui.PanelBorder);
 
         _text = new CanvasText("Label", ui) { Alignment = TextAnchor.MiddleCenter };

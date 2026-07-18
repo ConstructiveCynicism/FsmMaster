@@ -22,7 +22,6 @@ For any questions or bug reports, please join the [Modding Discord](https://disc
 ---
 
 ## Features
-
 - Graphic, customizable UI with performance toggles for lower-end machines.
 - FSM editing and viewing with live information - watch states, variables, and
   transitions update in real time as the FSM actually runs.
@@ -73,10 +72,10 @@ For any questions or bug reports, please join the [Modding Discord](https://disc
 ## Installation
 
 > [!IMPORTANT]
-> For moderation reasons, this mod requires [Silksong.ModList](https://github.com/silksong-modding/Silksong.ModList) to be installed. This mod is included in the [release download](<https://github.com/ConstructiveCynicism/Silksong.FsmMaster/releases/latest>).
+> For moderation reasons, this mod requires [Silksong.ModList](https://github.com/silksong-modding/Silksong.ModList) to be installed. This mod is included in the [release download](<https://github.com/ConstructiveCynicism/FsmMaster/releases/latest>).
 If Silksong.ModList is not installed, FsmMaster will silently fail to load.
 
-FsmMaster can be installed via [Cogfly](), [Thunderstore](https://thunderstore.io/c/hollow-knight-silksong/p/ConstructiveCynicism/FsmMaster), or manually installed with the latest [release download](<https://github.com/ConstructiveCynicism/Silksong.FsmMaster/releases/latest>).
+FsmMaster can be installed via [Cogfly](https://github.com/Nix-main/Cogfly/releases/latest), [Thunderstore](https://thunderstore.io/c/hollow-knight-silksong/p/ConstructiveCynicism/FsmMaster), or manually installed with the latest [release download](<https://github.com/ConstructiveCynicism/Silksong.FsmMaster/releases/latest>).
 
 > [!TIP]
 > FsmMaster works standalone, but installing [DebugMod](https://github.com/hk-speedrunning/Silksong.DebugMod) alongside it gives you

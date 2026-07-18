@@ -54,10 +54,18 @@ internal sealed class CanvasScrollView : CanvasNode, IHorizontalScrollSource
     // source once CollectSubtree started walking it every frame.
     protected override IEnumerable<CanvasNode> ChildList() => _childList;
 
+    // A small negative padding on every side (RectMask2D.padding shrinks the clip rect on positive
+    // values - Vector4 is Left/Bottom/Right/Top) expands it by the same amount instead. Content flush
+    // against the mask's own edge (the first block's top border at content.LocalPosition.y == 0, or any
+    // block's right border, since block width always equals _scrollView.Size.x exactly) otherwise has
+    // its 1px border clipped away outright rather than merely dimmed, since the border sits exactly on
+    // the clip boundary rather than inside it.
+    private static readonly Vector4 ClipPadding = new(-2f, -2f, -2f, -2f);
+
     public override void Build(Transform? rootParent = null)
     {
         base.Build(rootParent);
-        GameObject!.AddComponent<RectMask2D>();
+        GameObject!.AddComponent<RectMask2D>().padding = ClipPadding;
     }
 
     private void Poll()
@@ -93,6 +101,20 @@ internal sealed class CanvasScrollView : CanvasNode, IHorizontalScrollSource
             y = Mathf.Clamp(y, Mathf.Min(-GetScrollableHeight(), 0f), 0f);
             _content.LocalPosition = new Vector2(_content.LocalPosition.x, y);
         }
+    }
+
+    // Jumps straight to the top, unconditionally - unlike Poll's own reclamp (which only kicks in once
+    // content size actually changes, and even then just clamps a stale offset into the new bounds
+    // rather than zeroing it), so a caller switching to a shorter list mid-scroll doesn't land partway
+    // down it with the first row's top edge cut off by the viewport mask.
+    public void ScrollToTop()
+    {
+        if (_content == null)
+        {
+            return;
+        }
+
+        _content.LocalPosition = new Vector2(_content.LocalPosition.x, 0f);
     }
 
     public void SetScrollPercentage(float percentage)

@@ -22,6 +22,11 @@ internal sealed class FsmTabState
     // pinned tab whose FSM has gone not-live simply draws nothing, same as an unpinned one would).
     public bool IsPinned;
 
+    // Set by this tab's own minimize button in the tab strip (FsmTabStripPanel) - suppresses just this
+    // tab's graph drawing (see FsmGraphOverlay.OnGUI), replacing the old single global graph Hide/Show
+    // toggle. The tab itself stays open and selectable; only its graph stops rendering.
+    public bool IsMinimized;
+
     // Captured at open time so the tab's label survives a moment where Component is transiently null
     // (e.g. mid scene-transition, before RebindAfterRefresh runs).
     public string GameObjectNameForLabel = "";

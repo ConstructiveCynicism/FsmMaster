@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using BepInEx.Bootstrap;
 using BepInEx.Logging;
 using DebugMod.SaveStates;
+using UnityEngine;
 
 namespace FsmMaster;
 
@@ -15,9 +16,17 @@ internal sealed class DebugModCompat
 {
     private const string ActiveEditsCustomDataKey = "FsmMaster.ActiveEdits";
 
+    // How long PollPendingReload will keep waiting on GameManager.isLoading before giving up and
+    // reapplying anyway - purely a safety net against an indefinite poll if isLoading somehow never
+    // clears; see HandleAfterLoad's own comment for why this wait exists at all.
+    private const float PendingReloadTimeoutSeconds = 5f;
+
     private readonly FsmEditManager _editManager;
     private readonly Action _rescanLiveFsms;
     private readonly ManualLogSource _logger;
+
+    private SaveState? _pendingReloadState;
+    private float _pendingReloadDeadline;
 
     private DebugModCompat(FsmEditManager editManager, Action rescanLiveFsms, ManualLogSource logger)
     {
@@ -43,6 +52,7 @@ internal sealed class DebugModCompat
     private void Hook()
     {
         SaveState.OnSave += HandleSave;
+        SaveState.BeforeLoad += HandlePrimeBeforeLoad;
         SaveState.AfterLoad += HandleAfterLoad;
 
         DebugMod.DebugMod.Log("FsmMaster detected DebugMod - hooking savestate save/load to persist active FSM edits.");
@@ -53,6 +63,7 @@ internal sealed class DebugModCompat
     public void Unhook()
     {
         SaveState.OnSave -= HandleSave;
+        SaveState.BeforeLoad -= HandlePrimeBeforeLoad;
         SaveState.AfterLoad -= HandleAfterLoad;
     }
 
@@ -65,6 +76,16 @@ internal sealed class DebugModCompat
             var activeEdits = new List<FsmEditSet>();
             foreach (string fsmKey in _editManager.GetEditedFsmKeys())
             {
+                // GetEditedFsmKeys returns every FsmKey edited at any point this session, including ones
+                // for objects in rooms the player has since left - a tab stays open (and its edit set
+                // stays tracked) even once its FSM is no longer live. Without this check, saving in one
+                // room would also bundle in edits that belong to a completely different room's objects,
+                // which then tries and fails to reapply itself against whatever's actually present on load.
+                if (_editManager.GetLiveInstances(fsmKey).Count == 0)
+                {
+                    continue;
+                }
+
                 if (_editManager.GetActiveEditSet(fsmKey) is { } editSet)
                 {
                     activeEdits.Add(editSet);
@@ -85,31 +106,140 @@ internal sealed class DebugModCompat
         }
     }
 
-    // Fires once DebugMod has finished its own scene-transition and post-load fixups. FsmMasterPlugin's
-    // own SceneManager.sceneLoaded handler has usually already re-scanned and registered the newly
-    // loaded scene's live FSMs by this point, but not always: when a savestate's target room is the room
-    // already active, DebugMod's loader doesn't reliably tear the scene down and reload it, so Unity's
-    // sceneLoaded event - and therefore that handler - may never fire for this load. Forcing the same
-    // rescan here first keeps ApplyEditSet below from working off a stale or missing live instance
-    // regardless of which case this load turned out to be.
-    private void HandleAfterLoad(SaveState state)
+    // Fires at the very start of SaveState.Load, before DebugMod calls GameManager.BeginSceneTransition -
+    // the point where Silksong actually destroys and rebuilds the target room's GameObjects (confirmed
+    // against SaveStates/SaveState.cs: BeforeLoad?.Invoke fires immediately inside LoadImpl, well before
+    // its own BeginSceneTransition call further down the same coroutine). Priming here, rather than
+    // waiting for AfterLoad, closes the race where a freshly rebuilt FSM's Fsm.Preprocess() - and
+    // therefore FsmActivatedPatch's Postfix - fires before FsmMaster has recorded which edits this load
+    // is supposed to bring back, so the instance runs its own first OnEnter/Update unedited. No live FSM
+    // exists yet to apply anything to, so this only updates FsmEditManager's own bookkeeping of which edit
+    // set counts as "active" per key - see FsmEditManager.PrimeActiveEditSet's own comment.
+    private void HandlePrimeBeforeLoad(SaveState state)
     {
         try
         {
-            _rescanLiveFsms();
-
             if (!state.data.customData.TryGetValue(ActiveEditsCustomDataKey, out string json) || string.IsNullOrEmpty(json))
             {
                 return;
             }
 
-            List<FsmEditSet> editSets = FsmSaveDataStore.DeserializeEditSets(json);
-            foreach (FsmEditSet editSet in editSets)
+            foreach (FsmEditSet editSet in FsmSaveDataStore.DeserializeEditSets(json))
             {
-                _editManager.ApplyEditSet(editSet);
+                _editManager.PrimeActiveEditSet(editSet);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning($"[FsmMaster] Failed to prime FSM edits ahead of DebugMod savestate load: {ex.Message}");
+        }
+    }
+
+    // Fires once DebugMod has finished its own scene-transition and post-load fixups. FsmMasterPlugin's
+    // own SceneManager.sceneLoaded handler has usually already re-scanned and registered the newly
+    // loaded scene's live FSMs by this point, but not always: when a savestate's target room is the room
+    // already active, DebugMod's loader doesn't reliably tear the scene down and reload it through Unity's
+    // own SceneManager, so the sceneLoaded event - and therefore that handler - may never fire for this
+    // load. Forcing the same rescan here first keeps ReapplyPersistedEdits below from working off a stale
+    // or missing live instance regardless of which case this load turned out to be.
+    private void HandleAfterLoad(SaveState state)
+    {
+        ReapplyPersistedEdits(state);
+
+        // Silksong still fully destroys and recreates the room's GameObjects for a same-room load (its
+        // own engine log calls this out explicitly - "Destroying GuidComponents to prevent collisions"),
+        // it just doesn't go through Unity's SceneManager to do it, which is why AfterLoad above can fire
+        // (and the rescan above can run) before that reconstruction has actually finished: DebugMod's own
+        // wait for scene-name-change is a no-op for a same-room load since the active scene's name never
+        // changes, so nothing upstream of AfterLoad forces a real wait for it here. A component caught
+        // mid-reconstruction can briefly report a stale FsmName, sending the reapply above to the wrong
+        // live instance under the right FsmKey. GameManager.isLoading is the exact condition DebugMod's
+        // own SaveState.LoadImpl waits on immediately after firing AfterLoad before considering its own
+        // load complete, so once that clears, re-running the same reapply corrects anything the immediate
+        // pass above caught mid-flight - and is a harmless no-op for the more common case where the
+        // immediate pass already landed correctly.
+        //
+        // This poll is only about _liveInstances/_pristine bookkeeping staying accurate (and the graph/UI
+        // panels reflecting it) - it is not what makes a freshly rebuilt FSM come back with the right
+        // values. That part is already settled by the time this method runs: HandlePrimeBeforeLoad primed
+        // FsmEditManager's active edit set for every affected key before Silksong tore the room down, so
+        // each new instance's own Fsm.Preprocess() (FsmActivatedPatch's Postfix) applied the correct edits
+        // the moment it was constructed, without waiting on GameManager.isLoading at all.
+        if (GameManager.instance != null && GameManager.instance.isLoading)
+        {
+            _pendingReloadState = state;
+            _pendingReloadDeadline = Time.realtimeSinceStartup + PendingReloadTimeoutSeconds;
+        }
+    }
+
+    // Called every frame from FsmMasterPlugin.Update() - see HandleAfterLoad's own comment for why a
+    // same-room savestate load needs this deferred second pass once Silksong's own scene reconstruction
+    // has actually finished, rather than trusting the state HandleAfterLoad's immediate rescan captured.
+    public void PollPendingReload()
+    {
+        if (_pendingReloadState == null)
+        {
+            return;
+        }
+
+        bool stillLoading = GameManager.instance != null && GameManager.instance.isLoading;
+        if (stillLoading && Time.realtimeSinceStartup < _pendingReloadDeadline)
+        {
+            return;
+        }
+
+        if (stillLoading)
+        {
+            _logger.LogWarning("[FsmMaster] GameManager.isLoading never cleared after a savestate load; reapplying anyway.");
+        }
+
+        SaveState state = _pendingReloadState;
+        _pendingReloadState = null;
+        ReapplyPersistedEdits(state);
+    }
+
+    // Rescans live FSMs and reapplies whatever this savestate's own custom data (plus any edit still
+    // active for a key that data didn't cover - see the loop below's own comment) says should be in
+    // effect. Called once immediately from HandleAfterLoad and, for a same-room load, a second time from
+    // PollPendingReload once Silksong's own scene reconstruction has actually settled.
+    private void ReapplyPersistedEdits(SaveState state)
+    {
+        try
+        {
+            _rescanLiveFsms();
+
+            var restoredKeys = new HashSet<string>();
+            if (state.data.customData.TryGetValue(ActiveEditsCustomDataKey, out string json) && !string.IsNullOrEmpty(json))
+            {
+                List<FsmEditSet> editSets = FsmSaveDataStore.DeserializeEditSets(json);
+                foreach (FsmEditSet editSet in editSets)
+                {
+                    _editManager.ApplyEditSet(editSet);
+                    restoredKeys.Add(editSet.FsmKey);
+                }
+
+                DebugMod.DebugMod.Log($"FsmMaster restored {editSets.Count} FSM edit set(s) from this savestate.");
             }
 
-            DebugMod.DebugMod.Log($"FsmMaster restored {editSets.Count} FSM edit set(s) from this savestate.");
+            // A same-room load can respawn a live FSM instance (see _rescanLiveFsms's own comment)
+            // without going through the restore loop above, e.g. when the target savestate was captured
+            // before an edit (such as an installed sequencer) was made this session. Left alone, that
+            // edit would stay recorded as active in _editManager while only ever having been physically
+            // installed on the pre-load instance PruneStaleSnapshotEntries just dropped as dead - so
+            // reapply every edit set still active for a key this savestate's own data didn't already
+            // cover, the same convergence call PollPendingActivations uses for a late-activating instance.
+            foreach (string fsmKey in new List<string>(_editManager.GetEditedFsmKeys()))
+            {
+                if (restoredKeys.Contains(fsmKey))
+                {
+                    continue;
+                }
+
+                if (_editManager.GetActiveEditSet(fsmKey) is { } editSet)
+                {
+                    _editManager.ApplyEditSet(editSet);
+                }
+            }
         }
         catch (Exception ex)
         {

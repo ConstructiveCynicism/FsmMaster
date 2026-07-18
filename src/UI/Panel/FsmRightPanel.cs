@@ -7,12 +7,14 @@ using UnityEngine.EventSystems;
 namespace FsmMaster;
 
 // Composition root for FsmMaster's right-side uGUI panel - anchored top-right. Contains the title bar
-// (drag-to-reposition), the Open/Save/Load/Undo/Reset/Graph button row, the Open button's
+// (drag-to-reposition), the Open/Save/Load/Undo/Reset/Auto button row, the Open button's
 // Scene/Object/FSM dropdown, the FSM tab strip, the Actions/Events/Variables active-state panel, and
 // a resize handle in the bottom-left corner (bottom-left, not bottom-right, since this panel is
 // docked flush against the right edge of the screen - see OnResizeDragged) - drag/resize handling
 // mirrors FsmMonitorPanel's own (title-bar drag surface, corner CanvasResizeHandle), the one
-// difference being this panel has no separate "locked" state to gate on.
+// difference being this panel has no separate "locked" state to gate on. Per-tab graph visibility
+// (minimize) now lives on each tab in the strip below instead of a single global toggle in this row -
+// see FsmTabStripPanel's minimize button and FsmTabState.IsMinimized.
 internal sealed class FsmRightPanel : CanvasPanel
 {
     private const int PanelWidth = 355;
@@ -25,16 +27,17 @@ internal sealed class FsmRightPanel : CanvasPanel
     private const float ResizeHandleSizeDesign = 14f;
     private const int MinPanelWidth = 260;
     private const int MinPanelHeight = 320;
-    private const float AutoButtonWidthDesign = 50f;
     private const float TitleTextWidthDesign = 90f;
     private const float StatusDurationSeconds = 5f;
+    private const float CloseAllButtonSizeDesign = 16f;
+    private const float CloseAllButtonMargin = 6f;
 
     private static float TitleBarHeight => UICommon.ScaleHeight(TitleBarHeightDesign);
     private static float ResizeHandleSize => UICommon.ScaleWidth(ResizeHandleSizeDesign);
     private static float MinWidth => UICommon.ScaleWidth(MinPanelWidth);
     private static float MinHeight => UICommon.ScaleHeight(MinPanelHeight);
-    private static float AutoButtonWidth => UICommon.ScaleWidth(AutoButtonWidthDesign);
     private static float TitleTextWidth => UICommon.ScaleWidth(TitleTextWidthDesign);
+    private static float CloseAllButtonSize => UICommon.ScaleWidth(CloseAllButtonSizeDesign);
 
     // Topmost y-coordinate any content below the title bar starts from - the button row's own former
     // literal `10f` margin, now offset underneath the title bar rather than the panel's own top edge.
@@ -61,13 +64,13 @@ internal sealed class FsmRightPanel : CanvasPanel
     private readonly CanvasButton _dragSurface;
     private readonly CanvasText _titleText;
     private readonly CanvasText _statusText;
+    private readonly CanvasButton _closeAllButton;
     private readonly CanvasButton _autoButton;
     private readonly CanvasButton _openButton;
     private readonly CanvasButton _saveButton;
     private readonly CanvasButton _loadButton;
     private readonly CanvasButton _undoButton;
     private readonly CanvasButton _resetButton;
-    private readonly CanvasButton _graphButton;
     private readonly FsmOpenDropdown _openDropdown;
     private readonly FsmSaveDialog _saveDialog;
     private readonly FsmLoadDialog _loadDialog;
@@ -78,7 +81,7 @@ internal sealed class FsmRightPanel : CanvasPanel
     private int _lastScreenHeight = -1;
     private float _statusHideAtUnscaledTime;
 
-    public FsmRightPanel(UICommon ui, FsmTabManager tabManager, FsmEditManager editManager, FsmVariableTracker tracker, Func<FsmSnapshot?> getSnapshot, Func<bool> getGraphVisible, Action<bool> setGraphVisible, ManualLogSource logger, FsmPanelLayoutConfig layout, ConfigEntry<bool> autoLoadConfig)
+    public FsmRightPanel(UICommon ui, FsmTabManager tabManager, FsmEditManager editManager, FsmVariableTracker tracker, Func<FsmSnapshot?> getSnapshot, ManualLogSource logger, FsmPanelLayoutConfig layout, ConfigEntry<bool> autoLoadConfig, Action onCloseAll)
         : base("FsmRightPanel")
     {
         _ui = ui;
@@ -103,19 +106,16 @@ internal sealed class FsmRightPanel : CanvasPanel
         _statusText.Alignment = TextAnchor.MiddleCenter;
         _statusText.ActiveSelf = false;
 
-        // Global toggle, not tied to any one tab's FSM - lives in the title bar rather than the
-        // per-tab action row below (Open/Save/Load/Undo/Reset/Graph all act on whichever tab is
-        // active), so it stays visually separate from those. Default-on per autoLoadConfig's own
-        // ConfigEntry default (see FsmMasterPlugin.Awake); label stays "Auto" regardless of state,
-        // with Toggled's tint (via CanvasButton.Toggled) as the on/off indicator.
-        _autoButton = Add(new CanvasButton("AutoButton", ui));
-        _autoButton.Text.Text = "Auto";
-        _autoButton.Toggled = autoLoadConfig.Value;
-        _autoButton.OnClicked += () =>
-        {
-            autoLoadConfig.Value = !autoLoadConfig.Value;
-            _autoButton.Toggled = autoLoadConfig.Value;
-        };
+        // Top-right close control, same red-background/white-glyph style as the tab strip's own close
+        // "x" (FsmTabStripPanel) and the Sequencer block's close "x" (FsmActiveStatePanel) - a one-way
+        // "turn the whole tool off" action, equivalent to pressing the toggle-overlay hotkey while the
+        // overlay is on. Added after _dragSurface (built above) so it renders/hit-tests on top of it -
+        // otherwise the drag surface's own full-title-bar-width hit area would swallow the click.
+        _closeAllButton = Add(new CanvasButton("CloseAllButton", ui));
+        _closeAllButton.Tint = ui.ErrorColor;
+        _closeAllButton.Text.Text = "x";
+        _closeAllButton.Text.Color = Color.white;
+        _closeAllButton.OnClicked += () => onCloseAll();
 
         _openButton = Add(new CanvasButton("OpenButton", ui));
         _openButton.Text.Text = "Open";
@@ -136,16 +136,19 @@ internal sealed class FsmRightPanel : CanvasPanel
         _resetButton.Text.Text = "Reset";
         _resetButton.OnClicked += () => ResetActiveTab(tabManager, editManager, logger);
 
-        _graphButton = Add(new CanvasButton("GraphButton", ui));
-        _graphButton.Toggled = getGraphVisible();
-        _graphButton.Text.Text = _graphButton.Toggled ? "Hide" : "Show";
-        _graphButton.OnClicked += () =>
+        // Global toggle, not tied to any one tab's FSM, but shares this row with Open/Save/Load/Undo/
+        // Reset rather than living apart in the title bar - graph visibility is now a per-tab minimize
+        // button in the tab strip instead (see FsmTabStripPanel), so this row no longer needs a
+        // separate slot for it. Default-on per autoLoadConfig's own ConfigEntry default (see
+        // FsmMasterPlugin.Awake); label stays "Auto" regardless of state, with Toggled's tint (via
+        // CanvasButton.Toggled) as the on/off indicator.
+        _autoButton = Add(new CanvasButton("AutoButton", ui));
+        _autoButton.Text.Text = "Auto";
+        _autoButton.Toggled = autoLoadConfig.Value;
+        _autoButton.OnClicked += () =>
         {
-            bool next = !getGraphVisible();
-            setGraphVisible(next);
-            _graphButton.Toggled = next;
-            _graphButton.Text.Text = next ? "Hide" : "Show";
-            ShowStatus(next ? "Graph Shown" : "Graph Hidden", _ui.SuccessColor);
+            autoLoadConfig.Value = !autoLoadConfig.Value;
+            _autoButton.Toggled = autoLoadConfig.Value;
         };
 
         LayoutButtonRow();
@@ -394,6 +397,7 @@ internal sealed class FsmRightPanel : CanvasPanel
         }
 
         editManager.ResetFsm(active.FsmKey);
+        ActiveStatePanel.ClearSequencerBlocks(active.FsmKey);
         logger.LogInfo($"[FsmMaster] Reset all edits for '{active.FsmKey}'.");
         ShowStatus("Edits Reset", _ui.SuccessColor);
     }
@@ -413,13 +417,14 @@ internal sealed class FsmRightPanel : CanvasPanel
         _titleText.LocalPosition = new Vector2(6f, 0f);
         _titleText.Size = new Vector2(TitleTextWidth, TitleBarHeight);
 
-        _autoButton.LocalPosition = new Vector2(Size.x - AutoButtonWidth - 6f, 2f);
-        _autoButton.Size = new Vector2(AutoButtonWidth, Mathf.Max(0f, TitleBarHeight - 4f));
+        _closeAllButton.LocalPosition = new Vector2(Size.x - CloseAllButtonSize - CloseAllButtonMargin, (TitleBarHeight - CloseAllButtonSize) / 2f);
+        _closeAllButton.Size = new Vector2(CloseAllButtonSize, CloseAllButtonSize);
 
-        // Shares the title bar's own row rather than a separate row beneath it - sits in the gap
-        // between the title text and the Auto button.
+        // The Auto button no longer shares this row - it moved down into the main button row below
+        // (see LayoutButtonRow's own comment on _autoButton) - so the status line gets the whole
+        // remaining width to the right of the title text, minus the close button's own reserved slot.
         float statusX = 6f + TitleTextWidth + 4f;
-        float statusWidth = Mathf.Max(0f, Size.x - statusX - AutoButtonWidth - 10f);
+        float statusWidth = Mathf.Max(0f, Size.x - statusX - CloseAllButtonSize - CloseAllButtonMargin - 10f);
         _statusText.LocalPosition = new Vector2(statusX, 0f);
         _statusText.Size = new Vector2(statusWidth, TitleBarHeight);
 
@@ -442,8 +447,8 @@ internal sealed class FsmRightPanel : CanvasPanel
         _resetButton.LocalPosition = new Vector2(10f + (buttonWidth + ButtonGap) * 4f, rowY);
         _resetButton.Size = new Vector2(buttonWidth, ButtonRowHeight);
 
-        _graphButton.LocalPosition = new Vector2(10f + (buttonWidth + ButtonGap) * 5f, rowY);
-        _graphButton.Size = new Vector2(rowWidth - (buttonWidth + ButtonGap) * 5f, ButtonRowHeight);
+        _autoButton.LocalPosition = new Vector2(10f + (buttonWidth + ButtonGap) * 5f, rowY);
+        _autoButton.Size = new Vector2(rowWidth - (buttonWidth + ButtonGap) * 5f, ButtonRowHeight);
     }
 
     private void LayoutTabStrip()

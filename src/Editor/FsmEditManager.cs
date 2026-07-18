@@ -193,6 +193,15 @@ internal sealed class FsmEditManager
     public FsmEditSet? GetActiveEditSet(string fsmKey) =>
         _activeEdits.TryGetValue(fsmKey, out FsmEditSet? set) ? set : null;
 
+    // Records editSet as the active edit set for its FsmKey without touching any live Fsm - lets a caller
+    // that knows what edits *should* be in effect for a key before any matching instance exists yet (e.g.
+    // DebugModCompat priming a savestate's target edits before Silksong tears down and rebuilds the room)
+    // register that intent early. FsmActivatedPatch's Postfix (FsmMasterPlugin.cs) already calls
+    // GetActiveEditSet/ApplyEditSet for every Fsm the moment it finishes Preprocess(), so once this has run,
+    // the very first instance built for fsmKey picks up the primed edits before its own Start()/OnEnter -
+    // no separate apply pass, and nothing left to race.
+    public void PrimeActiveEditSet(FsmEditSet editSet) => _activeEdits[editSet.FsmKey] = editSet;
+
     // Applies every variable override, action field override, disabled state, transition retarget, and
     // sequencer override in editSet to every live Fsm instance sharing editSet.FsmKey.
     public void ApplyEditSet(FsmEditSet editSet)
@@ -1326,6 +1335,22 @@ internal sealed class FsmEditManager
         // ahead of this call, or a would-be-empty replace would leave the original action disabled with
         // nothing installed in its place.
         RemoveInstalledSequencerFor(fsmKey, original, restoreOriginalEnabled: false);
+
+        // RemoveInstalledSequencerFor only clears a sequencer this key's own InstalledSequencers
+        // bookkeeping still references. A DebugMod savestate reload can desync that bookkeeping from
+        // what is physically sitting in the live action array: PruneStaleSnapshotEntries drops the
+        // tracked pair whenever the live Fsm object handed back by the fresh post-load rescan doesn't
+        // match the one the pair was recorded against, but if the reload actually reused the same
+        // live Fsm/state.Actions array untouched (a same-room load doesn't always tear the scene down),
+        // the physical SequenceSendEventAction installed before the save is still sitting right where
+        // it was even though the bookkeeping just forgot about it. Left in place, the insert below would
+        // stack a second sequencer next to it and both would fire Fsm.Event on every state entry, which
+        // is indistinguishable from the sequencer "not applying" - so sweep any such orphan out of the
+        // array directly before installing, independent of whether bookkeeping remembers it.
+        while (idx + 1 < state.Actions.Length && state.Actions[idx + 1] is SequenceSendEventAction)
+        {
+            state.RemoveAction(idx + 1);
+        }
 
         original.Enabled = false;
 

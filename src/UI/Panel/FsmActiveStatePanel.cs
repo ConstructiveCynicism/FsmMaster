@@ -365,6 +365,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
 
         _activeSubTab = kind;
         UpdateSubTabToggles();
+        _scrollView.ScrollToTop();
     }
 
     private void UpdateSubTabToggles()
@@ -439,6 +440,24 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
             _scrollView.ScrollToShow(block.LocalPosition.y, block.Size.y);
             SelectBlock(block);
         }
+    }
+
+    // Called by FsmRightPanel's Reset button right after FsmEditManager.ResetFsm, which already
+    // uninstalls every live SequenceSendEventAction for fsmKey (see FsmEditManager.RestoreSnapshot) and
+    // drops its SequencerOverrides - but doesn't know about this panel's own _openSequencerBlocks
+    // bookkeeping, so without this a reset FSM's Sequencer tab would keep showing an already-uninstalled
+    // block open (with an empty pattern) instead of gone, as if there were still something there to
+    // remove. Mirrors CloseSequencerBlock's own "drop from the open set, then rebuild" shape, just for
+    // every block on the FSM at once rather than one. Rebuilds unconditionally rather than only when
+    // Remove() finds an entry: CollectOpenSequencerKeys also shows a block purely because it has a live
+    // SequencerOverride (e.g. reapplied from a saved preset on scene load, never opened interactively
+    // this session), so fsmKey can have visible blocks without ever having an _openSequencerBlocks
+    // entry to remove - skipping the rebuild in that case left the stale block on screen until some
+    // unrelated Refresh() call (switching subtabs, switching FSM tabs) rebuilt content for other reasons.
+    public void ClearSequencerBlocks(string fsmKey)
+    {
+        _openSequencerBlocks.Remove(fsmKey);
+        RebuildContent(_cachedFsm, _cachedStateName);
     }
 
     // Called every frame regardless of whether Refresh() just rebuilt anything - see _valueRefreshers.
@@ -1064,8 +1083,11 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
         header.Build();
 
         CanvasButton closeButton = content.Add(new CanvasButton($"Row{cursor.Count++}", _ui));
+        closeButton.NormalTint = _ui.ErrorColor;
+        closeButton.ToggledTint = _ui.ErrorColor;
+        closeButton.Tint = _ui.ErrorColor;
         closeButton.Text.Text = "x";
-        closeButton.Text.Color = _ui.ErrorColor;
+        closeButton.Text.Color = Color.white;
         closeButton.LocalPosition = new Vector2(RowIndent + headerWidth + gap, cursor.Y);
         closeButton.Size = new Vector2(CloseButtonSize, HeaderRowHeight);
         closeButton.Build();
@@ -1146,8 +1168,11 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
             // Added after the drag surface, so it renders/hit-tests on top - same layering
             // FsmTabStripPanel's own close-button-over-select-button uses.
             CanvasButton deleteButton = content.Add(new CanvasButton($"Row{cursor.Count++}", _ui));
+            deleteButton.NormalTint = _ui.ErrorColor;
+            deleteButton.ToggledTint = _ui.ErrorColor;
+            deleteButton.Tint = _ui.ErrorColor;
             deleteButton.Text.Text = "x";
-            deleteButton.Text.Color = _ui.ErrorColor;
+            deleteButton.Text.Color = Color.white;
             deleteButton.LocalPosition = new Vector2(x + dragWidth + SeqRowGap, y);
             deleteButton.Size = new Vector2(SeqDeleteButtonSize, RowHeight);
             deleteButton.Build();

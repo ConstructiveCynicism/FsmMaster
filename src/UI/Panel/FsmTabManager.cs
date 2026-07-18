@@ -33,6 +33,37 @@ internal sealed class FsmTabManager
             }
         }
 
+        FsmTabState tab = AddTab(fsm, fsmKey);
+        ActiveTabIndex = _tabs.Count - 1;
+        return tab;
+    }
+
+    // Opens a tab for each given FSM that isn't already open, without touching ActiveTabIndex unless
+    // nothing was active yet - used by FsmGraphOverlay.AutoOpenEditedTabs when the overlay transitions
+    // from hidden to visible, so FSMs with edits in effect (see FsmEditManager.GetEditedFsmKeys) show
+    // up as tabs automatically without stealing focus away from whichever tab the player already had
+    // active going into the previous hide.
+    public void EnsureOpen(IEnumerable<FsmIdentityInfo> fsms)
+    {
+        foreach (FsmIdentityInfo fsm in fsms)
+        {
+            string fsmKey = FsmIdentity.GetFsmKey(fsm.Component);
+            if (_tabs.Exists(tab => tab.FsmKey == fsmKey))
+            {
+                continue;
+            }
+
+            AddTab(fsm, fsmKey);
+        }
+
+        if (ActiveTabIndex < 0 && _tabs.Count > 0)
+        {
+            ActiveTabIndex = 0;
+        }
+    }
+
+    private FsmTabState AddTab(FsmIdentityInfo fsm, string fsmKey)
+    {
         var tab = new FsmTabState
         {
             FsmKey = fsmKey,
@@ -43,7 +74,6 @@ internal sealed class FsmTabManager
         (tab.PanWorldCenter, tab.Zoom) = FsmGraphOverlay.FitViewToFsm(FsmDataCollector.CollectFsmInfo(fsm.Component));
 
         _tabs.Add(tab);
-        ActiveTabIndex = _tabs.Count - 1;
         return tab;
     }
 

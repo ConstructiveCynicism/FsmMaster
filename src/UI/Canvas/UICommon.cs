@@ -67,6 +67,11 @@ internal sealed class UICommon
     public Color SuccessColor { get; } = new(130f / 255f, 205f / 255f, 140f / 255f, 1f);
     public Color ErrorColor { get; } = new(225f / 255f, 120f / 255f, 120f / 255f, 1f);
 
+    // Tab strip's per-tab minimize "-" / close "x" glyphs (FsmTabStripPanel) - WarningColor reuses
+    // ErrorColor's saturation/lightness so the two read as a matched pair of controls rather than one
+    // looking like an afterthought next to the other.
+    public Color WarningColor { get; } = new(225f / 255f, 205f / 255f, 90f / 255f, 1f);
+
     public int FontSize => ScaleHeight(13);
     public int HeaderFontSize => ScaleHeight(15);
 
