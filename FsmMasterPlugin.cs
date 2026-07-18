@@ -21,7 +21,7 @@ namespace FsmMaster;
 public partial class FsmMasterPlugin : BaseUnityPlugin
 {
     private FsmEditManager? _editManager;
-    private DebugModCompat? _debugModCompat;
+    private IDebugModCompat? _debugModCompat;
     private FsmVariableTracker? _variableTracker;
     private FsmTabManager? _tabManager;
     private FsmGraphOverlay? _graphOverlay;
@@ -84,6 +84,36 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
     // visible. Set every frame in Update from the graph overlay's own IsVisible, and reset false in
     // OnDestroy alongside everything else torn down there, per this project's hot-reload contract.
     internal static bool ForceCursorVisible { get; private set; }
+
+    // Public (not internal, unlike the handles above) so other mods with a BepInDependency on this
+    // plugin can read or override whether the first-run hotkey hint has already fired - e.g. to
+    // suppress it for a custom onboarding flow, or force it to show again. Backed directly by the
+    // persisted "First Run Complete" config entry (bound in Awake) so a write here sticks across
+    // scene loads and future sessions the same way the player's own toggle would. Returns false and
+    // no-ops on set if read/written before this plugin's Awake has run.
+    public static bool FirstRunComplete
+    {
+        get
+        {
+            // Pattern-matched rather than `?.` - ActiveInstanceForPatches is a UnityEngine.Object
+            // subtype, and null-propagation through those bypasses Unity's overloaded == null check
+            // for destroyed-but-not-yet-collected instances (see GameFileLoadedPatch below for the
+            // same convention).
+            if (ActiveInstanceForPatches is { _firstRunComplete: { } entry })
+            {
+                return entry.Value;
+            }
+
+            return false;
+        }
+        set
+        {
+            if (ActiveInstanceForPatches is { _firstRunComplete: { } entry })
+            {
+                entry.Value = value;
+            }
+        }
+    }
 
     // ForceCursorVisiblePatch is patched/unpatched on demand (see PatchCursorOverride/UnpatchCursorOverride)
     // rather than left installed for the plugin's whole lifetime like FsmActivatedPatch - unlike
@@ -155,7 +185,7 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
         _editManager = new FsmEditManager(Logger);
         ActiveEditManagerForPatches = _editManager;
         ActiveInstanceForPatches = this;
-        _debugModCompat = DebugModCompat.TryCreate(_editManager, RescanLiveFsmsForDebugModLoad, Logger);
+        _debugModCompat = DebugModCompatFactory.TryCreate(_editManager, RescanLiveFsmsForDebugModLoad, Logger);
         _variableTracker = new FsmVariableTracker(fsmKey => _editManager.GetLiveInstances(fsmKey));
         _tabManager = new FsmTabManager();
         _graphOverlay = new FsmGraphOverlay(Logger, _editManager, _tabManager, _toggleOverlayHotkey, toggleMinimalViewHotkey, graphColors, graphPerformance);

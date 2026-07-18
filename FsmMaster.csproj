@@ -86,11 +86,21 @@
       <ThunderstoreDir>$(ProjectDir)/thunderstore</ThunderstoreDir>
       <ModlistVersion>0.3.1</ModlistVersion>
       <ModlistUrl>https://github.com/silksong-modding/Silksong.ModList/releases/download/v$(ModlistVersion)/silksong_modding-Modlist-$(ModlistVersion).zip/</ModlistUrl>
+      <FsmUtilVersion>0.3.16</FsmUtilVersion>
+      <FsmUtilUrl>https://github.com/silksong-modding/Silksong.FsmUtil/releases/download/v$(FsmUtilVersion)/silksong_modding-FsmUtil-$(FsmUtilVersion).zip</FsmUtilUrl>
+      <FsmUtilLicenseUrl>https://raw.githubusercontent.com/silksong-modding/Silksong.FsmUtil/v$(FsmUtilVersion)/LICENSE</FsmUtilLicenseUrl>
     </PropertyGroup>
     <RemoveDir Directories="$(IntermediateOutputPath)/archive" />
     <Copy SourceFiles="@(ReleaseBinaries)" DestinationFolder="$(IntermediateOutputPath)/archive/$(TargetName)/%(ReleaseBinaries.LocalDir)" />
     <DownloadFile Condition="!Exists('$(IntermediateOutputPath)/Silksong.Modlist.$(ModlistVersion).zip')" SourceUrl="$(ModlistUrl)" DestinationFolder="$(IntermediateOutputPath)" DestinationFileName="Silksong.Modlist.$(ModlistVersion).zip" />
     <Unzip SourceFiles="$(IntermediateOutputPath)/Silksong.Modlist.$(ModlistVersion).zip" DestinationFolder="$(IntermediateOutputPath)/archive/Silksong.Modlist" />
+    <!-- Bundled alongside Silksong.ModList above for the manual-install zip - Silksong.FsmUtil is EUPL-1.2
+         licensed, which requires its own LICENSE text to travel with any distributed copy of its binaries,
+         so that file is fetched from its tagged release source alongside the compiled package. -->
+    <DownloadFile Condition="!Exists('$(IntermediateOutputPath)/Silksong.FsmUtil.$(FsmUtilVersion).zip')" SourceUrl="$(FsmUtilUrl)" DestinationFolder="$(IntermediateOutputPath)" DestinationFileName="Silksong.FsmUtil.$(FsmUtilVersion).zip" />
+    <Unzip SourceFiles="$(IntermediateOutputPath)/Silksong.FsmUtil.$(FsmUtilVersion).zip" DestinationFolder="$(IntermediateOutputPath)/archive/Silksong.FsmUtil" />
+    <DownloadFile Condition="!Exists('$(IntermediateOutputPath)/Silksong.FsmUtil.$(FsmUtilVersion).LICENSE')" SourceUrl="$(FsmUtilLicenseUrl)" DestinationFolder="$(IntermediateOutputPath)" DestinationFileName="Silksong.FsmUtil.$(FsmUtilVersion).LICENSE" />
+    <Copy SourceFiles="$(IntermediateOutputPath)/Silksong.FsmUtil.$(FsmUtilVersion).LICENSE" DestinationFiles="$(IntermediateOutputPath)/archive/Silksong.FsmUtil/LICENSE" />
     <MakeDir Directories="$(ThunderstoreDir)/manual" />
     <Delete Files="$(ThunderstoreDir)/manual/$(TargetName)_MANUAL.zip" />
     <ZipDirectory SourceDirectory="$(IntermediateOutputPath)/archive" DestinationFile="$(ThunderstoreDir)/manual/$(TargetName)_MANUAL.zip" Overwrite="True" />

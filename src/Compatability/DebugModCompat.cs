@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using BepInEx.Bootstrap;
 using BepInEx.Logging;
 using DebugMod.SaveStates;
 using UnityEngine;
@@ -9,10 +8,11 @@ namespace FsmMaster;
 
 // Optional integration with DebugMod's savestate system. FsmMasterPlugin declares
 // DebugMod.DebugMod.Id as a BepInDependency SoftDependency purely for load ordering - it does not make
-// DebugMod required to run FsmMaster. This class is what actually keeps the dependency soft: every call
-// into DebugMod is gated behind a Chainloader.PluginInfos check before TryCreate ever runs Hook, so the
-// assembly can be compiled against but never touched unless DebugMod is actually installed.
-internal sealed class DebugModCompat
+// DebugMod required to run FsmMaster. Every call into DebugMod from this class only ever runs once
+// DebugModCompatFactory's Chainloader.PluginInfos check has already confirmed DebugMod is installed -
+// see that class for why the check itself has to live outside this one. FsmMasterPlugin only ever holds
+// this behind the DebugMod-agnostic IDebugModCompat interface, never as a DebugModCompat-typed field.
+internal sealed class DebugModCompat : IDebugModCompat
 {
     private const string ActiveEditsCustomDataKey = "FsmMaster.ActiveEdits";
 
@@ -28,28 +28,16 @@ internal sealed class DebugModCompat
     private SaveState? _pendingReloadState;
     private float _pendingReloadDeadline;
 
-    private DebugModCompat(FsmEditManager editManager, Action rescanLiveFsms, ManualLogSource logger)
+    // Internal, not private - only ever called from DebugModCompatFactory.CreateAndHook, in a separate
+    // class, after that factory's own Chainloader check has already confirmed DebugMod is installed.
+    internal DebugModCompat(FsmEditManager editManager, Action rescanLiveFsms, ManualLogSource logger)
     {
         _editManager = editManager;
         _rescanLiveFsms = rescanLiveFsms;
         _logger = logger;
     }
 
-    // Returns null whenever DebugMod isn't installed - the caller then holds no reference to this class
-    // at all, so OnDestroy has nothing to unhook.
-    public static DebugModCompat? TryCreate(FsmEditManager editManager, Action rescanLiveFsms, ManualLogSource logger)
-    {
-        if (!Chainloader.PluginInfos.ContainsKey(DebugMod.DebugMod.Id))
-        {
-            return null;
-        }
-
-        var compat = new DebugModCompat(editManager, rescanLiveFsms, logger);
-        compat.Hook();
-        return compat;
-    }
-
-    private void Hook()
+    internal void Hook()
     {
         SaveState.OnSave += HandleSave;
         SaveState.BeforeLoad += HandlePrimeBeforeLoad;

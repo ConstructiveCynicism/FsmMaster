@@ -26,7 +26,8 @@
       "Bash(curl -sL \"https://gcdn.thunderstore.io/live/blob-storage/sha256/6fd6aeea211548d8eba22eabcd2bf82e3182e75113911ba13c2d6830b5c2e589.sh_YAPjd0C.blob\" -o /tmp/chunk.gz)",
       "Bash(gunzip -c /tmp/chunk.gz)",
       "Bash(grep -io \"fsmmaster\" /tmp/chunk.json | head -5 *)",
-      "Bash(curl -sL \"https://thunderstore.io/api/experimental/package/ConstructiveCynicism/FsmMaster/\" -o /tmp/pkg.json)"
+      "Bash(curl -sL \"https://thunderstore.io/api/experimental/package/ConstructiveCynicism/FsmMaster/\" -o /tmp/pkg.json)",
+      "Bash(unzip -l thunderstore/manual/FsmMaster_MANUAL.zip)"
     ]
   }
 }
