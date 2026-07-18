@@ -25,7 +25,15 @@ internal sealed class DebugModCompat : IDebugModCompat
     private readonly Action _rescanLiveFsms;
     private readonly ManualLogSource _logger;
 
-    private SaveState? _pendingReloadState;
+    // Untyped, not SaveState - a SaveState-typed field here is enough on its own to make
+    // Assembly.GetTypes() throw for the whole FsmMaster.dll whenever DebugMod isn't installed, since
+    // Mono resolves every field's type to compute a class's layout. That's not just a concern for our own
+    // code (see DebugModCompatFactory's own comment for why Awake is protected from it) - Silksong's own
+    // TeamCherry.NestedFadeGroup.OnEnable calls Assembly.GetTypes() over every loaded assembly during
+    // menu transitions with no tolerance for a partially-unloadable one, which crashes there on a cold
+    // launch (before ScriptEngine hot-reload would have re-loaded this assembly after that code already
+    // ran once). Cast back to SaveState at the two points below that actually use it.
+    private object? _pendingReloadState;
     private float _pendingReloadDeadline;
 
     // Internal, not private - only ever called from DebugModCompatFactory.CreateAndHook, in a separate
@@ -153,7 +161,14 @@ internal sealed class DebugModCompat : IDebugModCompat
         // FsmEditManager's active edit set for every affected key before Silksong tore the room down, so
         // each new instance's own Fsm.Preprocess() (FsmActivatedPatch's Postfix) applied the correct edits
         // the moment it was constructed, without waiting on GameManager.isLoading at all.
-        if (GameManager.instance != null && GameManager.instance.isLoading)
+        //
+        // UnsafeInstance, not instance - the latter falls back to a FindObjectOfType search and logs
+        // "Couldn't find a Game Manager" whenever it comes up empty, which a plain null-check like this
+        // one would trigger on every call while none exists yet. UnsafeInstance just returns the cached
+        // singleton field with no search and no log, which is all a null-check here ever needed - see
+        // DebugMod's own TimeScale.cs (agent-context/Silksong.DebugMod-main/MonoBehaviours/TimeScale.cs)
+        // for the same GameManager.UnsafeInstance != null pattern.
+        if (GameManager.UnsafeInstance != null && GameManager.UnsafeInstance.isLoading)
         {
             _pendingReloadState = state;
             _pendingReloadDeadline = Time.realtimeSinceStartup + PendingReloadTimeoutSeconds;
@@ -170,7 +185,7 @@ internal sealed class DebugModCompat : IDebugModCompat
             return;
         }
 
-        bool stillLoading = GameManager.instance != null && GameManager.instance.isLoading;
+        bool stillLoading = GameManager.UnsafeInstance != null && GameManager.UnsafeInstance.isLoading;
         if (stillLoading && Time.realtimeSinceStartup < _pendingReloadDeadline)
         {
             return;
@@ -181,7 +196,7 @@ internal sealed class DebugModCompat : IDebugModCompat
             _logger.LogWarning("[FsmMaster] GameManager.isLoading never cleared after a savestate load; reapplying anyway.");
         }
 
-        SaveState state = _pendingReloadState;
+        var state = (SaveState)_pendingReloadState;
         _pendingReloadState = null;
         ReapplyPersistedEdits(state);
     }
