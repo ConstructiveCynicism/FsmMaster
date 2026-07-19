@@ -39,7 +39,6 @@ internal sealed class FsmMonitorPanel : CanvasPanel
     private readonly CanvasScrollView _scrollView;
     private readonly CanvasScrollbar _scrollbar;
     private readonly CanvasResizeHandle _resizeHandle;
-    private readonly FsmPanelLayoutConfig _layout;
 
     private readonly List<CanvasText> _valueTexts = new();
 
@@ -54,10 +53,9 @@ internal sealed class FsmMonitorPanel : CanvasPanel
     private int _lastScreenWidth = -1;
     private int _lastScreenHeight = -1;
 
-    public FsmMonitorPanel(UICommon ui, FsmVariableTracker tracker, FsmPanelLayoutConfig layout) : base("FsmMonitorPanel")
+    public FsmMonitorPanel(UICommon ui, FsmVariableTracker tracker) : base("FsmMonitorPanel")
     {
         _ui = ui;
-        _layout = layout;
 
         _background = Add(new CanvasImage("Background", ui) { IsBackground = true, Tint = ui.PanelBackground });
         _background.AddBorder(ui.PanelBorder);
@@ -120,7 +118,7 @@ internal sealed class FsmMonitorPanel : CanvasPanel
     // unchanged value doesn't cost a format-string allocation every single frame.
     public void RefreshRows(FsmVariableTracker tracker)
     {
-        IReadOnlyList<TrackedVariableValue> values = tracker.GetTracked();
+        List<TrackedVariableValue> values = tracker.GetTracked();
 
         if (tracker.Version != _lastTrackerVersion)
         {
@@ -142,7 +140,7 @@ internal sealed class FsmMonitorPanel : CanvasPanel
         }
     }
 
-    private void RebuildRows(IReadOnlyList<TrackedVariableValue> values)
+    private void RebuildRows(List<TrackedVariableValue> values)
     {
         var content = (CanvasPanel)_scrollView.Content!;
         content.ClearChildren();
@@ -190,7 +188,7 @@ internal sealed class FsmMonitorPanel : CanvasPanel
             return;
         }
 
-        _layout.Position.Value = LocalPosition;
+        FsmMasterMod.Instance!.GlobalSettings.MonitorPanelPosition = LocalPosition;
     }
 
     // Bottom-LEFT corner drag. This panel is docked flush against BOTH the right and bottom edges of
@@ -232,8 +230,8 @@ internal sealed class FsmMonitorPanel : CanvasPanel
             return;
         }
 
-        _layout.Position.Value = LocalPosition;
-        _layout.Size.Value = Size;
+        FsmMasterMod.Instance!.GlobalSettings.MonitorPanelPosition = LocalPosition;
+        FsmMasterMod.Instance!.GlobalSettings.MonitorPanelSize = Size;
     }
 
     private void Layout()
@@ -284,14 +282,16 @@ internal sealed class FsmMonitorPanel : CanvasPanel
         _lastScreenWidth = Screen.width;
         _lastScreenHeight = Screen.height;
 
-        Size = _layout.HasSavedSize
-            ? new Vector2(Mathf.Max(MinWidth, _layout.Size.Value.x), Mathf.Max(MinHeight, _layout.Size.Value.y))
+        Vector2 savedSize = FsmMasterMod.Instance!.GlobalSettings.MonitorPanelSize;
+        Size = FsmMasterGlobalSettings.HasSavedLayout(savedSize)
+            ? new Vector2(Mathf.Max(MinWidth, savedSize.x), Mathf.Max(MinHeight, savedSize.y))
             : new Vector2(UICommon.ScaleWidth(PanelWidth), UICommon.ScaleHeight(PanelHeight));
 
         Vector2 defaultPosition = new(
             Screen.width - UICommon.ScaleWidth(ScreenMargin) - Size.x,
             Screen.height - UICommon.ScaleHeight(ScreenMargin) - Size.y);
-        Vector2 desiredPosition = _layout.HasSavedPosition ? _layout.Position.Value : defaultPosition;
+        Vector2 savedPosition = FsmMasterMod.Instance!.GlobalSettings.MonitorPanelPosition;
+        Vector2 desiredPosition = FsmMasterGlobalSettings.HasSavedLayout(savedPosition) ? savedPosition : defaultPosition;
         LocalPosition = new Vector2(
             Mathf.Clamp(desiredPosition.x, 0f, Mathf.Max(0f, Screen.width - Size.x)),
             Mathf.Clamp(desiredPosition.y, 0f, Mathf.Max(0f, Screen.height - Size.y)));

@@ -25,7 +25,7 @@ internal sealed class CanvasScrollView : CanvasNode, IHorizontalScrollSource
     private CanvasNode? _content;
     private float _contentHeightAtLastCheck;
     private float _contentWidthAtLastCheck;
-    private CanvasNode[] _childList = Array.Empty<CanvasNode>();
+    private CanvasNode[] _childList = ArrayPolyfill.Empty<CanvasNode>();
 
     public CanvasNode? Content => _content;
 
@@ -54,18 +54,17 @@ internal sealed class CanvasScrollView : CanvasNode, IHorizontalScrollSource
     // source once CollectSubtree started walking it every frame.
     protected override IEnumerable<CanvasNode> ChildList() => _childList;
 
-    // A small negative padding on every side (RectMask2D.padding shrinks the clip rect on positive
-    // values - Vector4 is Left/Bottom/Right/Top) expands it by the same amount instead. Content flush
-    // against the mask's own edge (the first block's top border at content.LocalPosition.y == 0, or any
-    // block's right border, since block width always equals _scrollView.Size.x exactly) otherwise has
-    // its 1px border clipped away outright rather than merely dimmed, since the border sits exactly on
-    // the clip boundary rather than inside it.
-    private static readonly Vector4 ClipPadding = new(-2f, -2f, -2f, -2f);
-
+    // The Silksong-era version expanded RectMask2D's clip rect by a couple pixels on every side so
+    // content flush against the mask's own edge (the first block's top border at
+    // content.LocalPosition.y == 0, or any block's right border) doesn't get its 1px border clipped
+    // away outright. This RectMask2D has no padding property at all (verified via reflection - not
+    // added to Unity UI until after this version), so that's not available here; content borders
+    // flush against the viewport edge are clipped rather than merely dimmed on this branch, a minor
+    // cosmetic difference with no functional effect.
     public override void Build(Transform? rootParent = null)
     {
         base.Build(rootParent);
-        GameObject!.AddComponent<RectMask2D>().padding = ClipPadding;
+        GameObject!.AddComponent<RectMask2D>();
     }
 
     private void Poll()

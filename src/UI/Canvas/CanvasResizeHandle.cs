@@ -13,8 +13,8 @@ internal sealed class CanvasResizeHandle : CanvasButton
     public event Action<Vector2>? OnDragDelta;
 
     // Fired once the drag gesture actually releases - lets an owning panel persist its final Size/
-    // LocalPosition (e.g. to a BepInEx config entry) a single time per resize rather than on every
-    // per-frame OnDragDelta call.
+    // LocalPosition (e.g. to GlobalSettings) a single time per resize rather than on every per-frame
+    // OnDragDelta call.
     public event Action? OnDragEnd;
 
     public CanvasResizeHandle(string name, UICommon ui) : base(name, ui)

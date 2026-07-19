@@ -109,7 +109,7 @@ internal static class FsmDataCollector
         return result;
     }
 
-    private static IReadOnlyList<FsmActionInfo> CollectActions(FsmStateAction[] actions)
+    private static List<FsmActionInfo> CollectActions(FsmStateAction[] actions)
     {
         var result = new List<FsmActionInfo>(actions.Length);
 
@@ -130,7 +130,7 @@ internal static class FsmDataCollector
         return result;
     }
 
-    private static IReadOnlyList<FsmTransitionInfo> CollectTransitions(FsmTransition[] transitions)
+    private static List<FsmTransitionInfo> CollectTransitions(FsmTransition[] transitions)
     {
         var result = new List<FsmTransitionInfo>(transitions.Length);
 

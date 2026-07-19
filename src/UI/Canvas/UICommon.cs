@@ -89,7 +89,11 @@ internal sealed class UICommon
         SolidSprite = Sprite.Create(SolidTexture, new Rect(0f, 0f, 1f, 1f), Vector2.zero);
         SolidSprite.hideFlags = HideFlags.HideAndDontSave;
 
-        (DotFilledTexture, DotFilledSprite, DotRingTexture, DotRingSprite) = CreateDotSprites();
+        DotSprites dots = CreateDotSprites();
+        DotFilledTexture = dots.FilledTexture;
+        DotFilledSprite = dots.FilledSprite;
+        DotRingTexture = dots.RingTexture;
+        DotRingSprite = dots.RingSprite;
 
         // Unity's own built-in font, guaranteed present in every player regardless of what fonts the
         // host game ships - safer than guessing which of Silksong's own loaded font asset names to
@@ -103,11 +107,29 @@ internal sealed class UICommon
         HeaderFont = FindLoadedFont("TrajanPro-Bold") ?? BodyFont;
     }
 
+    // System.ValueTuple doesn't exist in net35's mscorlib, so CreateDotSprites can't return a named
+    // tuple - this struct stands in for it.
+    private readonly struct DotSprites
+    {
+        public readonly Texture2D FilledTexture;
+        public readonly Sprite FilledSprite;
+        public readonly Texture2D RingTexture;
+        public readonly Sprite RingSprite;
+
+        public DotSprites(Texture2D filledTexture, Sprite filledSprite, Texture2D ringTexture, Sprite ringSprite)
+        {
+            FilledTexture = filledTexture;
+            FilledSprite = filledSprite;
+            RingTexture = ringTexture;
+            RingSprite = ringSprite;
+        }
+    }
+
     // Generates the filled-disc/outline-ring pair CanvasToggleDot swaps between, by pixel distance
     // from center - same on-the-fly Texture2D approach as SolidTexture above, just with an alpha
     // mask instead of a flat fill, so both are disposed the same way in Destroy() and neither needs
     // a baked resource file shipped alongside the DLL.
-    private static (Texture2D FilledTexture, Sprite FilledSprite, Texture2D RingTexture, Sprite RingSprite) CreateDotSprites()
+    private static DotSprites CreateDotSprites()
     {
         const int size = 24;
         const float ringThickness = 2.5f;
@@ -141,7 +163,7 @@ internal sealed class UICommon
         var ringSprite = Sprite.Create(ringTexture, new Rect(0f, 0f, size, size), new Vector2(0.5f, 0.5f));
         ringSprite.hideFlags = HideFlags.HideAndDontSave;
 
-        return (filledTexture, filledSprite, ringTexture, ringSprite);
+        return new DotSprites(filledTexture, filledSprite, ringTexture, ringSprite);
     }
 
     private static Font? FindLoadedFont(string name)

@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using HutongGames.PlayMaker;
-using Silksong.FsmUtil;
 
 namespace FsmMaster;
 
@@ -12,7 +11,7 @@ namespace FsmMaster;
 // full-snapshot display. Does not render anything itself - FsmMonitorPanel is what displays this data.
 internal sealed class FsmVariableTracker
 {
-    private readonly Func<string, IReadOnlyList<Fsm>> _getLiveInstances;
+    private readonly Func<string, List<Fsm>> _getLiveInstances;
     private readonly List<TrackedVariablePath> _tracked = new();
 
     // Bumped on every actual add/remove (not on a no-op untrack of something not tracked) -
@@ -21,7 +20,7 @@ internal sealed class FsmVariableTracker
     // change and can otherwise just refresh already-built rows' values.
     public int Version { get; private set; }
 
-    public FsmVariableTracker(Func<string, IReadOnlyList<Fsm>> getLiveInstances)
+    public FsmVariableTracker(Func<string, List<Fsm>> getLiveInstances)
     {
         _getLiveInstances = getLiveInstances;
     }
@@ -120,7 +119,7 @@ internal sealed class FsmVariableTracker
     // overwritten again next frame anyway.
     private readonly List<TrackedVariableValue> _resultBuffer = new();
 
-    public IReadOnlyList<TrackedVariableValue> GetTracked()
+    public List<TrackedVariableValue> GetTracked()
     {
         while (_resultBuffer.Count < _tracked.Count)
         {
@@ -136,10 +135,9 @@ internal sealed class FsmVariableTracker
         {
             TrackedVariablePath path = _tracked[i];
 
-            // Manual indexer access instead of LINQ's FirstOrDefault(): _getLiveInstances returns
-            // IReadOnlyList<Fsm>, which doesn't implement IList<T>, so FirstOrDefault can't take its
-            // fast path and instead boxes an enumerator every call.
-            IReadOnlyList<Fsm> instances = _getLiveInstances(path.FsmKey);
+            // Manual indexer access instead of LINQ's FirstOrDefault(), avoiding an enumerator
+            // allocation for what's just "the first element or null" every frame this runs.
+            List<Fsm> instances = _getLiveInstances(path.FsmKey);
             Fsm? fsm = instances.Count > 0 ? instances[0] : null;
 
             TrackedVariableValue value = _resultBuffer[i];
@@ -259,7 +257,22 @@ internal sealed class TrackedVariablePath : IEquatable<TrackedVariablePath>
 
     public override bool Equals(object? obj) => Equals(obj as TrackedVariablePath);
 
-    public override int GetHashCode() => HashCode.Combine(FsmKey, VariableName, StateName, ActionIndex, FieldName, ArrayIndex);
+    // System.HashCode doesn't exist in net35's mscorlib (a .NET Core/Standard 2.1 addition) - a plain
+    // FNV-style combine over the same identity fields Equals compares stands in for it.
+    public override int GetHashCode()
+    {
+        unchecked
+        {
+            int hash = 17;
+            hash = hash * 31 + FsmKey.GetHashCode();
+            hash = hash * 31 + (VariableName?.GetHashCode() ?? 0);
+            hash = hash * 31 + (StateName?.GetHashCode() ?? 0);
+            hash = hash * 31 + ActionIndex;
+            hash = hash * 31 + (FieldName?.GetHashCode() ?? 0);
+            hash = hash * 31 + (ArrayIndex?.GetHashCode() ?? 0);
+            return hash;
+        }
+    }
 }
 
 internal sealed class TrackedVariableValue

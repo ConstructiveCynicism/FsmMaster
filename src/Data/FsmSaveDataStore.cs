@@ -12,8 +12,8 @@ namespace FsmMaster;
 // "passive" variants of the same enemy FSM) rather than exactly one save overwriting itself every time. Uses
 // UnityEngine.JsonUtility rather than a third-party JSON library, since JsonUtility ships inside
 // UnityEngine.Modules (already a dependency here) and needs nothing new added to the mod's dependency list.
-// Storage is rooted under Application.persistentDataPath rather than the BepInEx config folder, so a
-// player's saved FSM edits travel with their game save data.
+// Storage is rooted under Application.persistentDataPath so a player's saved FSM edits travel with their
+// game save data.
 //
 // Confirmed in-game: JsonUtility silently drops a List<T> field entirely (not even an empty "[]") whenever
 // T is a custom class, regardless of nesting depth or whether the list is populated - List<string> serializes
@@ -23,15 +23,11 @@ namespace FsmMaster;
 // JsonUtility-safe List<string> shape - readable directly in the file and independent of field order.
 internal static class FsmSaveDataStore
 {
-    // Also where FsmMasterPlugin points its own ConfigFile (see FsmMasterPlugin.Awake) - both the mod's
-    // settings and its FSM edit presets live under this one folder rather than settings sitting under
-    // BepInEx/config while presets sit under persistentDataPath.
     internal static readonly string DataDirectory = Path.Combine(Application.persistentDataPath, "FsmMasterData");
 
-    // value has been observed null in the wild (Scene.name returning null instead of "" when queried
-    // before the initial scene finishes loading - see FsmMasterPlugin.Awake) - treated the same as
-    // empty rather than thrown on, since every caller here is building a folder/file name, not
-    // validating user input.
+    // value has been observed null in the wild (Scene.name returning null instead of "" for a
+    // GameObject that isn't part of a normally-loaded scene) - treated the same as empty rather than
+    // thrown on, since every caller here is building a folder/file name, not validating user input.
     private static string SanitizeForFileName(string value)
     {
         if (string.IsNullOrEmpty(value))
@@ -80,7 +76,10 @@ internal static class FsmSaveDataStore
             return result;
         }
 
-        foreach (string filePath in Directory.EnumerateFiles(fsmDirectory, "*.json"))
+        // Directory.EnumerateFiles doesn't exist in net35 (a .NET 4.0 addition) - GetFiles's eagerly
+        // materialized array stands in for it; this list is never large enough for the difference to
+        // matter.
+        foreach (string filePath in Directory.GetFiles(fsmDirectory, "*.json"))
         {
             result.Add(Path.GetFileNameWithoutExtension(filePath));
         }
@@ -251,18 +250,23 @@ internal static class FsmSaveDataStore
             parts.Add($"{keysAndValues[i]}{KeyValueSeparator}{keysAndValues[i + 1]}");
         }
 
-        return string.Join(PairSeparator, parts);
+        // net35's string.Join only has the string[] overload (no List<string>/IEnumerable<string>
+        // one), and its own Split only has the params-char[]/string[]+StringSplitOptions overloads (no
+        // single-string-separator one) - both fixed below throughout this file.
+        return string.Join(PairSeparator, parts.ToArray());
     }
 
     private static Dictionary<string, string> SplitPairs(string joined)
     {
         var result = new Dictionary<string, string>();
-        foreach (string part in joined.Split(PairSeparator))
+        foreach (string part in joined.Split(new[] { PairSeparator }, StringSplitOptions.None))
         {
             int eq = part.IndexOf(KeyValueSeparator, StringComparison.Ordinal);
             if (eq >= 0)
             {
-                result[part[..eq]] = part[(eq + 1)..];
+                // C# 8's range indexer (part[..eq]) needs System.Range, unavailable in net35 - plain
+                // Substring calls stand in for it.
+                result[part.Substring(0, eq)] = part.Substring(eq + 1);
             }
         }
 
@@ -311,7 +315,7 @@ internal static class FsmSaveDataStore
                 "state", seq.StateName,
                 "action", seq.ActionIndex.ToString(CultureInfo.InvariantCulture),
                 "repeat", seq.RepeatCount.ToString(CultureInfo.InvariantCulture),
-                "pattern", string.Join(PatternSeparator, seq.Pattern)));
+                "pattern", string.Join(PatternSeparator, seq.Pattern.ToArray())));
         }
 
         return wire;
@@ -384,7 +388,7 @@ internal static class FsmSaveDataStore
 
             if (p.TryGetValue("pattern", out string? pattern) && pattern.Length > 0)
             {
-                seq.Pattern.AddRange(pattern.Split(PatternSeparator));
+                seq.Pattern.AddRange(pattern.Split(new[] { PatternSeparator }, StringSplitOptions.None));
             }
 
             edits.SequencerOverrides.Add(seq);

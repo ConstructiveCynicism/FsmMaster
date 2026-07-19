@@ -13,12 +13,6 @@ SilksongPath.props
 # holds paths like $(HollowKnightManagedFolder), mirroring SilksongPath.props above.
 HollowKnightPath.props
 
-# Thunderstore/manual-zip release packaging output (regenerated on Release build)
-thunderstore/temp/
-thunderstore/dist/
-thunderstore/build/
-thunderstore/manual/
-
 # Standard build output
 bin/
 obj/

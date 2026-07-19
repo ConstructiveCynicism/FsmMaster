@@ -1,15 +1,12 @@
 ﻿using System.Collections.Generic;
-using BepInEx.Configuration;
-using BepInEx.Logging;
 using HutongGames.PlayMaker;
-using Silksong.FsmUtil;
 using UnityEngine;
 using UnityEngine.EventSystems;
 
 namespace FsmMaster;
 
 // In-game IMGUI overlay for browsing live FSMs and their state graphs, toggled by the configurable
-// toggle-overlay hotkey (BepInEx config, default "0"). Collects its own FsmSnapshot (see
+// toggle-overlay hotkey (FsmMasterGlobalSettings.ToggleOverlayHotkey, default F3). Collects its own FsmSnapshot (see
 // RefreshSnapshot) rather than sharing FsmMasterPlugin's - FsmMasterPlugin calls RefreshSnapshot for
 // it on initial Awake and on every scene load (it already owns the SceneManager.sceneLoaded
 // subscription for its own persisted-edit reapplication, so this reuses that rather than adding a
@@ -48,9 +45,11 @@ internal sealed class FsmGraphOverlay
     // default, "Arial" covers Mac and Wine-mapped fonts).
     private static readonly string[] DynamicFontNames = ["Segoe UI", "DejaVu Sans", "Liberation Sans", "Arial"];
 
-    // Every named color this overlay draws with is now a live BepInEx ConfigEntry<Color> (see
-    // FsmGraphColorConfig and the _colors field below) rather than a hardcoded constant, so the whole
-    // palette can be retuned via Configuration Manager's color picker without a recompile.
+    // Every named color/style this overlay draws with is read directly off FsmMasterMod.Instance's
+    // own GlobalSettings, on demand, rather than a hardcoded constant - there's no BepInEx
+    // Configuration Manager on this branch to retune it live through, and no in-game settings panel
+    // either (see Phase 3's resolution), so a fresh read each time costs nothing extra: GlobalSettings
+    // is loaded once at Initialize() and never changes again mid-session.
 
     // Action-zone/drag-to-rebind tuning - fixed screen pixels, not scaled by zoom (see
     // TryHitTestTransitionLine's own comment on why click-precision tolerances stay fixed).
@@ -58,13 +57,8 @@ internal sealed class FsmGraphOverlay
     private const float DragStartThreshold = 4f;
     private const double DoubleClickWindowSeconds = 0.35;
 
-    private readonly ManualLogSource _logger;
     private readonly FsmEditManager _editManager;
     private readonly FsmTabManager _tabManager;
-    private readonly ConfigEntry<KeyboardShortcut> _toggleOverlayHotkey;
-    private readonly ConfigEntry<KeyboardShortcut> _toggleMinimalViewHotkey;
-    private readonly FsmGraphColorConfig _colors;
-    private readonly FsmGraphPerformanceConfig _performance;
 
     // Unlit, vertex-colored built-in shader shared by every GL batch this overlay draws (transition
     // lines and node chrome alike) instead of one GUI.DrawTexture call per line segment/rounded-rect
@@ -227,7 +221,7 @@ internal sealed class FsmGraphOverlay
         // reads as a consistent border around the whole arrow (shaft and head alike) instead of the
         // shaft's own halo it would otherwise get from Thickness alone, which fades to nothing right at
         // the point where the head is thinnest (the tip).
-        public readonly List<(Vector2[] Points, Color Color, float Thickness, float ArrowLength, float OutlineMargin)> LineDrawBuffer = new();
+        public readonly List<LineDrawEntry> LineDrawBuffer = new();
 
         // Reused per-Repaint scratch buffer of (vertex position, color) pairs, 3 entries per triangle -
         // holds every node/pseudo-node chrome shape (backgrounds, outline rings, rounded corners) for
@@ -235,7 +229,7 @@ internal sealed class FsmGraphOverlay
         // before) and then drawn as a single GL batch (see FlushChromeBufferGL), replacing what used to
         // be up to ~7 GUI.DrawTexture calls per rounded rect (flat fills plus a baked corner-mask
         // texture per corner).
-        public readonly List<(Vector2 Position, Color Color)> ChromeVertexBuffer = new();
+        public readonly List<ChromeVertexEntry> ChromeVertexBuffer = new();
 
         // Everything DrawCachedGraph's node/pseudo-node chrome gathering pass actually reads that isn't
         // already covered by NodeLayoutVersion (pan/zoom/canvas/selection/edit-generation) - tracked
@@ -250,17 +244,18 @@ internal sealed class FsmGraphOverlay
         // and off-screen-culled (see the comments earlier in DrawCachedGraph). activeStateName is read
         // live (see DrawCachedGraph) since it drives the active-halo ring and title color and changes
         // independently of everything NodeLayoutVersion tracks; the selected state and BoxStyle are
-        // likewise read live rather than folded into edit generation. ConfigGeneration (see
-        // FsmGraphPerformanceConfig) is what keeps a color retuned live via Configuration Manager from
-        // going stale here for longer than one frame. Dimming (see ApplyDim) is deliberately NOT part
-        // of this cache key - it's applied as a pure per-flush color multiplier at draw time, so the
-        // same cached buffer contents are correct whether or not this pass happens to be dimmed.
+        // likewise read live rather than folded into edit generation. There's no ConfigGeneration
+        // counter here (unlike the Silksong-era version) - GlobalSettings has no live-reload event to
+        // invalidate against, since there's no BepInEx Configuration Manager or in-game settings panel
+        // on this branch; colors/styles are fixed for the whole session once loaded. Dimming (see
+        // ApplyDim) is deliberately NOT part of this cache key - it's applied as a pure per-flush color
+        // multiplier at draw time, so the same cached buffer contents are correct whether or not this
+        // pass happens to be dimmed.
         public int ChromeCacheLayoutVersion = -1;
         public Rect ChromeCacheVisibleRect;
         public string? ChromeCacheActiveStateName;
         public string? ChromeCacheSelectedStateName;
         public GraphBoxStyle ChromeCacheBoxStyle;
-        public int ChromeCacheConfigGeneration = -1;
     }
 
     // One GraphLayoutCache per FsmKey that's ever been drawn this scene visit (the active tab, plus
@@ -304,52 +299,13 @@ internal sealed class FsmGraphOverlay
     private DraggingTransition? _draggingTransition;
 
     public FsmGraphOverlay(
-        ManualLogSource logger,
         FsmEditManager editManager,
         FsmTabManager tabManager,
-        ConfigEntry<KeyboardShortcut> toggleOverlayHotkey,
-        ConfigEntry<KeyboardShortcut> toggleMinimalViewHotkey,
-        FsmGraphColorConfig colors,
-        FsmGraphPerformanceConfig performance,
         bool startVisible = false)
     {
-        _logger = logger;
         _editManager = editManager;
         _tabManager = tabManager;
-        _toggleOverlayHotkey = toggleOverlayHotkey;
-        _toggleMinimalViewHotkey = toggleMinimalViewHotkey;
-        _colors = colors;
-        _performance = performance;
         _isVisible = startVisible;
-    }
-
-    public void Shutdown()
-    {
-        // Must run on every reload (see FsmActiveStateTracker.UnsubscribeAll's own comment) - a
-        // ScriptEngine reload otherwise leaves this instance's StateChanged handlers subscribed to
-        // still-live Fsm instances forever, stacked underneath whatever the next Awake's own tracker
-        // subscribes afresh.
-        _activeStateTracker.UnsubscribeAll();
-
-        if (_glMaterial != null)
-        {
-            UnityEngine.Object.Destroy(_glMaterial);
-            _glMaterial = null;
-        }
-        _glMaterialFailed = false;
-
-        if (_dynamicFont != null)
-        {
-            UnityEngine.Object.Destroy(_dynamicFont);
-            _dynamicFont = null;
-        }
-
-        // GUIStyle is a plain managed object, not a UnityEngine.Object - nothing to Destroy, just
-        // drop the references so a ScriptEngine reload rebuilds them cleanly on next use.
-        _titleStyle = null;
-        _eventStyle = null;
-        _globalEventStyle = null;
-        _textStyleBuiltForZoom = -1f;
     }
 
     // Read by FsmMasterPlugin.Update each frame to mirror this overlay's own toggle-overlay/toggle-
@@ -383,7 +339,7 @@ internal sealed class FsmGraphOverlay
         // Both hotkeys are gated on !CanvasTextField.AnyFieldFocused - values typed into the Actions/
         // Events/Variables panel's edit fields (FsmActiveStatePanel) routinely contain digits matching
         // these hotkeys' default bindings, which would otherwise toggle this overlay mid-edit.
-        if (!CanvasTextField.AnyFieldFocused && _toggleOverlayHotkey.Value.IsDown())
+        if (!CanvasTextField.AnyFieldFocused && Input.GetKeyDown(FsmMasterMod.Instance!.GlobalSettings.ToggleOverlayHotkey))
         {
             bool wasVisible = _isVisible;
             _isVisible = !_isVisible;
@@ -397,11 +353,11 @@ internal sealed class FsmGraphOverlay
         // minimal graph-only look - the toggle-overlay hotkey's job is hiding the whole tool;
         // toggle-minimal-view is a secondary toggle nested within that. Pressing it again restores it.
         // Only active while the overlay itself is on. Line/box rendering detail is a separate, always-
-        // applied setting now (see FsmGraphPerformanceConfig), not tied to this hotkey.
-        if (_isVisible && !CanvasTextField.AnyFieldFocused && _toggleMinimalViewHotkey.Value.IsDown())
+        // applied setting (FsmMasterGlobalSettings.LineStyle/BoxStyle), not tied to this hotkey.
+        if (_isVisible && !CanvasTextField.AnyFieldFocused && Input.GetKeyDown(FsmMasterMod.Instance!.GlobalSettings.ToggleMinimalViewHotkey))
         {
             _selectionUiVisible = !_selectionUiVisible;
-            _logger.LogInfo($"[FsmMaster] Graph overlay: minimal view {(!_selectionUiVisible ? "on" : "off")}.");
+            FsmMasterMod.Instance?.Log($"[FsmMaster] Graph overlay: minimal view {(!_selectionUiVisible ? "on" : "off")}.");
         }
     }
 
@@ -423,7 +379,7 @@ internal sealed class FsmGraphOverlay
 
         if (_snapshot.Fsms.Count == 0)
         {
-            _logger.LogInfo("[FsmMaster] Graph overlay: no live PlayMakerFSM instances found in this scene.");
+            FsmMasterMod.Instance?.Log("[FsmMaster] Graph overlay: no live PlayMakerFSM instances found in this scene.");
         }
 
         InvalidateGraphCaches();
@@ -605,7 +561,7 @@ internal sealed class FsmGraphOverlay
         }
 
         Color previousColor = GUI.color;
-        GUI.color = _colors.VignetteColor.Value;
+        GUI.color = FsmMasterMod.Instance!.GlobalSettings.VignetteColor;
         try
         {
             if (holes.Count == 0)
@@ -724,7 +680,7 @@ internal sealed class FsmGraphOverlay
         _eventStyle = new GUIStyle(_titleStyle) { fontStyle = FontStyle.Normal };
 
         _globalEventStyle = new GUIStyle(_eventStyle);
-        _globalEventStyle.normal.textColor = _colors.GlobalPseudoNodeTextColor.Value;
+        _globalEventStyle.normal.textColor = FsmMasterMod.Instance!.GlobalSettings.GlobalPseudoNodeTextColor;
 
         _textStyleBuiltForZoom = _zoom;
     }
@@ -745,11 +701,11 @@ internal sealed class FsmGraphOverlay
     // Pure function (no instance-field mutation) so callers can seed a specific tab's pan/zoom state
     // rather than always overwriting this overlay's own singleton fields - see the call site in
     // SelectFsm, which is the only remaining caller today.
-    internal static (Vector2 PanCenter, float Zoom) FitViewToFsm(FsmInfo fsm)
+    internal static FitViewResult FitViewToFsm(FsmInfo fsm)
     {
         if (fsm.States.Count == 0)
         {
-            return (Vector2.zero, 1f);
+            return new FitViewResult(Vector2.zero, 1f);
         }
 
         float minX = float.MaxValue, minY = float.MaxValue, maxX = float.MinValue, maxY = float.MinValue;
@@ -774,7 +730,7 @@ internal sealed class FsmGraphOverlay
 
         float zoom = Mathf.Clamp(Mathf.Min(canvasWidth / worldWidth, canvasHeight / worldHeight), MinZoom, MaxZoom);
         var panCenter = new Vector2((minX + maxX) / 2f, (minY + maxY) / 2f);
-        return (panCenter, zoom);
+        return new FitViewResult(panCenter, zoom);
     }
 
     // Node height is content-driven (title band + one row per transition) rather than the
@@ -918,7 +874,7 @@ internal sealed class FsmGraphOverlay
         foreach (FsmStateInfo state in fsm.States)
         {
             Rect screenRect = nodeScreenRects[state.Name];
-            int colorIndex = Mathf.Clamp(state.State.ColorIndex, 0, _colors.StateColors.Length - 1);
+            int colorIndex = Mathf.Clamp(state.State.ColorIndex, 0, FsmMasterMod.Instance!.GlobalSettings.StateColors.Length - 1);
             var titleRect = new Rect(screenRect.x, screenRect.y, screenRect.width, TitleBarHeight * _zoom);
 
             bool isDisabled = editSet != null && editSet.DisabledStates.Contains(state.Name);
@@ -938,7 +894,7 @@ internal sealed class FsmGraphOverlay
                 // ColorIndex 0 is PlayMaker's "no color set" default - baked to black here (rather
                 // than its literal grey StateColors entry). This is the title band's DEFAULT
                 // background - see ActiveTitleBackgroundColor for what it switches to on activation.
-                FillColor = colorIndex == 0 ? Color.black : _colors.StateColors[colorIndex].Value,
+                FillColor = colorIndex == 0 ? Color.black : FsmMasterMod.Instance!.GlobalSettings.StateColors[colorIndex],
                 ColorIndex = colorIndex,
                 IsDisabled = isDisabled,
             };
@@ -1241,8 +1197,7 @@ internal sealed class FsmGraphOverlay
                 && _currentCache.ChromeCacheVisibleRect == visibleRect
                 && _currentCache.ChromeCacheActiveStateName == activeStateName
                 && _currentCache.ChromeCacheSelectedStateName == _selectedStateName
-                && _currentCache.ChromeCacheBoxStyle == _performance.BoxStyle.Value
-                && _currentCache.ChromeCacheConfigGeneration == _performance.Generation
+                && _currentCache.ChromeCacheBoxStyle == FsmMasterMod.Instance!.GlobalSettings.BoxStyle
                 && !anyFading;
 
             if (!chromeCacheValid)
@@ -1271,13 +1226,13 @@ internal sealed class FsmGraphOverlay
                     // buffer (pseudo chrome always before node chrome) stays identical to a full rebuild.
                     if (!chromeCacheValid)
                     {
-                        AddRoundedRectOutlineToChromeBuffer(pseudo.Rect, _colors.GlobalPseudoNodeColor.Value, _colors.GlobalPseudoNodeOutlineColor.Value, NodeBorderThickness * _zoom);
+                        AddRoundedRectOutlineToChromeBuffer(pseudo.Rect, FsmMasterMod.Instance!.GlobalSettings.GlobalPseudoNodeColor, FsmMasterMod.Instance!.GlobalSettings.GlobalPseudoNodeOutlineColor, NodeBorderThickness * _zoom);
                     }
 
                     // Arrow geometry is only collected here - actually drawn in one GL batch below,
                     // once every pseudo/edge line for this frame has been gathered.
-                    Color pseudoLineColor = pseudo.IsDisabled ? _colors.DisabledTransitionLineColor.Value : _colors.GlobalTransitionColor.Value;
-                    _currentCache.LineDrawBuffer.Add((pseudo.ArrowPoints, pseudoLineColor, TransitionLineThickness, ArrowheadLength, 0f));
+                    Color pseudoLineColor = pseudo.IsDisabled ? FsmMasterMod.Instance!.GlobalSettings.DisabledTransitionLineColor : FsmMasterMod.Instance!.GlobalSettings.GlobalTransitionColor;
+                    _currentCache.LineDrawBuffer.Add(new LineDrawEntry(pseudo.ArrowPoints, pseudoLineColor, TransitionLineThickness, ArrowheadLength, 0f));
                 }
             }
 
@@ -1291,7 +1246,7 @@ internal sealed class FsmGraphOverlay
                 // Disabled styling takes precedence over active-state styling - a disabled state can
                 // technically still be ActiveStateName for one frame before its injected exit fires.
                 bool nodeIsActiveForLines = !node.IsDisabled && activeStateName != null && node.Name == activeStateName;
-                Color lineColor = nodeIsActiveForLines ? _colors.ActiveStateColor.Value : _colors.TransitionColors[node.ColorIndex].Value;
+                Color lineColor = nodeIsActiveForLines ? FsmMasterMod.Instance!.GlobalSettings.ActiveStateColor : FsmMasterMod.Instance!.GlobalSettings.TransitionColors[node.ColorIndex];
                 float lineThickness = nodeIsActiveForLines ? ActiveTransitionLineThickness : TransitionLineThickness;
 
                 // A selected state's outgoing transitions get a yellow outline - cheaper than an
@@ -1303,7 +1258,7 @@ internal sealed class FsmGraphOverlay
                 // underlying re-emitted curve just gets fully overdrawn by the real line on top,
                 // invisible. Those styles recolor the line and arrowhead directly instead.
                 bool nodeIsSelectedForLines = _selectedStateName != null && node.Name == _selectedStateName;
-                bool selectionUsesOutline = nodeIsSelectedForLines && _performance.LineStyle.Value == GraphLineStyle.Thick;
+                bool selectionUsesOutline = nodeIsSelectedForLines && FsmMasterMod.Instance!.GlobalSettings.LineStyle == GraphLineStyle.Thick;
                 bool selectionUsesColor = nodeIsSelectedForLines && !selectionUsesOutline;
 
                 foreach (TransitionRow row in node.Rows)
@@ -1316,8 +1271,8 @@ internal sealed class FsmGraphOverlay
                     // A disabled row (either the whole state's cascading effect, minus the one
                     // FindExitEvent-picked survivor, or a directly right-click-disabled single
                     // transition) always greys out regardless of active/theme/selection coloring.
-                    Color rowColor = row.IsDisabled ? _colors.DisabledTransitionLineColor.Value
-                        : selectionUsesColor ? _colors.SelectedStateColor.Value
+                    Color rowColor = row.IsDisabled ? FsmMasterMod.Instance!.GlobalSettings.DisabledTransitionLineColor
+                        : selectionUsesColor ? FsmMasterMod.Instance!.GlobalSettings.SelectedStateColor
                         : lineColor;
                     float rowThickness = row.IsDisabled ? TransitionLineThickness : lineThickness;
                     float rowArrowLength = ArrowheadLength * (rowThickness / TransitionLineThickness);
@@ -1329,10 +1284,10 @@ internal sealed class FsmGraphOverlay
                         // as a uniform border the entire length of the arrow rather than a wedge that
                         // only shows up near the arrowhead's wide back edge (see the OutlineMargin
                         // field comment on _currentCache.LineDrawBuffer).
-                        _currentCache.LineDrawBuffer.Add((row.CurvePoints, _colors.SelectedStateColor.Value, rowThickness + SelectedTransitionOutlineMargin * 2f, rowArrowLength, SelectedTransitionOutlineMargin));
+                        _currentCache.LineDrawBuffer.Add(new LineDrawEntry(row.CurvePoints, FsmMasterMod.Instance!.GlobalSettings.SelectedStateColor, rowThickness + SelectedTransitionOutlineMargin * 2f, rowArrowLength, SelectedTransitionOutlineMargin));
                     }
 
-                    _currentCache.LineDrawBuffer.Add((row.CurvePoints, rowColor, rowThickness, rowArrowLength, 0f));
+                    _currentCache.LineDrawBuffer.Add(new LineDrawEntry(row.CurvePoints, rowColor, rowThickness, rowArrowLength, 0f));
                 }
             }
 
@@ -1353,11 +1308,11 @@ internal sealed class FsmGraphOverlay
             if (interactive && _draggingTransition is { HasCrossedThreshold: true })
             {
                 Vector2 mousePos = Event.current.mousePosition;
-                (Vector2 Anchor, Vector2 ExitDirection)? drag = ResolveDragAnchor(mousePos);
+                DragAnchorResult? drag = ResolveDragAnchor(mousePos);
                 if (drag.HasValue)
                 {
                     Vector2[] dragCurvePoints = SampleBezierCurve(drag.Value.Anchor, mousePos, drag.Value.ExitDirection, -drag.Value.ExitDirection, _zoom);
-                    _currentCache.LineDrawBuffer.Add((dragCurvePoints, _colors.DragTransitionColor.Value, ActiveTransitionLineThickness, ArrowheadLength * (ActiveTransitionLineThickness / TransitionLineThickness), 0f));
+                    _currentCache.LineDrawBuffer.Add(new LineDrawEntry(dragCurvePoints, FsmMasterMod.Instance!.GlobalSettings.DragTransitionColor, ActiveTransitionLineThickness, ArrowheadLength * (ActiveTransitionLineThickness / TransitionLineThickness), 0f));
                 }
             }
 
@@ -1391,7 +1346,7 @@ internal sealed class FsmGraphOverlay
                     // past the tighter inner curve at every corner. Concentric rings (outer ring, active
                     // ring) still need a correspondingly larger radius so their curve stays parallel to
                     // this one rather than reusing it as-is, which is what the "+ offset" below does.
-                    bool standardBoxStyle = _performance.BoxStyle.Value == GraphBoxStyle.Standard;
+                    bool standardBoxStyle = FsmMasterMod.Instance!.GlobalSettings.BoxStyle == GraphBoxStyle.Standard;
                     float cornerRadius = standardBoxStyle ? 0f : GetNodeCornerRadius(node.ScreenRect);
 
                     // The active-indicator ring is the outer "chrome" halo - drawn behind and larger than
@@ -1422,7 +1377,7 @@ internal sealed class FsmGraphOverlay
                             node.ScreenRect.y - selectedOffset,
                             node.ScreenRect.width + selectedOffset * 2f,
                             node.ScreenRect.height + selectedOffset * 2f);
-                        AddRoundedRectToChromeBuffer(selectedRect, cornerRadius + selectedOffset, _colors.SelectedStateColor.Value);
+                        AddRoundedRectToChromeBuffer(selectedRect, cornerRadius + selectedOffset, FsmMasterMod.Instance!.GlobalSettings.SelectedStateColor);
                     }
                     else if (isSelected)
                     {
@@ -1432,7 +1387,7 @@ internal sealed class FsmGraphOverlay
                             node.ScreenRect.y - selectedOffset,
                             node.ScreenRect.width + selectedOffset * 2f,
                             node.ScreenRect.height + selectedOffset * 2f);
-                        AddRoundedRectToChromeBuffer(selectedRect, cornerRadius + selectedOffset, _colors.SelectedStateColor.Value);
+                        AddRoundedRectToChromeBuffer(selectedRect, cornerRadius + selectedOffset, FsmMasterMod.Instance!.GlobalSettings.SelectedStateColor);
                     }
 
                     if (isActive || fadeT.HasValue)
@@ -1444,7 +1399,7 @@ internal sealed class FsmGraphOverlay
                         // while merely fading. isSelected's own "not active" offset above already
                         // reserves this exact radial slot regardless of which of the two this is, so a
                         // fading + selected node's rings still stack correctly.
-                        Color ringColor = isActive ? _colors.ActiveStateColor.Value : GetFadingActiveColor(fadeT!.Value);
+                        Color ringColor = isActive ? FsmMasterMod.Instance!.GlobalSettings.ActiveStateColor : GetFadingActiveColor(fadeT!.Value);
                         float activeOffset = (NodeBorderThickness + NodeActiveOutlineThickness) * _zoom;
                         var activeRect = new Rect(
                             node.ScreenRect.x - activeOffset,
@@ -1463,12 +1418,12 @@ internal sealed class FsmGraphOverlay
                     // here. Always present in the Detailed box style; in Standard it's skipped for a plain,
                     // non-active/non-selected state, so only active/selected states show a border at all.
                     Color innerOutlineColor = node.IsDisabled
-                        ? _colors.DisabledOutlineColor.Value
+                        ? FsmMasterMod.Instance!.GlobalSettings.DisabledOutlineColor
                         : isActive
                             ? GetActiveOutlineColor(node.ColorIndex)
                             : fadeT.HasValue
-                                ? Color.Lerp(GetActiveOutlineColor(node.ColorIndex), _colors.NodeOutlineColor.Value, fadeT.Value)
-                                : _colors.NodeOutlineColor.Value;
+                                ? Color.Lerp(GetActiveOutlineColor(node.ColorIndex), FsmMasterMod.Instance!.GlobalSettings.NodeOutlineColor, fadeT.Value)
+                                : FsmMasterMod.Instance!.GlobalSettings.NodeOutlineColor;
                     if (!standardBoxStyle || isActive || isSelected || fadeT.HasValue)
                     {
                         float outlineThickness = NodeBorderThickness * _zoom;
@@ -1485,9 +1440,9 @@ internal sealed class FsmGraphOverlay
                     // while it's the active state - see the label pass below for its matching black text.
                     bool titleIsOnlyBand = node.Rows.Count == 0;
                     Color titleFillColor = isActive
-                        ? _colors.ActiveTitleBackgroundColor.Value
+                        ? FsmMasterMod.Instance!.GlobalSettings.ActiveTitleBackgroundColor
                         : fadeT.HasValue
-                            ? Color.Lerp(_colors.ActiveTitleBackgroundColor.Value, node.FillColor, fadeT.Value)
+                            ? Color.Lerp(FsmMasterMod.Instance!.GlobalSettings.ActiveTitleBackgroundColor, node.FillColor, fadeT.Value)
                             : node.FillColor;
                     AddRoundedRectToChromeBuffer(node.TitleRect, cornerRadius, titleFillColor, roundTop: true, roundBottom: titleIsOnlyBand);
                     // Title/row labels are deliberately NOT drawn here (see the label pass after both GL
@@ -1510,11 +1465,11 @@ internal sealed class FsmGraphOverlay
 
                         if (isLastRow)
                         {
-                            AddRoundedRectToChromeBuffer(row.Rect, cornerRadius, _colors.TransitionRowBackgroundColor.Value, roundTop: false, roundBottom: true);
+                            AddRoundedRectToChromeBuffer(row.Rect, cornerRadius, FsmMasterMod.Instance!.GlobalSettings.TransitionRowBackgroundColor, roundTop: false, roundBottom: true);
                         }
                         else
                         {
-                            AddFilledRectToChromeBuffer(row.Rect, _colors.TransitionRowBackgroundColor.Value);
+                            AddFilledRectToChromeBuffer(row.Rect, FsmMasterMod.Instance!.GlobalSettings.TransitionRowBackgroundColor);
                         }
 
                         if (!standardBoxStyle && !isLastRow)
@@ -1531,8 +1486,7 @@ internal sealed class FsmGraphOverlay
                 _currentCache.ChromeCacheVisibleRect = visibleRect;
                 _currentCache.ChromeCacheActiveStateName = activeStateName;
                 _currentCache.ChromeCacheSelectedStateName = _selectedStateName;
-                _currentCache.ChromeCacheBoxStyle = _performance.BoxStyle.Value;
-                _currentCache.ChromeCacheConfigGeneration = _performance.Generation;
+                _currentCache.ChromeCacheBoxStyle = FsmMasterMod.Instance!.GlobalSettings.BoxStyle;
             }
 
             // One GL batch for every line gathered above - drawn before the chrome batch below so
@@ -1596,8 +1550,8 @@ internal sealed class FsmGraphOverlay
                 // shared/mutable, so this only needs setting once per node right before its labels
                 // draw, not rebuilt from scratch.
                 bool nodeIsActive = !node.IsDisabled && activeStateName != null && node.Name == activeStateName;
-                _titleStyle!.normal.textColor = node.IsDisabled ? _colors.DisabledTitleTextColor.Value : nodeIsActive ? _colors.ActiveTitleTextColor.Value : Color.white;
-                _eventStyle!.normal.textColor = node.IsDisabled ? _colors.DisabledEventTextColor.Value : _colors.TransitionColors[node.ColorIndex].Value;
+                _titleStyle!.normal.textColor = node.IsDisabled ? FsmMasterMod.Instance!.GlobalSettings.DisabledTitleTextColor : nodeIsActive ? FsmMasterMod.Instance!.GlobalSettings.ActiveTitleTextColor : Color.white;
+                _eventStyle!.normal.textColor = node.IsDisabled ? FsmMasterMod.Instance!.GlobalSettings.DisabledEventTextColor : FsmMasterMod.Instance!.GlobalSettings.TransitionColors[node.ColorIndex];
 
                 GUI.Label(node.TitleRect, node.Name, _titleStyle);
 
@@ -1688,7 +1642,7 @@ internal sealed class FsmGraphOverlay
         if (_lastNodeClickName == stateName && now - _lastNodeClickTime <= DoubleClickWindowSeconds)
         {
             fsm.Fsm.SetState(stateName);
-            _logger.LogInfo($"[FsmMaster] Forced fsm '{fsm.FsmName}' on '{fsm.GameObjectName}' into state '{stateName}'.");
+            FsmMasterMod.Instance?.Log($"[FsmMaster] Forced fsm '{fsm.FsmName}' on '{fsm.GameObjectName}' into state '{stateName}'.");
             _lastNodeClickTime = double.NegativeInfinity;
             _lastNodeClickName = null;
         }
@@ -1860,7 +1814,7 @@ internal sealed class FsmGraphOverlay
             {
                 if (row.EventName == eventName)
                 {
-                    isSourceEnd = Vector2.Distance(mousePos, row.CurvePoints[0]) <= Vector2.Distance(mousePos, row.CurvePoints[^1]);
+                    isSourceEnd = Vector2.Distance(mousePos, row.CurvePoints[0]) <= Vector2.Distance(mousePos, row.CurvePoints[row.CurvePoints.Length - 1]);
                     break;
                 }
             }
@@ -2047,7 +2001,7 @@ internal sealed class FsmGraphOverlay
     // to the cursor rather than staying pinned to whichever edge was closer when the drag started.
     // A global pseudo-node has no such left/right choice (it always enters its target from directly
     // above - see GlobalPseudoNodeLayout's own construction), so its anchor/direction stay fixed.
-    private (Vector2 Anchor, Vector2 ExitDirection)? ResolveDragAnchor(Vector2 mousePos)
+    private DragAnchorResult? ResolveDragAnchor(Vector2 mousePos)
     {
         if (_draggingTransition == null)
         {
@@ -2062,7 +2016,7 @@ internal sealed class FsmGraphOverlay
                 {
                     if (pseudo.EventName == _draggingTransition.EventName)
                     {
-                        return (pseudo.ArrowPoints[1], new Vector2(0f, -1f));
+                        return new DragAnchorResult(pseudo.ArrowPoints[1], new Vector2(0f, -1f));
                     }
                 }
             }
@@ -2088,7 +2042,7 @@ internal sealed class FsmGraphOverlay
 
                 Vector2 exitDirection = mousePos.x >= anchorRect.center.x ? new Vector2(1f, 0f) : new Vector2(-1f, 0f);
                 Vector2 anchor = new(exitDirection.x > 0f ? anchorRect.xMax : anchorRect.x, anchorRect.center.y);
-                return (anchor, exitDirection);
+                return new DragAnchorResult(anchor, exitDirection);
             }
         }
 
@@ -2218,7 +2172,7 @@ internal sealed class FsmGraphOverlay
     // fixed ActiveStateColor instead.
     private Color GetActiveOutlineColor(int colorIndex)
     {
-        return colorIndex == 0 ? _colors.ActiveStateColor.Value : _colors.StateColors[colorIndex].Value;
+        return colorIndex == 0 ? FsmMasterMod.Instance!.GlobalSettings.ActiveStateColor : FsmMasterMod.Instance!.GlobalSettings.StateColors[colorIndex];
     }
 
     // The active halo ring has no "default" (non-active) counterpart to tween its color toward - a
@@ -2228,7 +2182,7 @@ internal sealed class FsmGraphOverlay
     // up for SrcAlpha/OneMinusSrcAlpha blending (see EnsureGlMaterial), so this alpha is respected.
     private Color GetFadingActiveColor(float fadeT)
     {
-        Color active = _colors.ActiveStateColor.Value;
+        Color active = FsmMasterMod.Instance!.GlobalSettings.ActiveStateColor;
         return new Color(active.r, active.g, active.b, active.a * (1f - fadeT));
     }
 
@@ -2236,9 +2190,9 @@ internal sealed class FsmGraphOverlay
 
     private void AddTriangleToChromeBuffer(Vector2 a, Vector2 b, Vector2 c, Color color)
     {
-        _currentCache.ChromeVertexBuffer.Add((a, color));
-        _currentCache.ChromeVertexBuffer.Add((b, color));
-        _currentCache.ChromeVertexBuffer.Add((c, color));
+        _currentCache.ChromeVertexBuffer.Add(new ChromeVertexEntry(a, color));
+        _currentCache.ChromeVertexBuffer.Add(new ChromeVertexEntry(b, color));
+        _currentCache.ChromeVertexBuffer.Add(new ChromeVertexEntry(c, color));
     }
 
     private void AddFilledRectToChromeBuffer(Rect rect, Color color)
@@ -2327,7 +2281,7 @@ internal sealed class FsmGraphOverlay
             rect.width + borderThickness * 2f,
             rect.height + borderThickness * 2f);
 
-        float radius = _performance.BoxStyle.Value == GraphBoxStyle.Standard ? 0f : GetScreenCornerRadius(rect);
+        float radius = FsmMasterMod.Instance!.GlobalSettings.BoxStyle == GraphBoxStyle.Standard ? 0f : GetScreenCornerRadius(rect);
         AddRoundedRectToChromeBuffer(outerRect, radius + borderThickness, outlineColor);
         AddRoundedRectToChromeBuffer(rect, radius, fillColor);
     }
@@ -2437,7 +2391,7 @@ internal sealed class FsmGraphOverlay
         if (shader == null)
         {
             _glMaterialFailed = true;
-            _logger.LogError("[FsmMaster] Graph overlay: built-in shader \"Hidden/Internal-Colored\" was not found - transition lines will not render.");
+            FsmMasterMod.Instance?.LogError("[FsmMaster] Graph overlay: built-in shader \"Hidden/Internal-Colored\" was not found - transition lines will not render.");
             return;
         }
 
@@ -2485,7 +2439,7 @@ internal sealed class FsmGraphOverlay
         // points[0]/points[^1] of the cached bezier polyline are always those true endpoints regardless
         // of how the curve bends between them (see SampleBezierCurve), so no separate cache is needed
         // for this style.
-        switch (_performance.LineStyle.Value)
+        switch (FsmMasterMod.Instance!.GlobalSettings.LineStyle)
         {
             case GraphLineStyle.Straight:
                 GL.Begin(GL.LINES);
@@ -2493,7 +2447,7 @@ internal sealed class FsmGraphOverlay
                 {
                     if (points.Length >= 2)
                     {
-                        EmitThinSegment(points[0], points[^1], ApplyDim(color, dim));
+                        EmitThinSegment(points[0], points[points.Length - 1], ApplyDim(color, dim));
                     }
                 }
                 GL.End();
@@ -2775,6 +2729,88 @@ internal sealed class FsmGraphOverlay
         GL.Vertex3(c.x, c.y, 0f);
         GL.Color(colorD);
         GL.Vertex3(d.x, d.y, 0f);
+    }
+
+    // System.ValueTuple doesn't exist in net35's mscorlib, so _currentCache.LineDrawBuffer can't be a
+    // List<(Vector2[] Points, ...)> the way it was on the Silksong branch - this struct stands in for
+    // it. Deconstruct lets the existing `foreach ((Vector2[] points, Color color, _, _, _) in ...)`
+    // call sites in DrawLineBufferGL keep working unchanged.
+    private readonly struct LineDrawEntry
+    {
+        public readonly Vector2[] Points;
+        public readonly Color Color;
+        public readonly float Thickness;
+        public readonly float ArrowLength;
+        public readonly float OutlineMargin;
+
+        public LineDrawEntry(Vector2[] points, Color color, float thickness, float arrowLength, float outlineMargin)
+        {
+            Points = points;
+            Color = color;
+            Thickness = thickness;
+            ArrowLength = arrowLength;
+            OutlineMargin = outlineMargin;
+        }
+
+        public void Deconstruct(out Vector2[] points, out Color color, out float thickness, out float arrowLength, out float outlineMargin)
+        {
+            points = Points;
+            color = Color;
+            thickness = Thickness;
+            arrowLength = ArrowLength;
+            outlineMargin = OutlineMargin;
+        }
+    }
+
+    // Same net35 tuple gap as LineDrawEntry above, for _currentCache.ChromeVertexBuffer.
+    private readonly struct ChromeVertexEntry
+    {
+        public readonly Vector2 Position;
+        public readonly Color Color;
+
+        public ChromeVertexEntry(Vector2 position, Color color)
+        {
+            Position = position;
+            Color = color;
+        }
+
+        public void Deconstruct(out Vector2 position, out Color color)
+        {
+            position = Position;
+            color = Color;
+        }
+    }
+
+    // Same net35 tuple gap, for ResolveDragAnchor's nullable return value.
+    private readonly struct DragAnchorResult
+    {
+        public readonly Vector2 Anchor;
+        public readonly Vector2 ExitDirection;
+
+        public DragAnchorResult(Vector2 anchor, Vector2 exitDirection)
+        {
+            Anchor = anchor;
+            ExitDirection = exitDirection;
+        }
+    }
+
+    // Same net35 tuple gap, for FitViewToFsm's return value.
+    internal readonly struct FitViewResult
+    {
+        public readonly Vector2 PanCenter;
+        public readonly float Zoom;
+
+        public FitViewResult(Vector2 panCenter, float zoom)
+        {
+            PanCenter = panCenter;
+            Zoom = zoom;
+        }
+
+        public void Deconstruct(out Vector2 panCenter, out float zoom)
+        {
+            panCenter = PanCenter;
+            zoom = Zoom;
+        }
     }
 
     private sealed class NodeLayout

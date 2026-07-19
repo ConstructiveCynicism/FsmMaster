@@ -27,7 +27,13 @@ internal static class FsmDrilldownHierarchy
             }
 
             GameObject gameObject = fsm.Component.gameObject;
-            string sceneName = gameObject.scene.name;
+
+            // Scene.name has been observed to return null (not "") for a GameObject that isn't part of
+            // a normally-loaded scene, e.g. a persistent manager object - confirmed in-game (a real
+            // live FSM among the ~400 in a full room hit this, throwing ArgumentNullException out of
+            // the Dictionary<string,...> keying below, which has no null-key support). Same fallback
+            // FsmSaveDataStore.SanitizeForFileName already uses for the identical phenomenon.
+            string sceneName = gameObject.scene.name ?? string.Empty;
 
             if (!scenesByName.TryGetValue(sceneName, out SceneGroup? sceneGroup))
             {

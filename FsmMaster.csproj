@@ -1,11 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- 
-  Imports silksong path properties only if present in order to allow CI builds. The file should be gitignored.
-  If you are checking out from git and need to create a new one, you can use `dotnet new silksongpath` to generate one.
+  <!--
+  Imports Hollow Knight path properties only if present, in order to allow CI builds. The file
+  should be gitignored - see HollowKnightPath.example.props for the template.
   -->
-  <Import Condition="Exists('SilksongPath.props')" Project="SilksongPath.props" />
+  <Import Condition="Exists('HollowKnightPath.props')" Project="HollowKnightPath.props" />
   <PropertyGroup>
-    <TargetFramework>netstandard2.1</TargetFramework>
+    <TargetFramework>net35</TargetFramework>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <EnableNETAnalyzers>True</EnableNETAnalyzers>
@@ -16,93 +16,107 @@
     <RestorePackagesWithLockFile>True</RestorePackagesWithLockFile>
     <RestoreLockedMode Condition="'$(CI)' == 'true'">True</RestoreLockedMode>
 
-    <!-- Shortens and anonymizes paths in debug symbols relative to the project directory. Breakpoints will not work, however. -->
-    <PathMap Condition="'$(Configuration)' == 'Release'">$(MSBuildProjectDirectory)=/</PathMap>
-
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <RepositoryUrl>https://github.com/ConstructiveCynicism/FsmMaster</RepositoryUrl>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="BepInEx.Analyzers" Version="1.0.8" PrivateAssets="all" />
-    <PackageReference Include="BepInEx.Core" Version="5.4.21" />
+    <!-- Provides net35 reference assemblies for the SDK-style build - this machine doesn't have the
+         .NET Framework 3.5 targeting pack (Reference Assemblies\Microsoft\Framework\.NETFramework\v3.5)
+         installed, only the v3.5 runtime itself. Confirmed working during the Phase 0 Harmony spike. -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
     <PackageReference Include="HarmonyX" Version="2.9.0" />
-    <PackageReference Include="Hamunii.BepInEx.AutoPlugin" Version="2.0.1" PrivateAssets="all" />
     <PackageReference Include="Microsoft.Unity.Analyzers" Version="1.25.0" PrivateAssets="all" />
-    <PackageReference Include="UnityEngine.Modules" Version="6000.0.50" IncludeAssets="compile" />
-    <PackageReference Include="Silksong.GameLibs" Version="*-*" PrivateAssets="all" />
-    <PackageReference Include="Silksong.FsmUtil" Version="0.3.16" />
-    <PackageReference Include="Silksong.I18N" Version="1.1.1" />
-    <!-- Compile-only: DebugMod is an optional soft dependency (see DebugModCompat.cs). If installed, the
-         user's own DebugMod plugin supplies this assembly at runtime, so it must not be copied into
-         FsmMaster's own output folder. -->
-    <PackageReference Include="Silksong.DebugMod" Version="1.1.0" IncludeAssets="compile" />
+  </ItemGroup>
+
+  <!-- Local game/engine assembly references - this loader has no NuGet-packaged equivalent of
+       Silksong.GameLibs, so these come from HollowKnightManagedFolder / HollowKnightPatchedAssemblyFolder
+       (see HollowKnightPath.props) instead of PackageReference. -->
+  <ItemGroup>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(HollowKnightPatchedAssemblyFolder)/Assembly-CSharp.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(HollowKnightManagedFolder)/UnityEngine.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(HollowKnightManagedFolder)/UnityEngine.UI.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="PlayMaker">
+      <HintPath>$(HollowKnightManagedFolder)/PlayMaker.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Not yet ported to this branch's net35/old-Modding-API target. Excluded here rather than
+         deleted - each file moves back into the build once its own migration phase lands. -->
+    <Compile Remove="src/**/*.cs" />
+    <Compile Include="src/FsmActivationPatches.cs" />
+    <Compile Include="src/Net35Polyfills.cs" />
+    <Compile Include="src/PlayMakerFsmOps.cs" />
+    <Compile Include="src/Data/FsmData.cs" />
+    <Compile Include="src/Data/FsmDataCollector.cs" />
+    <Compile Include="src/Data/FsmIdentity.cs" />
+    <Compile Include="src/Data/FsmPristineSnapshot.cs" />
+    <!-- FsmEditModels.cs is nominally a Phase 7 (editing layer) file, but FsmPristineSnapshot.cs's
+         OriginalValues field is typed FsmEditSet, which lives here - pulled forward since it's a
+         zero-dependency plain-DTO file with nothing to port/change, not a scope creep of Phase 7 itself. -->
+    <Compile Include="src/Editor/FsmEditModels.cs" />
+    <Compile Include="src/Editor/FsmEditManager.cs" />
+    <Compile Include="src/Editor/FsmActionSequencer.cs" />
+    <Compile Include="src/Data/FsmActiveStateTracker.cs" />
+    <Compile Include="src/Data/FsmVariableTracker.cs" />
+    <Compile Include="src/Data/FsmConsoleLogger.cs" />
+    <Compile Include="src/UI/Canvas/UICommon.cs" />
+    <Compile Include="src/UI/Canvas/CanvasNode.cs" />
+    <Compile Include="src/UI/Canvas/CanvasPanel.cs" />
+    <Compile Include="src/UI/Canvas/CanvasBorder.cs" />
+    <Compile Include="src/UI/Canvas/CanvasImage.cs" />
+    <Compile Include="src/UI/Canvas/CanvasText.cs" />
+    <Compile Include="src/UI/Canvas/CanvasButton.cs" />
+    <Compile Include="src/UI/Canvas/CanvasTextField.cs" />
+    <Compile Include="src/UI/Canvas/CanvasToggleDot.cs" />
+    <Compile Include="src/UI/Canvas/CanvasSectionBlock.cs" />
+    <Compile Include="src/UI/Canvas/CanvasResizeHandle.cs" />
+    <Compile Include="src/UI/Canvas/CanvasScrollbar.cs" />
+    <Compile Include="src/UI/Canvas/CanvasHorizontalScrollbar.cs" />
+    <Compile Include="src/UI/Canvas/CanvasScrollView.cs" />
+    <Compile Include="src/UI/Canvas/CanvasHorizontalScrollStrip.cs" />
+    <Compile Include="src/UI/Canvas/PanelBuilder.cs" />
+    <Compile Include="src/UI/Panel/FsmTabState.cs" />
+    <Compile Include="src/UI/Panel/FsmTabManager.cs" />
+    <Compile Include="src/UI/Panel/FsmTabStripPanel.cs" />
+    <Compile Include="src/UI/Panel/FsmDrilldownHierarchy.cs" />
+    <Compile Include="src/UI/Panel/FsmOpenDropdown.cs" />
+    <Compile Include="src/UI/Panel/FsmActiveStatePanel.cs" />
+    <Compile Include="src/UI/Panel/FsmRightPanel.cs" />
+    <Compile Include="src/UI/Monitor/FsmMonitorPanel.cs" />
+    <Compile Include="src/UI/Graph/FsmGraphOverlay.cs" />
+    <!-- FsmSaveDataStore.cs/FsmSaveDialog.cs/FsmLoadDialog.cs are nominally Phase 10 (persistence)
+         files, but FsmRightPanel.cs (Phase 9) directly composes the Save/Load dialogs and can't
+         compile without them - pulled forward for the same reason FsmEditModels.cs was in Phase 6. -->
+    <Compile Include="src/Data/FsmSaveDataStore.cs" />
+    <Compile Include="src/UI/Panel/FsmSaveDialog.cs" />
+    <Compile Include="src/UI/Panel/FsmLoadDialog.cs" />
+    <Compile Include="src/Compatability/DebugModSavestateCompat.cs" />
   </ItemGroup>
 
   <ItemGroup>
     <None Include="README.md" Pack="True" PackagePath="README.md" />
   </ItemGroup>
 
-  <ItemGroup>
-    <Content Include=".config\dotnet-tools.json" />
-  </ItemGroup>
-
-  <PropertyGroup>
-    <CopyDestinationFolder Condition="'$(HotReload)' == 'true'">$(SilksongPluginsFolder)/</CopyDestinationFolder>
-    <CopyDestinationFolder Condition="'$(HotReload)' != 'true'">$(SilksongPluginsFolder)/ConstructiveCynicism-$(AssemblyTitle)/</CopyDestinationFolder>
-  </PropertyGroup>
-
-  <Target Name="CopyToPluginsFolder" AfterTargets="PostBuildEvent">
+  <Target Name="CopyToModsFolder" AfterTargets="PostBuildEvent">
     <ItemGroup>
       <Binaries Include="$(TargetPath)" />
       <Binaries Include="$(TargetDir)/$(TargetName).pdb" />
+      <!-- NuGet dependencies (HarmonyX and its own MonoMod/Mono.Cecil deps) - without these alongside
+           FsmMaster.dll, the old Modding API's type scan on load throws ReflectionTypeLoadException the
+           moment FsmMaster.dll references a type it can't resolve. -->
+      <Binaries Include="@(ReferenceCopyLocalPaths)" Condition="'%(ReferenceCopyLocalPaths.Extension)' == '.dll'" />
     </ItemGroup>
-    <Copy SourceFiles="@(Binaries)" DestinationFolder="$(CopyDestinationFolder)" Condition="'$(SilksongPluginsFolder)' != '' And Exists('$(SilksongPluginsFolder)')" />
-  </Target>
-
-  <!-- Release packaging: builds the Thunderstore package and a manual-install zip, both
-       bundling Silksong.ModList the same way DebugMod's release process does. Gated to
-       Release so hot-reload debug builds during live gameplay stay fast and offline. -->
-  <Target Name="PackageThunderstoreMod" AfterTargets="PostBuildEvent" Condition="'$(Configuration)' == 'Release'">
-    <ItemGroup>
-      <ThunderstoreBinaries Include="$(TargetPath)" LocalDir="/" PackDir="/plugins" />
-      <ThunderstoreBinaries Include="$(TargetDir)/$(TargetName).pdb" LocalDir="/" PackDir="/plugins" />
-    </ItemGroup>
-    <PropertyGroup>
-      <ThunderstoreDir>$(ProjectDir)/thunderstore</ThunderstoreDir>
-    </PropertyGroup>
-    <RemoveDir Directories="$(ThunderstoreDir)/temp;$(ThunderstoreDir)/build" />
-    <MakeDir Directories="$(ThunderstoreDir)/temp" />
-    <Copy SourceFiles="@(ThunderstoreBinaries)" DestinationFolder="$(ThunderstoreDir)/temp/%(ThunderstoreBinaries.PackDir)" />
-    <Exec Command="dotnet tool restore" WorkingDirectory="$(ProjectDir)" />
-    <Exec Command="dotnet tcli build --config-path &quot;$(ThunderstoreDir)/thunderstore.toml&quot; --package-name &quot;$(AssemblyTitle)&quot; --package-version $(Version)" StandardOutputImportance="High" StandardErrorImportance="High" WorkingDirectory="$(ProjectDir)" />
-  </Target>
-
-  <Target Name="CreateReleaseZip" AfterTargets="PostBuildEvent" Condition="'$(Configuration)' == 'Release'">
-    <ItemGroup>
-      <ReleaseBinaries Include="$(TargetPath)" LocalDir="/" />
-      <ReleaseBinaries Include="$(TargetDir)/$(TargetName).pdb" LocalDir="/" />
-    </ItemGroup>
-    <PropertyGroup>
-      <ThunderstoreDir>$(ProjectDir)/thunderstore</ThunderstoreDir>
-      <ModlistVersion>0.3.1</ModlistVersion>
-      <ModlistUrl>https://github.com/silksong-modding/Silksong.ModList/releases/download/v$(ModlistVersion)/silksong_modding-Modlist-$(ModlistVersion).zip/</ModlistUrl>
-      <FsmUtilVersion>0.3.16</FsmUtilVersion>
-      <FsmUtilUrl>https://github.com/silksong-modding/Silksong.FsmUtil/releases/download/v$(FsmUtilVersion)/silksong_modding-FsmUtil-$(FsmUtilVersion).zip</FsmUtilUrl>
-      <FsmUtilLicenseUrl>https://raw.githubusercontent.com/silksong-modding/Silksong.FsmUtil/v$(FsmUtilVersion)/LICENSE</FsmUtilLicenseUrl>
-    </PropertyGroup>
-    <RemoveDir Directories="$(IntermediateOutputPath)/archive" />
-    <Copy SourceFiles="@(ReleaseBinaries)" DestinationFolder="$(IntermediateOutputPath)/archive/$(TargetName)/%(ReleaseBinaries.LocalDir)" />
-    <DownloadFile Condition="!Exists('$(IntermediateOutputPath)/Silksong.Modlist.$(ModlistVersion).zip')" SourceUrl="$(ModlistUrl)" DestinationFolder="$(IntermediateOutputPath)" DestinationFileName="Silksong.Modlist.$(ModlistVersion).zip" />
-    <Unzip SourceFiles="$(IntermediateOutputPath)/Silksong.Modlist.$(ModlistVersion).zip" DestinationFolder="$(IntermediateOutputPath)/archive/Silksong.Modlist" />
-    <!-- Bundled alongside Silksong.ModList above for the manual-install zip - Silksong.FsmUtil is EUPL-1.2
-         licensed, which requires its own LICENSE text to travel with any distributed copy of its binaries,
-         so that file is fetched from its tagged release source alongside the compiled package. -->
-    <DownloadFile Condition="!Exists('$(IntermediateOutputPath)/Silksong.FsmUtil.$(FsmUtilVersion).zip')" SourceUrl="$(FsmUtilUrl)" DestinationFolder="$(IntermediateOutputPath)" DestinationFileName="Silksong.FsmUtil.$(FsmUtilVersion).zip" />
-    <Unzip SourceFiles="$(IntermediateOutputPath)/Silksong.FsmUtil.$(FsmUtilVersion).zip" DestinationFolder="$(IntermediateOutputPath)/archive/Silksong.FsmUtil" />
-    <DownloadFile Condition="!Exists('$(IntermediateOutputPath)/Silksong.FsmUtil.$(FsmUtilVersion).LICENSE')" SourceUrl="$(FsmUtilLicenseUrl)" DestinationFolder="$(IntermediateOutputPath)" DestinationFileName="Silksong.FsmUtil.$(FsmUtilVersion).LICENSE" />
-    <Copy SourceFiles="$(IntermediateOutputPath)/Silksong.FsmUtil.$(FsmUtilVersion).LICENSE" DestinationFiles="$(IntermediateOutputPath)/archive/Silksong.FsmUtil/LICENSE" />
-    <MakeDir Directories="$(ThunderstoreDir)/manual" />
-    <Delete Files="$(ThunderstoreDir)/manual/$(TargetName)_MANUAL.zip" />
-    <ZipDirectory SourceDirectory="$(IntermediateOutputPath)/archive" DestinationFile="$(ThunderstoreDir)/manual/$(TargetName)_MANUAL.zip" Overwrite="True" />
+    <Copy SourceFiles="@(Binaries)" DestinationFolder="$(HollowKnightModsFolder)/" Condition="'$(HollowKnightModsFolder)' != '' And Exists('$(HollowKnightModsFolder)')" />
   </Target>
 </Project>

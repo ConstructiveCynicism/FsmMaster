@@ -10,7 +10,7 @@ internal sealed class FsmTabManager
 {
     private readonly List<FsmTabState> _tabs = new();
 
-    public IReadOnlyList<FsmTabState> Tabs => _tabs;
+    public List<FsmTabState> Tabs => _tabs;
     public int ActiveTabIndex { get; private set; } = -1;
 
     public FsmTabState? GetActive() =>
@@ -118,7 +118,7 @@ internal sealed class FsmTabManager
     // snapshot - GetFsmKey does a regex match plus string allocation per live FSM, and re-walking
     // every FSM in the room a second time just to rebuild the same key set was pure duplicated cost on
     // every single scene transition.
-    public void RebindAfterRefresh(IReadOnlyDictionary<string, List<PlayMakerFSM>> groupsByFsmKey)
+    public void RebindAfterRefresh(Dictionary<string, List<PlayMakerFSM>> groupsByFsmKey)
     {
         foreach (FsmTabState tab in _tabs)
         {

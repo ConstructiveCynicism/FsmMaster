@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Reflection;
 using HarmonyLib;
 using InControl;
 using UnityEngine;
@@ -10,7 +9,7 @@ using UnityEngine.UI;
 namespace FsmMaster;
 
 // Click-to-type, Enter-or-click-away-to-confirm text field, including a Harmony patch on
-// HollowKnightInputModule.ProcessMove (see FocusOnHoverSuppressionPatch below): focusOnMouseHover
+// InControlInputModule.ProcessMove (see FocusOnHoverSuppressionPatch below): focusOnMouseHover
 // runs unconditionally for mouse input (gated only on allowMouseInput/Cursor.visible, not on gamepad
 // presence), so without this patch, moving the mouse toward another interactive element while a field
 // is focused deselects the field mid-click and can swallow the click.
@@ -37,7 +36,6 @@ internal sealed class CanvasTextField : CanvasNode
     private readonly CanvasNode[] _childList;
     private InputField? _inputField;
     private Color _baseColor;
-    private bool _submittedThisEdit;
 
     public event Action<string>? OnSubmit;
 
@@ -133,36 +131,20 @@ internal sealed class CanvasTextField : CanvasNode
         _inputField.caretColor = _ui.CaretColor;
         _inputField.caretWidth = (byte)Mathf.Max(1, UICommon.ScaleWidth(2));
 
-        _inputField.onSubmit.AddListener(text =>
-        {
-            _submittedThisEdit = true;
-            Text = text;
-            OnSubmit?.Invoke(text);
-        });
-
-        _inputField.onEndEdit.AddListener(_ =>
+        // This InputField has no separate onSubmit event distinct from onEndEdit (verified via
+        // reflection - only onEndEdit/onValueChange/onValueChanged/onValidateInput exist; Enter
+        // presses go through the internal SendOnSubmit(), and losing focus any other way goes through
+        // OnDeselect(), but both funnel into this same onEndEdit event with the final committed text).
+        // So unlike a newer Unity where onSubmit and onEndEdit are distinct events firing back-to-back
+        // for an Enter press, there's only one path to handle here.
+        _inputField.onEndEdit.AddListener(text =>
         {
             _inputField!.enabled = false;
+            Text = text;
+            OnSubmit?.Invoke(text);
 
-            // onSubmit (Return key) already committed the typed value and fired OnSubmit above -
-            // onEndEdit still fires right after it either way (see the comment on FsmActiveStatePanel's
-            // own AddTextFieldRow), so only re-commit here for every OTHER way editing can end (clicking
-            // a different button/field, this whole panel getting hidden mid-edit, etc.). Without this,
-            // ending an edit by clicking away - rather than pressing Enter - silently discarded whatever
-            // was typed: Unity's InputField writes keystrokes straight into the live text component,
-            // bypassing this wrapper's own cached Text field entirely, so reading/restoring the stale
-            // Text here (the previous behavior) both lost the edit and visibly snapped the label back to
-            // its pre-edit value.
-            if (!_submittedThisEdit)
-            {
-                string typed = _inputField!.text;
-                Text = typed;
-                OnSubmit?.Invoke(typed);
-            }
-
-            _submittedThisEdit = false;
             AnyFieldFocused = false;
-            TrySetInputLocked(false);
+            SetInputLocked(false);
         });
 
         // Added on this node (the InputField's own root), not on _label directly - a raycast hit on
@@ -190,7 +172,7 @@ internal sealed class CanvasTextField : CanvasNode
         _inputField.enabled = true;
         _inputField.Select();
         AnyFieldFocused = true;
-        TrySetInputLocked(true);
+        SetInputLocked(true);
 
         // InputField.Select() synchronously fires OnSelect -> ActivateInputField -> SelectAll
         // (confirmed by decompiling UnityEngine.UI.dll), selecting the entire text - collapse that
@@ -229,7 +211,7 @@ internal sealed class CanvasTextField : CanvasNode
         if (IsFocused())
         {
             AnyFieldFocused = false;
-            TrySetInputLocked(false);
+            SetInputLocked(false);
         }
 
         base.Destroy();
@@ -244,49 +226,18 @@ internal sealed class CanvasTextField : CanvasNode
         if (AnyFieldFocused)
         {
             AnyFieldFocused = false;
-            TrySetInputLocked(false);
+            SetInputLocked(false);
         }
     }
 
-    // Best-effort attempt to stop typed keystrokes from also driving player movement/actions while a
-    // field is focused. Confirmed via src/packages.lock.json and src/obj/project.assets.json that the
-    // currently-locked Silksong.GameLibs version ships Unity.InputSystem*.dll, not InControl.dll, so
-    // this cannot be a compile-time reference here. Resolved via reflection instead, and silently a
-    // no-op if the type isn't found at runtime either (most likely explanation: this Silksong build
-    // doesn't use InControl at all) - this assumption is unverified until checked in-game.
-    private static bool s_resolutionAttempted;
-    private static PropertyInfo? s_inputManagerEnabled;
-
-    private static void TrySetInputLocked(bool locked)
+    // Stops typed keystrokes from also driving player movement/actions while a field is focused.
+    // InControl.InputManager.Enabled is a real public static settable property directly on this
+    // build's Assembly-CSharp.dll (InControl's whole namespace is compiled into it, not shipped as a
+    // separate InControl.dll the way it might be on other Unity/InControl setups), so this can be a
+    // plain compile-time call rather than a reflection lookup.
+    private static void SetInputLocked(bool locked)
     {
-        if (!s_resolutionAttempted)
-        {
-            s_resolutionAttempted = true;
-            try
-            {
-                Type? inputManagerType = Type.GetType("InControl.InputManager, InControl");
-                s_inputManagerEnabled = inputManagerType?.GetProperty("enabled", BindingFlags.Public | BindingFlags.Static);
-            }
-            catch
-            {
-                s_inputManagerEnabled = null;
-            }
-        }
-
-        if (s_inputManagerEnabled == null)
-        {
-            return;
-        }
-
-        try
-        {
-            s_inputManagerEnabled.SetValue(null, !locked);
-        }
-        catch
-        {
-            // Stop retrying every keystroke if the property turned out not to behave as expected.
-            s_inputManagerEnabled = null;
-        }
+        InputManager.Enabled = !locked;
     }
 }
 
@@ -305,16 +256,16 @@ internal sealed class InteractiveLabel : CanvasText
     }
 }
 
-// Suppresses HollowKnightInputModule's "select whatever the mouse is hovering" behavior while any
+// Suppresses InControlInputModule's "select whatever the mouse is hovering" behavior while any
 // CanvasTextField is focused, restoring it immediately afterward. Without this, moving the mouse
 // toward another clickable widget (e.g. the Load button) while a field is focused deselects that
 // field mid-hover, which can interfere with the click landing on the intended target in the same
 // input pass.
-[HarmonyPatch(typeof(HollowKnightInputModule), nameof(HollowKnightInputModule.ProcessMove))]
+[HarmonyPatch(typeof(InControlInputModule), "ProcessMove")]
 internal static class FocusOnHoverSuppressionPatch
 {
     [HarmonyPrefix]
-    private static void Prefix(HollowKnightInputModule __instance, out bool __state)
+    private static void Prefix(InControlInputModule __instance, out bool __state)
     {
         __state = __instance.focusOnMouseHover;
         if (CanvasTextField.AnyFieldFocused)
@@ -324,7 +275,7 @@ internal static class FocusOnHoverSuppressionPatch
     }
 
     [HarmonyPostfix]
-    private static void Postfix(HollowKnightInputModule __instance, bool __state)
+    private static void Postfix(InControlInputModule __instance, bool __state)
     {
         __instance.focusOnMouseHover = __state;
     }

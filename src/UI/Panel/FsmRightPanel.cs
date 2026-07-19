@@ -1,6 +1,4 @@
 using System;
-using BepInEx.Configuration;
-using BepInEx.Logging;
 using UnityEngine;
 using UnityEngine.EventSystems;
 
@@ -75,17 +73,15 @@ internal sealed class FsmRightPanel : CanvasPanel
     private readonly FsmSaveDialog _saveDialog;
     private readonly FsmLoadDialog _loadDialog;
     private readonly CanvasResizeHandle _resizeHandle;
-    private readonly FsmPanelLayoutConfig _layout;
 
     private int _lastScreenWidth = -1;
     private int _lastScreenHeight = -1;
     private float _statusHideAtUnscaledTime;
 
-    public FsmRightPanel(UICommon ui, FsmTabManager tabManager, FsmEditManager editManager, FsmVariableTracker tracker, Func<FsmSnapshot?> getSnapshot, ManualLogSource logger, FsmPanelLayoutConfig layout, ConfigEntry<bool> autoLoadConfig, Action onCloseAll)
+    public FsmRightPanel(UICommon ui, FsmTabManager tabManager, FsmEditManager editManager, FsmVariableTracker tracker, Func<FsmSnapshot?> getSnapshot, Action onCloseAll)
         : base("FsmRightPanel")
     {
         _ui = ui;
-        _layout = layout;
         Reposition();
 
         _background = Add(new CanvasImage("Background", ui) { IsBackground = true, Tint = ui.PanelBackground });
@@ -122,33 +118,34 @@ internal sealed class FsmRightPanel : CanvasPanel
 
         _saveButton = Add(new CanvasButton("SaveButton", ui));
         _saveButton.Text.Text = "Save";
-        _saveButton.OnClicked += () => OpenSaveDialog(tabManager, logger);
+        _saveButton.OnClicked += () => OpenSaveDialog(tabManager);
 
         _loadButton = Add(new CanvasButton("LoadButton", ui));
         _loadButton.Text.Text = "Load";
-        _loadButton.OnClicked += () => OpenLoadDialog(tabManager, logger);
+        _loadButton.OnClicked += () => OpenLoadDialog(tabManager);
 
         _undoButton = Add(new CanvasButton("UndoButton", ui));
         _undoButton.Text.Text = "Undo";
-        _undoButton.OnClicked += () => UndoActiveTab(tabManager, editManager, logger);
+        _undoButton.OnClicked += () => UndoActiveTab(tabManager, editManager);
 
         _resetButton = Add(new CanvasButton("ResetButton", ui));
         _resetButton.Text.Text = "Reset";
-        _resetButton.OnClicked += () => ResetActiveTab(tabManager, editManager, logger);
+        _resetButton.OnClicked += () => ResetActiveTab(tabManager, editManager);
 
         // Global toggle, not tied to any one tab's FSM, but shares this row with Open/Save/Load/Undo/
         // Reset rather than living apart in the title bar - graph visibility is now a per-tab minimize
         // button in the tab strip instead (see FsmTabStripPanel), so this row no longer needs a
-        // separate slot for it. Default-on per autoLoadConfig's own ConfigEntry default (see
-        // FsmMasterPlugin.Awake); label stays "Auto" regardless of state, with Toggled's tint (via
+        // separate slot for it. Default-on per FsmMasterGlobalSettings.AutoLoadLastConfiguration's own
+        // default; label stays "Auto" regardless of state, with Toggled's tint (via
         // CanvasButton.Toggled) as the on/off indicator.
         _autoButton = Add(new CanvasButton("AutoButton", ui));
         _autoButton.Text.Text = "Auto";
-        _autoButton.Toggled = autoLoadConfig.Value;
+        _autoButton.Toggled = FsmMasterMod.Instance!.GlobalSettings.AutoLoadLastConfiguration;
         _autoButton.OnClicked += () =>
         {
-            autoLoadConfig.Value = !autoLoadConfig.Value;
-            _autoButton.Toggled = autoLoadConfig.Value;
+            bool newValue = !FsmMasterMod.Instance!.GlobalSettings.AutoLoadLastConfiguration;
+            FsmMasterMod.Instance!.GlobalSettings.AutoLoadLastConfiguration = newValue;
+            _autoButton.Toggled = newValue;
         };
 
         LayoutButtonRow();
@@ -156,7 +153,7 @@ internal sealed class FsmRightPanel : CanvasPanel
         TabStrip = Add(new FsmTabStripPanel(ui, tabManager));
         LayoutTabStrip();
 
-        ActiveStatePanel = Add(new FsmActiveStatePanel(ui, editManager, tracker, logger, msg => ShowStatus(msg, _ui.SuccessColor)));
+        ActiveStatePanel = Add(new FsmActiveStatePanel(ui, editManager, tracker, msg => ShowStatus(msg, _ui.SuccessColor)));
         LayoutActiveStatePanel();
 
         // Added last so it renders/hit-tests on top of the tab strip and active-state panel below it
@@ -169,10 +166,10 @@ internal sealed class FsmRightPanel : CanvasPanel
         _openButton.OnClicked += _openDropdown.Toggle;
 
         _saveDialog = Add(new FsmSaveDialog(ui, _saveButton));
-        _saveDialog.OnConfirm += (sceneName, fsmKey, saveName) => ConfirmSave(editManager, logger, sceneName, fsmKey, saveName);
+        _saveDialog.OnConfirm += (sceneName, fsmKey, saveName) => ConfirmSave(editManager, sceneName, fsmKey, saveName);
 
         _loadDialog = Add(new FsmLoadDialog(ui, _loadButton));
-        _loadDialog.OnSelected += (sceneName, fsmKey, saveName) => ConfirmLoad(editManager, logger, sceneName, fsmKey, saveName);
+        _loadDialog.OnSelected += (sceneName, fsmKey, saveName) => ConfirmLoad(editManager, sceneName, fsmKey, saveName);
 
         _resizeHandle = Add(new CanvasResizeHandle("ResizeHandle", ui));
         _resizeHandle.OnDragDelta += OnResizeDragged;
@@ -203,7 +200,7 @@ internal sealed class FsmRightPanel : CanvasPanel
     // with a write on every mouse-move event.
     private void OnDragEnded(PointerEventData _)
     {
-        _layout.Position.Value = LocalPosition;
+        FsmMasterMod.Instance!.GlobalSettings.RightPanelPosition = LocalPosition;
     }
 
     // Bottom-LEFT corner drag, not bottom-right: this panel is docked flush against the right edge of
@@ -231,8 +228,8 @@ internal sealed class FsmRightPanel : CanvasPanel
     // this resize's own right-edge-fixed math (see OnResizeDragged) moves LocalPosition.x too.
     private void OnResizeDragEnded()
     {
-        _layout.Position.Value = LocalPosition;
-        _layout.Size.Value = Size;
+        FsmMasterMod.Instance!.GlobalSettings.RightPanelPosition = LocalPosition;
+        FsmMasterMod.Instance!.GlobalSettings.RightPanelSize = Size;
     }
 
     private void LayoutResizeHandle()
@@ -262,12 +259,12 @@ internal sealed class FsmRightPanel : CanvasPanel
     // Neither one persists/loads anything itself - each just opens the corresponding popup
     // (FsmSaveDialog's text field, FsmLoadDialog's row list), which raises OnConfirm/OnSelected once
     // the user actually picks a name - see ConfirmSave/ConfirmLoad below.
-    private void OpenSaveDialog(FsmTabManager tabManager, ManualLogSource logger)
+    private void OpenSaveDialog(FsmTabManager tabManager)
     {
         FsmTabState? active = tabManager.GetActive();
         if (active?.Component == null)
         {
-            logger.LogInfo("[FsmMaster] Save: no active tab.");
+            FsmMasterMod.Instance?.Log("[FsmMaster] Save: no active tab.");
             return;
         }
 
@@ -276,12 +273,12 @@ internal sealed class FsmRightPanel : CanvasPanel
         _saveDialog.Show(sceneName, active.FsmKey, defaultName);
     }
 
-    private void OpenLoadDialog(FsmTabManager tabManager, ManualLogSource logger)
+    private void OpenLoadDialog(FsmTabManager tabManager)
     {
         FsmTabState? active = tabManager.GetActive();
         if (active?.Component == null)
         {
-            logger.LogInfo("[FsmMaster] Load: no active tab.");
+            FsmMasterMod.Instance?.Log("[FsmMaster] Load: no active tab.");
             return;
         }
 
@@ -292,7 +289,7 @@ internal sealed class FsmRightPanel : CanvasPanel
     // Saves the active edit set for fsmKey under the user-chosen name and remembers it as the
     // configuration to auto-reapply for (sceneName, fsmKey) next time this scene loads (see
     // FsmSaveDataStore.SetLastChosenSaveName / FsmMasterPlugin.ApplyPersistedEditsForScene).
-    private void ConfirmSave(FsmEditManager editManager, ManualLogSource logger, string sceneName, string fsmKey, string saveName)
+    private void ConfirmSave(FsmEditManager editManager, string sceneName, string fsmKey, string saveName)
     {
         string filePath = FsmSaveDataStore.GetFilePath(sceneName, fsmKey, saveName);
         FsmEditSet editSet = editManager.GetActiveEditSet(fsmKey) ?? new FsmEditSet { FsmKey = fsmKey };
@@ -301,7 +298,7 @@ internal sealed class FsmRightPanel : CanvasPanel
         {
             string json = FsmSaveDataStore.Save(sceneName, saveName, editSet);
             FsmSaveDataStore.SetLastChosenSaveName(sceneName, fsmKey, saveName);
-            logger.LogInfo($"[FsmMaster] Saved '{saveName}' for '{fsmKey}' in scene '{sceneName}' to '{filePath}':\n{json}");
+            FsmMasterMod.Instance?.Log($"[FsmMaster] Saved '{saveName}' for '{fsmKey}' in scene '{sceneName}' to '{filePath}':\n{json}");
             ShowStatus("Config Saved", _ui.SuccessColor);
         }
         catch (Exception ex)
@@ -309,14 +306,14 @@ internal sealed class FsmRightPanel : CanvasPanel
             // Surfaces I/O failures (e.g. a persistentDataPath the process can't write to) with the
             // exact resolved path instead of letting the exception disappear into Unity's UI event
             // dispatch unattributed - this was reported to silently no-op on Mac with no visible cause.
-            logger.LogError($"[FsmMaster] Save failed for '{saveName}' ('{fsmKey}' in scene '{sceneName}') at '{filePath}': {ex}");
+            FsmMasterMod.Instance?.LogError($"[FsmMaster] Save failed for '{saveName}' ('{fsmKey}' in scene '{sceneName}') at '{filePath}': {ex}");
             ShowStatus("Save Failed", _ui.ErrorColor);
         }
     }
 
     // Applies the chosen named save to the live FSM and remembers it as the last-chosen configuration
     // for (sceneName, fsmKey), same as ConfirmSave.
-    private void ConfirmLoad(FsmEditManager editManager, ManualLogSource logger, string sceneName, string fsmKey, string saveName)
+    private void ConfirmLoad(FsmEditManager editManager, string sceneName, string fsmKey, string saveName)
     {
         string filePath = FsmSaveDataStore.GetFilePath(sceneName, fsmKey, saveName);
 
@@ -325,19 +322,19 @@ internal sealed class FsmRightPanel : CanvasPanel
             FsmEditSet? editSet = FsmSaveDataStore.Load(sceneName, fsmKey, saveName);
             if (editSet == null)
             {
-                logger.LogInfo($"[FsmMaster] Load: '{saveName}' not found for '{fsmKey}' in scene '{sceneName}' (looked at '{filePath}').");
+                FsmMasterMod.Instance?.Log($"[FsmMaster] Load: '{saveName}' not found for '{fsmKey}' in scene '{sceneName}' (looked at '{filePath}').");
                 ShowStatus("Load Failed", _ui.ErrorColor);
                 return;
             }
 
             editManager.ApplyEditSet(editSet);
             FsmSaveDataStore.SetLastChosenSaveName(sceneName, fsmKey, saveName);
-            logger.LogInfo($"[FsmMaster] Loaded '{saveName}' for '{fsmKey}' in scene '{sceneName}' from '{filePath}'.");
+            FsmMasterMod.Instance?.Log($"[FsmMaster] Loaded '{saveName}' for '{fsmKey}' in scene '{sceneName}' from '{filePath}'.");
             ShowStatus("Config Loaded", _ui.SuccessColor);
         }
         catch (Exception ex)
         {
-            logger.LogError($"[FsmMaster] Load failed for '{saveName}' ('{fsmKey}' in scene '{sceneName}') at '{filePath}': {ex}");
+            FsmMasterMod.Instance?.LogError($"[FsmMaster] Load failed for '{saveName}' ('{fsmKey}' in scene '{sceneName}') at '{filePath}': {ex}");
             ShowStatus("Load Failed", _ui.ErrorColor);
         }
     }
@@ -365,40 +362,40 @@ internal sealed class FsmRightPanel : CanvasPanel
 
     // Pops the active tab's most recent undoable edit, if any - a no-op (with a log line) when the
     // active FSM has no edit history, matching Save/Load's own "no active tab" no-op shape.
-    private void UndoActiveTab(FsmTabManager tabManager, FsmEditManager editManager, ManualLogSource logger)
+    private void UndoActiveTab(FsmTabManager tabManager, FsmEditManager editManager)
     {
         FsmTabState? active = tabManager.GetActive();
         if (active?.Component == null)
         {
-            logger.LogInfo("[FsmMaster] Undo: no active tab.");
+            FsmMasterMod.Instance?.Log("[FsmMaster] Undo: no active tab.");
             return;
         }
 
         if (!editManager.HasUndo(active.FsmKey))
         {
-            logger.LogInfo($"[FsmMaster] Undo: nothing to undo for '{active.FsmKey}'.");
+            FsmMasterMod.Instance?.Log($"[FsmMaster] Undo: nothing to undo for '{active.FsmKey}'.");
             return;
         }
 
         editManager.Undo(active.FsmKey);
-        logger.LogInfo($"[FsmMaster] Undid last edit for '{active.FsmKey}'.");
+        FsmMasterMod.Instance?.Log($"[FsmMaster] Undid last edit for '{active.FsmKey}'.");
         ShowStatus("Edit Undone", _ui.SuccessColor);
     }
 
     // Reverts every edit made this session on the active tab's FSM back to its pristine, as-loaded
     // values (FsmEditManager.ResetFsm) - distinct from Undo, which only steps back one edit at a time.
-    private void ResetActiveTab(FsmTabManager tabManager, FsmEditManager editManager, ManualLogSource logger)
+    private void ResetActiveTab(FsmTabManager tabManager, FsmEditManager editManager)
     {
         FsmTabState? active = tabManager.GetActive();
         if (active?.Component == null)
         {
-            logger.LogInfo("[FsmMaster] Reset: no active tab.");
+            FsmMasterMod.Instance?.Log("[FsmMaster] Reset: no active tab.");
             return;
         }
 
         editManager.ResetFsm(active.FsmKey);
         ActiveStatePanel.ClearSequencerBlocks(active.FsmKey);
-        logger.LogInfo($"[FsmMaster] Reset all edits for '{active.FsmKey}'.");
+        FsmMasterMod.Instance?.Log($"[FsmMaster] Reset all edits for '{active.FsmKey}'.");
         ShowStatus("Edits Reset", _ui.SuccessColor);
     }
 
@@ -484,7 +481,7 @@ internal sealed class FsmRightPanel : CanvasPanel
     }
 
     // Falls back to the screen-relative default corner only when nothing's been saved yet
-    // (FsmPanelLayoutConfig's own (-1, -1) sentinel) - otherwise restores the user's last dragged/
+    // (FsmMasterGlobalSettings's own (-1, -1) sentinel) - otherwise restores the user's last dragged/
     // resized layout, clamped back into the current screen bounds (same clamp OnDragged already
     // applies) so a saved position/size from a larger resolution never leaves the panel off-screen.
     private void Reposition()
@@ -492,12 +489,14 @@ internal sealed class FsmRightPanel : CanvasPanel
         _lastScreenWidth = Screen.width;
         _lastScreenHeight = Screen.height;
 
-        Size = _layout.HasSavedSize
-            ? new Vector2(Mathf.Max(MinWidth, _layout.Size.Value.x), Mathf.Max(MinHeight, _layout.Size.Value.y))
+        Vector2 savedSize = FsmMasterMod.Instance!.GlobalSettings.RightPanelSize;
+        Size = FsmMasterGlobalSettings.HasSavedLayout(savedSize)
+            ? new Vector2(Mathf.Max(MinWidth, savedSize.x), Mathf.Max(MinHeight, savedSize.y))
             : new Vector2(UICommon.ScaleWidth(PanelWidth), UICommon.ScaleHeight(PanelHeight));
 
         Vector2 defaultPosition = new(Screen.width - UICommon.ScaleWidth(ScreenMargin) - Size.x, UICommon.ScaleHeight(ScreenMargin));
-        Vector2 desiredPosition = _layout.HasSavedPosition ? _layout.Position.Value : defaultPosition;
+        Vector2 savedPosition = FsmMasterMod.Instance!.GlobalSettings.RightPanelPosition;
+        Vector2 desiredPosition = FsmMasterGlobalSettings.HasSavedLayout(savedPosition) ? savedPosition : defaultPosition;
         LocalPosition = new Vector2(
             Mathf.Clamp(desiredPosition.x, 0f, Mathf.Max(0f, Screen.width - Size.x)),
             Mathf.Clamp(desiredPosition.y, 0f, Mathf.Max(0f, Screen.height - Size.y)));

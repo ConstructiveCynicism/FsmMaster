@@ -4,9 +4,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Linq;
 using System.Reflection;
-using BepInEx.Logging;
 using HutongGames.PlayMaker;
-using Silksong.FsmUtil;
 using UnityEngine;
 
 namespace FsmMaster;
@@ -14,9 +12,8 @@ namespace FsmMaster;
 // The generalized edit/undo engine every FsmMaster mutation funnels through: variable overrides, action
 // field overrides, state neutering, transition retargeting/disabling, and sequencer installs. Each FsmKey
 // (see FsmIdentity) gets its pristine values captured lazily on first touch, so ResetFsm can restore a live
-// FSM without a scene reload. All mutation is done via Silksong.FsmUtil's existing extension methods
-// rather than re-implementing state/transition/action
-// bookkeeping FsmUtil already provides.
+// FSM without a scene reload. All mutation is done via PlayMakerFsmOps's extension methods rather than
+// re-implementing state/transition/action bookkeeping from scratch.
 internal sealed class FsmEditManager
 {
     private static readonly string[] ExitEventPriority = { "CANCEL", "FINISHED", "NEXT" };
@@ -40,7 +37,6 @@ internal sealed class FsmEditManager
         VariableType.Float, VariableType.Int, VariableType.Bool, VariableType.String,
     };
 
-    private readonly ManualLogSource _logger;
     private readonly Dictionary<string, List<Fsm>> _liveInstances = new();
     private readonly Dictionary<string, FsmPristineSnapshot> _pristine = new();
 
@@ -73,11 +69,6 @@ internal sealed class FsmEditManager
 
     private void BumpEditGeneration() => EditGeneration++;
 
-    public FsmEditManager(ManualLogSource logger)
-    {
-        _logger = logger;
-    }
-
     // Called whenever the plugin (re)discovers live FSMs (Awake, each sceneLoaded) - wholesale
     // replacement of every tracked FsmKey's live instance list, not just the keys present in this
     // scan. The caller always passes every PlayMakerFSM currently alive (FindObjectsByType scans the
@@ -87,7 +78,7 @@ internal sealed class FsmEditManager
     // Fsm instances whose owning GameObject was already destroyed - Fsm is a plain C# object, not a
     // UnityEngine.Object, so it never becomes Unity's fake-null and nothing else would ever catch
     // this.
-    public void ReplaceLiveInstances(IReadOnlyDictionary<string, List<Fsm>> instancesByKey)
+    public void ReplaceLiveInstances(Dictionary<string, List<Fsm>> instancesByKey)
     {
         _liveInstances.Clear();
         foreach (KeyValuePair<string, List<Fsm>> entry in instancesByKey)
@@ -117,8 +108,8 @@ internal sealed class FsmEditManager
         }
     }
 
-    public IReadOnlyList<Fsm> GetLiveInstances(string fsmKey) =>
-        _liveInstances.TryGetValue(fsmKey, out List<Fsm>? instances) ? instances : Array.Empty<Fsm>();
+    public List<Fsm> GetLiveInstances(string fsmKey) =>
+        _liveInstances.TryGetValue(fsmKey, out List<Fsm>? instances) ? instances : new List<Fsm>();
 
     // Called by FsmActivatedPatch's Postfix (FsmMasterPlugin.cs) right before it reapplies a pending edit
     // set, to keep _liveInstances in sync for FSMs built from an FsmTemplate. PlayMakerFSM.Awake() calls
@@ -188,19 +179,10 @@ internal sealed class FsmEditManager
     }
 
     // Every FsmKey with at least one edit currently in effect this session.
-    public IReadOnlyCollection<string> GetEditedFsmKeys() => _activeEdits.Keys;
+    public ICollection<string> GetEditedFsmKeys() => _activeEdits.Keys;
 
     public FsmEditSet? GetActiveEditSet(string fsmKey) =>
         _activeEdits.TryGetValue(fsmKey, out FsmEditSet? set) ? set : null;
-
-    // Records editSet as the active edit set for its FsmKey without touching any live Fsm - lets a caller
-    // that knows what edits *should* be in effect for a key before any matching instance exists yet (e.g.
-    // DebugModCompat priming a savestate's target edits before Silksong tears down and rebuilds the room)
-    // register that intent early. FsmActivatedPatch's Postfix (FsmMasterPlugin.cs) already calls
-    // GetActiveEditSet/ApplyEditSet for every Fsm the moment it finishes Preprocess(), so once this has run,
-    // the very first instance built for fsmKey picks up the primed edits before its own Start()/OnEnter -
-    // no separate apply pass, and nothing left to race.
-    public void PrimeActiveEditSet(FsmEditSet editSet) => _activeEdits[editSet.FsmKey] = editSet;
 
     // Applies every variable override, action field override, disabled state, transition retarget, and
     // sequencer override in editSet to every live Fsm instance sharing editSet.FsmKey.
@@ -208,7 +190,7 @@ internal sealed class FsmEditManager
     {
         if (!_liveInstances.TryGetValue(editSet.FsmKey, out List<Fsm>? instances) || instances.Count == 0)
         {
-            _logger.LogWarning($"[FsmMaster] No live instances found for fsm key '{editSet.FsmKey}'; skipping edit set.");
+            FsmMasterMod.Instance?.LogWarn($"[FsmMaster] No live instances found for fsm key '{editSet.FsmKey}'; skipping edit set.");
             return;
         }
 
@@ -528,7 +510,7 @@ internal sealed class FsmEditManager
         NamedVariable? variable = fsm.Variables.FindVariable(ov.Name);
         if (variable == null)
         {
-            _logger.LogWarning($"[FsmMaster] Variable '{ov.Name}' not found on fsm '{fsm.Name}'; skipping.");
+            FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Variable '{ov.Name}' not found on fsm '{fsm.Name}'; skipping.");
             return;
         }
 
@@ -540,13 +522,13 @@ internal sealed class FsmEditManager
 
         if (!SupportedVariableTypes.Contains(variable.VariableType))
         {
-            _logger.LogWarning($"[FsmMaster] Variable '{ov.Name}' on fsm '{fsm.Name}' has unsupported type '{variable.VariableType}' (object/array-reference variables are out of scope for this pass); skipping.");
+            FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Variable '{ov.Name}' on fsm '{fsm.Name}' has unsupported type '{variable.VariableType}' (object/array-reference variables are out of scope for this pass); skipping.");
             return;
         }
 
         if (variable.VariableType.ToString() != ov.VariableType)
         {
-            _logger.LogWarning($"[FsmMaster] Variable '{ov.Name}' on fsm '{fsm.Name}' is now type '{variable.VariableType}', expected '{ov.VariableType}'; skipping.");
+            FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Variable '{ov.Name}' on fsm '{fsm.Name}' is now type '{variable.VariableType}', expected '{ov.VariableType}'; skipping.");
             return;
         }
 
@@ -579,19 +561,19 @@ internal sealed class FsmEditManager
     {
         if (variable is not FsmArray array)
         {
-            _logger.LogWarning($"[FsmMaster] Variable '{ov.Name}' on fsm '{fsm.Name}' is not an array; skipping element edit.");
+            FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Variable '{ov.Name}' on fsm '{fsm.Name}' is not an array; skipping element edit.");
             return;
         }
 
         if (!SupportedArrayElementTypes.Contains(array.ElementType))
         {
-            _logger.LogWarning($"[FsmMaster] Variable '{ov.Name}' on fsm '{fsm.Name}' has unsupported array element type '{array.ElementType}'; skipping.");
+            FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Variable '{ov.Name}' on fsm '{fsm.Name}' has unsupported array element type '{array.ElementType}'; skipping.");
             return;
         }
 
         if (ov.ArrayIndex >= array.Length)
         {
-            _logger.LogWarning($"[FsmMaster] Variable '{ov.Name}' on fsm '{fsm.Name}' array index {ov.ArrayIndex} is out of range (length {array.Length}); skipping.");
+            FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Variable '{ov.Name}' on fsm '{fsm.Name}' array index {ov.ArrayIndex} is out of range (length {array.Length}); skipping.");
             return;
         }
 
@@ -656,21 +638,21 @@ internal sealed class FsmEditManager
         FsmState? state = fsm.GetState(ov.StateName);
         if (state == null || ov.ActionIndex < 0 || ov.ActionIndex >= state.Actions.Length)
         {
-            _logger.LogWarning($"[FsmMaster] State '{ov.StateName}' action index {ov.ActionIndex} not found on fsm '{fsm.Name}'; skipping.");
+            FsmMasterMod.Instance?.LogWarn($"[FsmMaster] State '{ov.StateName}' action index {ov.ActionIndex} not found on fsm '{fsm.Name}'; skipping.");
             return;
         }
 
         FsmStateAction action = state.Actions[ov.ActionIndex];
         if (action.GetType().Name != ov.ExpectedActionTypeName)
         {
-            _logger.LogWarning($"[FsmMaster] Action at '{ov.StateName}'[{ov.ActionIndex}] on fsm '{fsm.Name}' is '{action.GetType().Name}', expected '{ov.ExpectedActionTypeName}'; skipping.");
+            FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Action at '{ov.StateName}'[{ov.ActionIndex}] on fsm '{fsm.Name}' is '{action.GetType().Name}', expected '{ov.ExpectedActionTypeName}'; skipping.");
             return;
         }
 
         FieldInfo? field = action.GetType().GetField(ov.FieldName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         if (field == null)
         {
-            _logger.LogWarning($"[FsmMaster] Field '{ov.FieldName}' not found on action '{ov.ExpectedActionTypeName}'; skipping.");
+            FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Field '{ov.FieldName}' not found on action '{ov.ExpectedActionTypeName}'; skipping.");
             return;
         }
 
@@ -684,7 +666,7 @@ internal sealed class FsmEditManager
 
         if (!TryFormatValue(currentValue, out string formattedCurrent))
         {
-            _logger.LogWarning($"[FsmMaster] Field '{ov.FieldName}' on '{ov.ExpectedActionTypeName}' has unsupported type '{currentValue?.GetType().Name ?? "null"}'; skipping.");
+            FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Field '{ov.FieldName}' on '{ov.ExpectedActionTypeName}' has unsupported type '{currentValue?.GetType().Name ?? "null"}'; skipping.");
             return;
         }
 
@@ -719,14 +701,14 @@ internal sealed class FsmEditManager
     {
         if (fieldValue is not Array array || ov.ArrayIndex >= array.Length)
         {
-            _logger.LogWarning($"[FsmMaster] Field '{ov.FieldName}' on '{ov.ExpectedActionTypeName}' has no array element at index {ov.ArrayIndex}; skipping.");
+            FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Field '{ov.FieldName}' on '{ov.ExpectedActionTypeName}' has no array element at index {ov.ArrayIndex}; skipping.");
             return;
         }
 
         object? element = array.GetValue(ov.ArrayIndex);
         if (!TryFormatValue(element, out string formattedCurrent))
         {
-            _logger.LogWarning($"[FsmMaster] Field '{ov.FieldName}[{ov.ArrayIndex}]' on '{ov.ExpectedActionTypeName}' has unsupported type '{element?.GetType().Name ?? "null"}'; skipping.");
+            FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Field '{ov.FieldName}[{ov.ArrayIndex}]' on '{ov.ExpectedActionTypeName}' has unsupported type '{element?.GetType().Name ?? "null"}'; skipping.");
             return;
         }
 
@@ -864,7 +846,7 @@ internal sealed class FsmEditManager
         FsmState? state = fsm.GetState(stateName);
         if (state == null)
         {
-            _logger.LogWarning($"[FsmMaster] State '{stateName}' not found on fsm '{fsm.Name}'; skipping disable.");
+            FsmMasterMod.Instance?.LogWarn($"[FsmMaster] State '{stateName}' not found on fsm '{fsm.Name}'; skipping disable.");
             return;
         }
 
@@ -910,12 +892,19 @@ internal sealed class FsmEditManager
             // own Fsm.Preprocess() actually runs, which is preceded by InitData() setting state.Fsm - the
             // re-invocation above then skips straight to this exit-event lookup and (assuming a
             // CANCEL/FINISHED/NEXT transition exists) completes the wiring then.
-            _logger.LogWarning($"[FsmMaster] Fsm '{fsm.Name}' hasn't activated yet (owning object inactive); state '{stateName}' has its actions disabled but its exit event can't be resolved until this instance activates.");
-            _pendingActivationFsmKeys.Add(fsmKey);
+            // PollPendingActivations retries every key in _pendingActivationFsmKeys once per frame, and
+            // an FSM whose owning GameObject never activates this session (a real, reachable case once
+            // FindAllPlayMakerFsms started discovering inactive objects) would otherwise hit this branch
+            // and log again on every single retry forever. Add()'s own "was this newly inserted" result
+            // gates the warning to just the first time this key starts waiting.
+            if (_pendingActivationFsmKeys.Add(fsmKey))
+            {
+                FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Fsm '{fsm.Name}' hasn't activated yet (owning object inactive); state '{stateName}' has its actions disabled but its exit event can't be resolved until this instance activates.");
+            }
         }
         else
         {
-            _logger.LogWarning($"[FsmMaster] State '{stateName}' on fsm '{fsm.Name}' has no CANCEL/FINISHED/NEXT transition and no FsmEvent-valued action field to fall back on; leaving it inert with no exit.");
+            FsmMasterMod.Instance?.LogWarn($"[FsmMaster] State '{stateName}' on fsm '{fsm.Name}' has no CANCEL/FINISHED/NEXT transition and no FsmEvent-valued action field to fall back on; leaving it inert with no exit.");
         }
 
         FsmEditSet active = GetOrCreateActiveEditSet(fsmKey);
@@ -967,7 +956,8 @@ internal sealed class FsmEditManager
                         lastFound = fsmEvent;
                         break;
                     case FsmEvent[] { Length: > 0 } fsmEvents:
-                        lastFound = fsmEvents[^1];
+                        // fsmEvents[^1] (System.Index) isn't available on net35.
+                        lastFound = fsmEvents[fsmEvents.Length - 1];
                         break;
                 }
             }
@@ -1007,7 +997,7 @@ internal sealed class FsmEditManager
         if (transition == null)
         {
             string where = isGlobal ? "global transitions" : $"state '{retarget.StateName}'";
-            _logger.LogWarning($"[FsmMaster] Transition for event '{retarget.EventName}' not found on {where} on fsm '{fsm.Name}'; skipping.");
+            FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Transition for event '{retarget.EventName}' not found on {where} on fsm '{fsm.Name}'; skipping.");
             return;
         }
 
@@ -1280,20 +1270,20 @@ internal sealed class FsmEditManager
         FsmState? state = fsm.GetState(seq.StateName);
         if (state == null)
         {
-            _logger.LogWarning($"[FsmMaster] State '{seq.StateName}' not found on fsm '{fsm.Name}'; skipping sequencer install.");
+            FsmMasterMod.Instance?.LogWarn($"[FsmMaster] State '{seq.StateName}' not found on fsm '{fsm.Name}'; skipping sequencer install.");
             return;
         }
 
         if (seq.Pattern.Count == 0)
         {
-            _logger.LogWarning($"[FsmMaster] Sequencer pattern for state '{seq.StateName}' on fsm '{fsm.Name}' is empty; skipping.");
+            FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Sequencer pattern for state '{seq.StateName}' on fsm '{fsm.Name}' is empty; skipping.");
             return;
         }
 
         int idx = FsmActionSequencer.IndexRandomEventAction(state, seq.ActionIndex);
         if (idx < 0)
         {
-            _logger.LogWarning($"[FsmMaster] No random-event action at rank {seq.ActionIndex} on state '{seq.StateName}' on fsm '{fsm.Name}'; skipping sequencer install.");
+            FsmMasterMod.Instance?.LogWarn($"[FsmMaster] No random-event action at rank {seq.ActionIndex} on state '{seq.StateName}' on fsm '{fsm.Name}'; skipping sequencer install.");
             return;
         }
 
@@ -1321,8 +1311,14 @@ internal sealed class FsmEditManager
         // this instance the moment it activates within the same scene - it just can't happen right now.
         if (original.State == null)
         {
-            _logger.LogWarning($"[FsmMaster] Fsm '{fsm.Name}' hasn't activated yet (owning object inactive); sequencer override for state '{seq.StateName}' recorded but not installed on this instance.");
-            _pendingActivationFsmKeys.Add(fsmKey);
+            // See DisableState's identical guard for why the warning is gated on Add()'s "newly inserted"
+            // result rather than logged unconditionally - PollPendingActivations retries this key every
+            // frame, and an FSM that never activates this session would otherwise spam this warning
+            // forever.
+            if (_pendingActivationFsmKeys.Add(fsmKey))
+            {
+                FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Fsm '{fsm.Name}' hasn't activated yet (owning object inactive); sequencer override for state '{seq.StateName}' recorded but not installed on this instance.");
+            }
             BumpEditGeneration();
             return;
         }
@@ -1359,7 +1355,7 @@ internal sealed class FsmEditManager
         original.InsertActionAfter(sequencer);
 
         FsmPristineSnapshot snapshot = GetOrCreateSnapshot(fsmKey);
-        snapshot.InstalledSequencers.Add((original, sequencer));
+        snapshot.InstalledSequencers.Add(new SequencerInstallation(original, sequencer));
 
         BumpEditGeneration();
     }
@@ -1612,7 +1608,10 @@ internal sealed class FsmEditManager
         VariableType.Rect => FormatFloats(((FsmRect)variable).Value.x, ((FsmRect)variable).Value.y, ((FsmRect)variable).Value.width, ((FsmRect)variable).Value.height),
         VariableType.Quaternion => FormatFloats(((FsmQuaternion)variable).Value.x, ((FsmQuaternion)variable).Value.y, ((FsmQuaternion)variable).Value.z, ((FsmQuaternion)variable).Value.w),
         VariableType.Color => FormatFloats(((FsmColor)variable).Value.r, ((FsmColor)variable).Value.g, ((FsmColor)variable).Value.b, ((FsmColor)variable).Value.a),
-        VariableType.Enum => ((FsmEnum)variable).ToInt().ToString(CultureInfo.InvariantCulture),
+        // FsmEnum has no ToInt() on this PlayMaker version (verified absent, not omitted by mistake) -
+        // Value is already a boxed System.Enum, so this converts the same way TryFormatValue's own
+        // `case Enum e` branch does elsewhere in this file.
+        VariableType.Enum => Convert.ToInt32(((FsmEnum)variable).Value, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture),
         _ => "",
     };
 
@@ -1659,8 +1658,9 @@ internal sealed class FsmEditManager
         }
     }
 
+    // string.Join(string, IEnumerable<string>) isn't available on net35 - only the string[] overload is.
     private static string FormatFloats(params float[] values) =>
-        string.Join(",", values.Select(v => v.ToString("R", CultureInfo.InvariantCulture)));
+        string.Join(",", values.Select(v => v.ToString("R", CultureInfo.InvariantCulture)).ToArray());
 
     private static float[] ParseFloats(string s, int count)
     {

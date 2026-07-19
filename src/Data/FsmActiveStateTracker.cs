@@ -1,21 +1,23 @@
-using System;
 using System.Collections.Generic;
 using HutongGames.PlayMaker;
 using UnityEngine;
 
 namespace FsmMaster;
 
-// Tracks which states an FSM's live Fsm instance has actually entered since the last reconciliation,
-// via Fsm.StateChanged - a plain public Action<FsmState> field, invoked synchronously from EnterState
-// right before state.OnEnter() runs. PlayMaker can chain several state entries within a single Unity
-// Update() call - one event immediately causing another transition, and so on - so polling
-// Fsm.ActiveStateName once per rendered frame (the graph overlay's previous approach) silently drops
-// every intermediate state a multi-hop chain passed through within that same frame. Hooking
-// StateChanged instead observes every one of them, in order, as they happen.
+// Tracks which states an FSM's live Fsm instance has actually entered since the last reconciliation, via
+// FsmStateEnteredPatch's static StateEntered event (a Harmony postfix on Fsm.EnterState, since this
+// PlayMaker version has no StateChanged field/event to subscribe to directly). PlayMaker can chain
+// several state entries within a single Unity Update() call - one event immediately causing another
+// transition, and so on - so polling Fsm.ActiveStateName once per rendered frame (the graph overlay's
+// previous approach) silently drops every intermediate state a multi-hop chain passed through within
+// that same frame. Observing every EnterState call instead sees every one of them, in order, as they
+// happen.
 //
 // Only ever tracks whichever FSMs FsmGraphOverlay is actually drawing this frame (EnsureTracked is
 // called once per DrawGraph pass, for the active tab plus any pinned tabs) - not every live FSM in the
-// scene, since most of those never have a graph open to show this on.
+// scene, since most of those never have a graph open to show this on. The StateEntered event itself
+// fires for every FSM in the game regardless, but the per-event work here is just a lookup against this
+// small tracked set, not a subscription per FSM.
 internal sealed class FsmActiveStateTracker
 {
     private const float FadeDurationSeconds = 1f;
@@ -23,10 +25,9 @@ internal sealed class FsmActiveStateTracker
     private sealed class TrackedFsm
     {
         public Fsm Instance = null!;
-        public Action<FsmState> Handler = null!;
 
-        // States entered (via the StateChanged hook) since the last CommitFrame reconciliation - can
-        // hold more than one entry when the FSM chained several transitions within a single Update().
+        // States entered (via StateEntered) since the last CommitFrame reconciliation - can hold more
+        // than one entry when the FSM chained several transitions within a single Update().
         public readonly HashSet<string> EnteredSinceCommit = new();
 
         // "Was active, no longer is" - stateName -> Time.unscaledTime it stopped being active. Removed
@@ -39,6 +40,22 @@ internal sealed class FsmActiveStateTracker
     private readonly Dictionary<string, TrackedFsm> _tracked = new();
     private readonly HashSet<string> _visibleThisFrame = new();
 
+    public FsmActiveStateTracker()
+    {
+        FsmStateEnteredPatch.StateEntered += OnStateEntered;
+    }
+
+    private void OnStateEntered(Fsm instance, FsmState state)
+    {
+        foreach (KeyValuePair<string, TrackedFsm> pair in _tracked)
+        {
+            if (ReferenceEquals(pair.Value.Instance, instance))
+            {
+                pair.Value.EnteredSinceCommit.Add(state.Name);
+            }
+        }
+    }
+
     // Called once per DrawGraph pass - both the interactive active tab and every frozen pinned-tab
     // ghost - with whatever live Fsm instance that tab is currently showing. Safe to call on every
     // OnGUI event (Layout, Repaint, mouse events all redraw the same graph), not just Repaint, since
@@ -48,25 +65,17 @@ internal sealed class FsmActiveStateTracker
     {
         _visibleThisFrame.Add(fsmKey);
 
-        if (_tracked.TryGetValue(fsmKey, out TrackedFsm? existing))
+        if (_tracked.TryGetValue(fsmKey, out TrackedFsm? existing) && ReferenceEquals(existing.Instance, instance))
         {
-            if (ReferenceEquals(existing.Instance, instance))
-            {
-                return;
-            }
-
-            // A different Fsm instance now answers to this FsmKey - a scene reload rebound the tab to
-            // a freshly-Awoken FSM (FsmTabManager.RebindAfterRefresh). The old instance's own
-            // subscription would otherwise sit there forever, since nothing else ever tears it down
-            // once its owning scene is gone.
-            existing.Instance.StateChanged -= existing.Handler;
-            _tracked.Remove(fsmKey);
+            return;
         }
 
-        var entry = new TrackedFsm { Instance = instance };
-        entry.Handler = state => entry.EnteredSinceCommit.Add(state.Name);
-        instance.StateChanged += entry.Handler;
-        _tracked[fsmKey] = entry;
+        // Either nothing was tracked under this key yet, or a different Fsm instance now answers to it
+        // (a scene reload rebound the tab to a freshly-Awoken FSM - FsmTabManager.RebindAfterRefresh).
+        // There's no per-instance subscription to unwind here, unlike a real StateChanged field would
+        // have needed - OnStateEntered matches by instance reference every time it fires, so simply
+        // replacing the tracked entry is enough.
+        _tracked[fsmKey] = new TrackedFsm { Instance = instance };
     }
 
     // Called once per rendered frame - gated by the caller (FsmGraphOverlay.OnGUI) on
@@ -82,12 +91,9 @@ internal sealed class FsmActiveStateTracker
             TrackedFsm entry = pair.Value;
 
             // The owning PlayMakerFSM was destroyed (scene unload), or no tab drew this FSM this frame
-            // (its tab was closed/unpinned) - nothing left to reconcile. The instance itself, being a
-            // plain C# object rather than a UnityEngine.Object, is left for the GC once this entry (the
-            // last thing holding a reference to it) is dropped.
+            // (its tab was closed/unpinned) - nothing left to reconcile.
             if (entry.Instance.FsmComponent == null || !_visibleThisFrame.Contains(fsmKey))
             {
-                entry.Instance.StateChanged -= entry.Handler;
                 (toRemove ??= new List<string>()).Add(fsmKey);
                 continue;
             }
@@ -158,18 +164,12 @@ internal sealed class FsmActiveStateTracker
     public bool HasAnyFading(string fsmKey) =>
         _tracked.TryGetValue(fsmKey, out TrackedFsm? entry) && entry.FadingStates.Count > 0;
 
-    // Unsubscribes every live hook - called from FsmGraphOverlay.Shutdown() (itself called from
-    // FsmMasterPlugin.OnDestroy), so a ScriptEngine reload never leaves this Awake's handler closures
-    // still subscribed to a live Fsm's StateChanged field alongside whatever the next Awake's own
-    // instance subscribes afresh, which would otherwise leave two independent trackers' handlers both
-    // firing on every future state change.
+    // Clears every tracked FSM. There's no per-instance subscription to unwind (see EnsureTracked) and
+    // this tracker's own subscription to the static StateEntered event lives for the process's lifetime,
+    // matching every other Harmony patch in this mod - so this only ever needs to reset tracking state,
+    // not tear down a hook.
     public void UnsubscribeAll()
     {
-        foreach (TrackedFsm entry in _tracked.Values)
-        {
-            entry.Instance.StateChanged -= entry.Handler;
-        }
-
         _tracked.Clear();
         _visibleThisFrame.Clear();
     }

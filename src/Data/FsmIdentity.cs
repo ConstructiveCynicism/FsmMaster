@@ -10,7 +10,10 @@ namespace FsmMaster;
 // suffix recovers the shared base name duplicates were copied from.
 internal static class FsmIdentity
 {
-    private static readonly Regex DuplicateSuffixPattern = new(@"^(?<base>.+) \(\d+\)$", RegexOptions.Compiled);
+    // RegexOptions.Compiled needs runtime code generation, which throws on this game's embedded Mono
+    // (confirmed empirically - ArgumentOutOfRangeException out of the regex constructor itself). Plain
+    // interpreted regex is fine here; this only runs once per FSM per scene scan, not per frame.
+    private static readonly Regex DuplicateSuffixPattern = new(@"^(?<base>.+) \(\d+\)$");
 
     public static string GetObjectBaseName(string gameObjectName)
     {

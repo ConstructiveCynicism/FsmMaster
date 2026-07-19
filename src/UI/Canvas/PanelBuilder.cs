@@ -1,5 +1,4 @@
 using System.Collections.Generic;
-using BepInEx.Logging;
 using UnityEngine;
 
 namespace FsmMaster;
@@ -12,7 +11,6 @@ namespace FsmMaster;
 internal sealed class PanelBuilder
 {
     private readonly CanvasPanel _panel;
-    private readonly ManualLogSource? _logger;
     private readonly List<Entry> _entries = new();
 
     public bool Horizontal { get; set; }
@@ -20,10 +18,9 @@ internal sealed class PanelBuilder
     public float OuterPadding { get; set; }
     public float InnerPadding { get; set; }
 
-    public PanelBuilder(CanvasPanel panel, ManualLogSource? logger = null)
+    public PanelBuilder(CanvasPanel panel)
     {
         _panel = panel;
-        _logger = logger;
     }
 
     public T AppendFixed<T>(T element, float length) where T : CanvasNode => Append(element, LengthType.Fixed, length);
@@ -78,7 +75,7 @@ internal sealed class PanelBuilder
             flexLength = (Length() - totalFixedLength) / flexCount;
             if (Length() < totalFixedLength)
             {
-                _logger?.LogWarning($"[FsmMaster] PanelBuilder: '{_panel.Name}' has no room for flex elements; using 0 length.");
+                FsmMasterMod.Instance?.LogWarn($"[FsmMaster] PanelBuilder: '{_panel.Name}' has no room for flex elements; using 0 length.");
                 flexLength = 0f;
             }
         }
@@ -101,7 +98,17 @@ internal sealed class PanelBuilder
                 float height = length;
                 if (Horizontal)
                 {
-                    (x, y, width, height) = (y, x, height, width);
+                    // System.ValueTuple doesn't exist in net35's mscorlib, so a tuple-literal swap
+                    // ((x, y, width, height) = (y, x, height, width)) isn't available here either -
+                    // explicit temporaries stand in for it.
+                    float origX = x;
+                    float origY = y;
+                    float origWidth = width;
+                    float origHeight = height;
+                    x = origY;
+                    y = origX;
+                    width = origHeight;
+                    height = origWidth;
                 }
 
                 entry.Element.LocalPosition = new Vector2(x, y);

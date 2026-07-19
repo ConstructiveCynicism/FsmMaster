@@ -213,9 +213,31 @@ internal sealed class FsmOpenDropdown : CanvasPanel
         _rowsScrollbar.Size = new Vector2(ScrollbarWidth, rowsViewportHeight);
     }
 
-    private List<(string Label, Action OnClick)> BuildRowList()
+    // System.ValueTuple doesn't exist in net35's mscorlib, so BuildRowList can't return a
+    // List<(string Label, Action OnClick)> the way it did on the Silksong branch - this struct stands
+    // in for it. Deconstruct lets the existing `foreach ((string label, Action onClick) in ...)` call
+    // site in RebuildRows keep working unchanged.
+    private readonly struct DropdownRow
     {
-        var rows = new List<(string, Action)>();
+        public readonly string Label;
+        public readonly Action OnClick;
+
+        public DropdownRow(string label, Action onClick)
+        {
+            Label = label;
+            OnClick = onClick;
+        }
+
+        public void Deconstruct(out string label, out Action onClick)
+        {
+            label = Label;
+            onClick = OnClick;
+        }
+    }
+
+    private List<DropdownRow> BuildRowList()
+    {
+        var rows = new List<DropdownRow>();
         if (_sceneGroups == null)
         {
             return rows;
@@ -227,7 +249,7 @@ internal sealed class FsmOpenDropdown : CanvasPanel
                 for (int i = 0; i < _sceneGroups.Count; i++)
                 {
                     int index = i;
-                    rows.Add((_sceneGroups[i].SceneName, () =>
+                    rows.Add(new DropdownRow(_sceneGroups[i].SceneName, () =>
                     {
                         _selectedSceneIndex = index;
                         _level = Level.Objects;
@@ -242,7 +264,7 @@ internal sealed class FsmOpenDropdown : CanvasPanel
                 for (int i = 0; i < scene.Objects.Count; i++)
                 {
                     int index = i;
-                    rows.Add((scene.Objects[i].Label, () =>
+                    rows.Add(new DropdownRow(scene.Objects[i].Label, () =>
                     {
                         _selectedObjectIndex = index;
                         _level = Level.Fsms;
@@ -257,7 +279,7 @@ internal sealed class FsmOpenDropdown : CanvasPanel
                 for (int i = 0; i < obj.FsmLabels.Count; i++)
                 {
                     int snapshotIndex = obj.FsmIndices[i];
-                    rows.Add((obj.FsmLabels[i], () => OpenFsm(snapshotIndex)));
+                    rows.Add(new DropdownRow(obj.FsmLabels[i], () => OpenFsm(snapshotIndex)));
                 }
 
                 break;

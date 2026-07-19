@@ -1,8 +1,7 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
-using BepInEx.Logging;
 using HutongGames.PlayMaker;
 using UnityEngine;
 using UnityEngine.EventSystems;
@@ -96,10 +95,45 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
         Sequencer,
     }
 
+    // System.ValueTuple doesn't exist in net35's mscorlib, so a Sequencer block's key can't be the
+    // (string StateName, int ActionRank) tuple the Silksong branch used it as - this struct stands in
+    // for it. Used as a Dictionary/HashSet key throughout this file (unlike this file's other structs,
+    // which are plain data carriers), so it needs real structural equality, not just field access -
+    // IEquatable<T> plus the Equals/GetHashCode overrides below match what ValueTuple provides
+    // automatically.
+    private readonly struct SequencerBlockKey : IEquatable<SequencerBlockKey>
+    {
+        public readonly string StateName;
+        public readonly int ActionRank;
+
+        public SequencerBlockKey(string stateName, int actionRank)
+        {
+            StateName = stateName;
+            ActionRank = actionRank;
+        }
+
+        public void Deconstruct(out string stateName, out int actionRank)
+        {
+            stateName = StateName;
+            actionRank = ActionRank;
+        }
+
+        public bool Equals(SequencerBlockKey other) => StateName == other.StateName && ActionRank == other.ActionRank;
+
+        public override bool Equals(object? obj) => obj is SequencerBlockKey other && Equals(other);
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                return ((StateName.GetHashCode()) * 397) ^ ActionRank;
+            }
+        }
+    }
+
     private readonly UICommon _ui;
     private readonly FsmEditManager _editManager;
     private readonly FsmVariableTracker _tracker;
-    private readonly ManualLogSource _logger;
     private readonly Action<string> _showStatus;
     private readonly CanvasText _header;
     private readonly CanvasToggleDot _stateHeaderDot;
@@ -161,11 +195,11 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
     // (which persists independently, e.g. after Save/Load) when the tab's rows are built - see
     // CollectOpenSequencerKeys. A block leaves this set (and the live sequencer, if any, is uninstalled)
     // only via its own close button - emptying its pattern alone does not close it.
-    private readonly Dictionary<string, HashSet<(string StateName, int ActionRank)>> _openSequencerBlocks = new();
+    private readonly Dictionary<string, HashSet<SequencerBlockKey>> _openSequencerBlocks = new();
 
     // Rebuilt every RebuildContent pass for the Sequencer subtab alongside the rows themselves - lets a
     // click on the Actions tab's own Sequencer button scroll to/select the block it just opened.
-    private readonly Dictionary<(string StateName, int ActionRank), CanvasSectionBlock> _sequencerBlockWidgets = new();
+    private readonly Dictionary<SequencerBlockKey, CanvasSectionBlock> _sequencerBlockWidgets = new();
 
     // A block's own Sequence-column hit area (an invisible CanvasPanel, positioned/sized the normal way)
     // and its individual row widgets - used by EndDrag to find which block (if any) a drag was dropped
@@ -173,10 +207,10 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
     // (via CanvasNode.IsPointOver) rather than re-deriving content-space coordinates by hand. Cross-block
     // drops are rejected: only a drop landing inside the SAME block the drag originated from
     // (_dragBlockKey) is accepted.
-    private readonly Dictionary<(string StateName, int ActionRank), CanvasNode> _sequenceColumnHitAreas = new();
-    private readonly Dictionary<(string StateName, int ActionRank), List<CanvasNode>> _sequenceRowWidgets = new();
+    private readonly Dictionary<SequencerBlockKey, CanvasNode> _sequenceColumnHitAreas = new();
+    private readonly Dictionary<SequencerBlockKey, List<CanvasNode>> _sequenceRowWidgets = new();
 
-    private (string StateName, int ActionRank)? _dragBlockKey;
+    private SequencerBlockKey? _dragBlockKey;
     private string? _dragEventName;
     private int? _dragSourceIndex;
 
@@ -187,12 +221,11 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
     private readonly CanvasPanel _dragGhost;
     private readonly CanvasText _dragGhostText;
 
-    public FsmActiveStatePanel(UICommon ui, FsmEditManager editManager, FsmVariableTracker tracker, ManualLogSource logger, Action<string> showStatus) : base("ActiveStatePanel")
+    public FsmActiveStatePanel(UICommon ui, FsmEditManager editManager, FsmVariableTracker tracker, Action<string> showStatus) : base("ActiveStatePanel")
     {
         _ui = ui;
         _editManager = editManager;
         _tracker = tracker;
-        _logger = logger;
         _showStatus = showStatus;
 
         _header = Add(new CanvasText("Header", ui) { Text = "No state selected" });
@@ -623,7 +656,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
                 }
                 catch (Exception e)
                 {
-                    _logger.LogWarning($"[FsmMaster] Failed to set action field '{stateName}'[{actionIndex}].{fieldName}: {e.Message}");
+                    FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Failed to set action field '{stateName}'[{actionIndex}].{fieldName}: {e.Message}");
                 }
             }, labelColor);
             return;
@@ -638,7 +671,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
             }
             catch (Exception e)
             {
-                _logger.LogWarning($"[FsmMaster] Failed to set action field '{stateName}'[{actionIndex}].{fieldName}: {e.Message}");
+                FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Failed to set action field '{stateName}'[{actionIndex}].{fieldName}: {e.Message}");
             }
 
             return ReadCurrentFieldText();
@@ -698,7 +731,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
                     }
                     catch (Exception e)
                     {
-                        _logger.LogWarning($"[FsmMaster] Failed to set action field '{stateName}'[{actionIndex}].{fieldName}[{capturedIndex}]: {e.Message}");
+                        FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Failed to set action field '{stateName}'[{actionIndex}].{fieldName}[{capturedIndex}]: {e.Message}");
                     }
                 }, labelColor);
                 continue;
@@ -716,7 +749,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
                 }
                 catch (Exception e)
                 {
-                    _logger.LogWarning($"[FsmMaster] Failed to set action field '{stateName}'[{actionIndex}].{fieldName}[{capturedIndex}]: {e.Message}");
+                    FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Failed to set action field '{stateName}'[{actionIndex}].{fieldName}[{capturedIndex}]: {e.Message}");
                 }
 
                 return ReadCurrentElementText();
@@ -806,7 +839,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
 
         if (!FsmEditManager.IsSupportedArrayElementType(array.ElementType))
         {
-            AddReadOnlyRow(content, cursor, $"{variableName} ({array.ElementType})", () => string.Join(", ", array.Values), _ui.ReadOnlyColor, FieldIndent);
+            AddReadOnlyRow(content, cursor, $"{variableName} ({array.ElementType})", () => string.Join(", ", array.Values.Select(v => v?.ToString() ?? "null").ToArray()), _ui.ReadOnlyColor, FieldIndent);
             return;
         }
 
@@ -842,7 +875,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
                     }
                     catch (Exception e)
                     {
-                        _logger.LogWarning($"[FsmMaster] Failed to set '{variableName}[{capturedIndex}]': {e.Message}");
+                        FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Failed to set '{variableName}[{capturedIndex}]': {e.Message}");
                     }
                 });
                 continue;
@@ -861,7 +894,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
                 }
                 catch (Exception e)
                 {
-                    _logger.LogWarning($"[FsmMaster] Failed to set '{variableName}[{capturedIndex}]': {e.Message}");
+                    FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Failed to set '{variableName}[{capturedIndex}]': {e.Message}");
                 }
 
                 return ReadCurrentElementText();
@@ -928,7 +961,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
                 }
                 catch (Exception e)
                 {
-                    _logger.LogWarning($"[FsmMaster] Failed to set variable '{variableName}': {e.Message}");
+                    FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Failed to set variable '{variableName}': {e.Message}");
                 }
             });
             return;
@@ -943,7 +976,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
             }
             catch (Exception e)
             {
-                _logger.LogWarning($"[FsmMaster] Failed to set variable '{variableName}': {e.Message}");
+                FsmMasterMod.Instance?.LogWarn($"[FsmMaster] Failed to set variable '{variableName}': {e.Message}");
             }
 
             return ReadCurrentVariableText();
@@ -1000,7 +1033,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
 
     private void BuildSequencerRows(CanvasPanel content, RowCursor cursor, string fsmKey, FsmInfo fsm)
     {
-        HashSet<(string StateName, int ActionRank)> keys = CollectOpenSequencerKeys(fsmKey);
+        HashSet<SequencerBlockKey> keys = CollectOpenSequencerKeys(fsmKey);
         if (keys.Count == 0)
         {
             return;
@@ -1043,20 +1076,20 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
     // Union of every state+rank with an actually-installed SequencerOverride (persists independently of
     // this panel, e.g. after Save/Load or a scene revisit) and every state+rank the user has explicitly
     // opened this session but may not have populated yet (see _openSequencerBlocks's own comment).
-    private HashSet<(string StateName, int ActionRank)> CollectOpenSequencerKeys(string fsmKey)
+    private HashSet<SequencerBlockKey> CollectOpenSequencerKeys(string fsmKey)
     {
-        var keys = new HashSet<(string, int)>();
+        var keys = new HashSet<SequencerBlockKey>();
 
         FsmEditSet? editSet = _editManager.GetActiveEditSet(fsmKey);
         if (editSet != null)
         {
             foreach (SequencerOverride s in editSet.SequencerOverrides)
             {
-                keys.Add((s.StateName, s.ActionIndex));
+                keys.Add(new SequencerBlockKey(s.StateName, s.ActionIndex));
             }
         }
 
-        if (_openSequencerBlocks.TryGetValue(fsmKey, out HashSet<(string, int)>? opened))
+        if (_openSequencerBlocks.TryGetValue(fsmKey, out HashSet<SequencerBlockKey>? opened))
         {
             keys.UnionWith(opened);
         }
@@ -1122,10 +1155,10 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
         sequenceHitArea.LocalPosition = new Vector2(leftX, columnTopY);
         sequenceHitArea.Size = new Vector2(columnWidth, cursor.Y - columnTopY);
         sequenceHitArea.Build();
-        _sequenceColumnHitAreas[(stateName, actionRank)] = sequenceHitArea;
+        _sequenceColumnHitAreas[new SequencerBlockKey(stateName, actionRank)] = sequenceHitArea;
 
         EndBlock(block, cursor);
-        _sequencerBlockWidgets[(stateName, actionRank)] = block;
+        _sequencerBlockWidgets[new SequencerBlockKey(stateName, actionRank)] = block;
     }
 
     // Left column: the ordered pattern - a draggable, reorderable, deletable row per entry. Records this
@@ -1136,7 +1169,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
     // instead of being rejected right past the last row's own bottom edge.
     private float BuildSequenceColumn(CanvasPanel content, RowCursor cursor, string fsmKey, string stateName, int actionRank, List<string> pattern, float x, float y, float width)
     {
-        (string, int) blockKey = (stateName, actionRank);
+        var blockKey = new SequencerBlockKey(stateName, actionRank);
 
         CanvasText header = content.Add(new CanvasText($"Row{cursor.Count++}", _ui) { Text = "Sequence" });
         header.Color = _ui.ReadOnlyColor;
@@ -1271,7 +1304,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
         eventsHeader.Build();
         y += RowHeight;
 
-        (string, int) blockKey = (stateName, actionRank);
+        var blockKey = new SequencerBlockKey(stateName, actionRank);
         foreach (string eventName in candidateEvents)
         {
             CanvasButton eventBlock = content.Add(new CanvasButton($"Row{cursor.Count++}", _ui));
@@ -1376,9 +1409,9 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
     {
         _editManager.RemoveSequencer(fsmKey, stateName, actionRank);
 
-        if (_openSequencerBlocks.TryGetValue(fsmKey, out HashSet<(string, int)>? opened))
+        if (_openSequencerBlocks.TryGetValue(fsmKey, out HashSet<SequencerBlockKey>? opened))
         {
-            opened.Remove((stateName, actionRank));
+            opened.Remove(new SequencerBlockKey(stateName, actionRank));
         }
 
         _showStatus("Sequencer Removed");
@@ -1394,7 +1427,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
     // ApplySequencer call per completed gesture is simpler and still gives correct, predictable
     // reordering.
 
-    private void BeginDragFromEvents((string StateName, int ActionRank) blockKey, string eventName, PointerEventData e)
+    private void BeginDragFromEvents(SequencerBlockKey blockKey, string eventName, PointerEventData e)
     {
         _dragBlockKey = blockKey;
         _dragEventName = eventName;
@@ -1402,7 +1435,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
         ShowDragGhost(eventName, e);
     }
 
-    private void BeginDragReorder((string StateName, int ActionRank) blockKey, int sourceIndex, string eventName, PointerEventData e)
+    private void BeginDragReorder(SequencerBlockKey blockKey, int sourceIndex, string eventName, PointerEventData e)
     {
         _dragBlockKey = blockKey;
         _dragEventName = eventName;
@@ -1431,7 +1464,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
     {
         _dragGhost.ActiveSelf = false;
 
-        (string StateName, int ActionRank)? blockKey = _dragBlockKey;
+        SequencerBlockKey? blockKey = _dragBlockKey;
         string? draggedEventName = _dragEventName;
         int? sourceIndex = _dragSourceIndex;
         _dragBlockKey = null;
@@ -1479,7 +1512,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
     // (already fully resolved, including scroll offset, via the same LocalPosition/Parent.Position chain
     // that positions it on screen in the first place), rather than re-deriving content-space coordinates
     // by hand. Returns rows.Count (append) if the drop landed past the last row's own midpoint.
-    private int ComputeDropIndex((string StateName, int ActionRank) blockKey, Vector2 screenPoint)
+    private int ComputeDropIndex(SequencerBlockKey blockKey, Vector2 screenPoint)
     {
         if (!_sequenceRowWidgets.TryGetValue(blockKey, out List<CanvasNode>? rows))
         {
@@ -1548,13 +1581,38 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
 
     // ---------------- Row-building primitives ----------------
 
-    private (float LabelWidth, float ValueX, float ValueWidth) ComputeColumns(float indent)
+    // System.ValueTuple doesn't exist in net35's mscorlib, so ComputeColumns can't return a named
+    // tuple - this struct stands in for it. Deconstruct lets the existing
+    // `(float labelWidth, float valueX, float valueWidth) = ComputeColumns(indent)` call sites below
+    // keep working unchanged.
+    private readonly struct RowColumns
+    {
+        public readonly float LabelWidth;
+        public readonly float ValueX;
+        public readonly float ValueWidth;
+
+        public RowColumns(float labelWidth, float valueX, float valueWidth)
+        {
+            LabelWidth = labelWidth;
+            ValueX = valueX;
+            ValueWidth = valueWidth;
+        }
+
+        public void Deconstruct(out float labelWidth, out float valueX, out float valueWidth)
+        {
+            labelWidth = LabelWidth;
+            valueX = ValueX;
+            valueWidth = ValueWidth;
+        }
+    }
+
+    private RowColumns ComputeColumns(float indent)
     {
         float available = Mathf.Max(0f, _scrollView.Size.x - indent - BlockRightGap);
         float labelWidth = available * 0.52f;
         float valueX = indent + labelWidth + UICommon.ScaleWidth(6);
         float valueWidth = Mathf.Max(0f, _scrollView.Size.x - BlockRightGap - valueX);
-        return (labelWidth, valueX, valueWidth);
+        return new RowColumns(labelWidth, valueX, valueWidth);
     }
 
     // Draws a small watch-toggle dot at the row's current indent and returns a bumped indent for the
@@ -1644,15 +1702,15 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
     // than creating a duplicate.
     private void OpenSequencerBlock(string fsmKey, string stateName, int actionRank)
     {
-        if (!_openSequencerBlocks.TryGetValue(fsmKey, out HashSet<(string, int)>? opened))
+        if (!_openSequencerBlocks.TryGetValue(fsmKey, out HashSet<SequencerBlockKey>? opened))
         {
-            opened = new HashSet<(string, int)>();
+            opened = new HashSet<SequencerBlockKey>();
             _openSequencerBlocks[fsmKey] = opened;
         }
 
         // HashSet.Add's own return value, not a separate Contains check - only a genuinely new block
         // (not just re-revealing one that was already open) counts as "inserting a sequencer."
-        if (opened.Add((stateName, actionRank)))
+        if (opened.Add(new SequencerBlockKey(stateName, actionRank)))
         {
             _showStatus("Sequencer Added");
         }
@@ -1661,7 +1719,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
         RebuildContent(_cachedFsm, _cachedStateName);
         _cachedSubTab = _activeSubTab;
 
-        if (_sequencerBlockWidgets.TryGetValue((stateName, actionRank), out CanvasSectionBlock? block))
+        if (_sequencerBlockWidgets.TryGetValue(new SequencerBlockKey(stateName, actionRank), out CanvasSectionBlock? block))
         {
             _scrollView.ScrollToShow(block.LocalPosition.y, block.Size.y);
             SelectBlock(block);
@@ -1670,7 +1728,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
 
     private bool IsSequencerOpen(string fsmKey, string stateName, int actionRank)
     {
-        if (_openSequencerBlocks.TryGetValue(fsmKey, out HashSet<(string, int)>? opened) && opened.Contains((stateName, actionRank)))
+        if (_openSequencerBlocks.TryGetValue(fsmKey, out HashSet<SequencerBlockKey>? opened) && opened.Contains(new SequencerBlockKey(stateName, actionRank)))
         {
             return true;
         }

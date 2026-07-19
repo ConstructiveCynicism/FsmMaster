@@ -3,6 +3,27 @@ using HutongGames.PlayMaker;
 
 namespace FsmMaster;
 
+// Stand-in for a (FsmStateAction Original, FsmStateAction Sequencer) named tuple - System.ValueTuple isn't
+// available on net35. Deconstruct is provided so call sites can still use `(original, sequencer) = ...` /
+// `foreach ((var original, var sequencer) in ...)` syntax unchanged.
+internal readonly struct SequencerInstallation
+{
+    public FsmStateAction Original { get; }
+    public FsmStateAction Sequencer { get; }
+
+    public SequencerInstallation(FsmStateAction original, FsmStateAction sequencer)
+    {
+        Original = original;
+        Sequencer = sequencer;
+    }
+
+    public void Deconstruct(out FsmStateAction original, out FsmStateAction sequencer)
+    {
+        original = Original;
+        sequencer = Sequencer;
+    }
+}
+
 // Everything needed to put one FsmKey's live instances back exactly as they were, captured lazily the first
 // time any edit actually touches that key in this session (not proactively for every untouched FSM).
 // OriginalValues reuses FsmEditSet's shape for the parts that round-trip as plain data
@@ -22,6 +43,6 @@ internal sealed class FsmPristineSnapshot
     // touched, since every duplicate gets its own action object.
     public List<FsmStateAction> InjectedExitActions { get; } = new();
 
-    // (originalAction, sequencerAction) for each sequencer installed - one entry per live instance touched.
-    public List<(FsmStateAction Original, FsmStateAction Sequencer)> InstalledSequencers { get; } = new();
+    // One entry per live instance touched, for each sequencer installed.
+    public List<SequencerInstallation> InstalledSequencers { get; } = new();
 }

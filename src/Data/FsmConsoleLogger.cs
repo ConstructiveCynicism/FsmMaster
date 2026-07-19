@@ -1,6 +1,7 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
-using BepInEx.Logging;
+using System.Globalization;
+using System.Linq;
 using HutongGames.PlayMaker;
 using UnityEngine;
 
@@ -9,16 +10,9 @@ namespace FsmMaster;
 // Formats an FsmSnapshot (produced by FsmDataCollector) as console log lines.
 internal sealed class FsmConsoleLogger
 {
-    private readonly ManualLogSource _logger;
-
-    public FsmConsoleLogger(ManualLogSource logger)
-    {
-        _logger = logger;
-    }
-
     public void LogSnapshot(FsmSnapshot snapshot)
     {
-        _logger.LogInfo($"[FsmMaster] Scene \"{snapshot.SceneName}\": {snapshot.Fsms.Count} live PlayMakerFSM instance(s)");
+        FsmMasterMod.Instance?.Log($"[FsmMaster] Scene \"{snapshot.SceneName}\": {snapshot.Fsms.Count} live PlayMakerFSM instance(s)");
 
         // snapshot.Fsms is only the cheap identity-only list (see FsmIdentityInfo) - the full
         // reflection walk is done here, on demand, per entry, rather than snapshot collection eagerly
@@ -39,46 +33,52 @@ internal sealed class FsmConsoleLogger
     // dump; it's also a standalone entry point for logging just one already-known FSM on demand.
     public void LogFsm(FsmInfo fsm)
     {
-        _logger.LogInfo($"[FsmMaster]   FSM \"{fsm.FsmName}\" on \"{fsm.GameObjectName}\" - state \"{fsm.ActiveStateName}\"");
+        FsmMasterMod.Instance?.Log($"[FsmMaster]   FSM \"{fsm.FsmName}\" on \"{fsm.GameObjectName}\" - state \"{fsm.ActiveStateName}\"");
         LogFsmDetails(fsm);
     }
 
     private void LogFsmDetails(FsmInfo fsm)
     {
-        _logger.LogInfo($"[FsmMaster]     {fsm.States.Count} state(s)");
+        FsmMasterMod.Instance?.Log($"[FsmMaster]     {fsm.States.Count} state(s)");
         foreach (FsmStateInfo state in fsm.States)
         {
-            _logger.LogInfo($"[FsmMaster]       State \"{state.Name}\"");
+            FsmMasterMod.Instance?.Log($"[FsmMaster]       State \"{state.Name}\"");
             Rect position = state.State.Position;
-            _logger.LogInfo(FormattableString.Invariant(
-                $"[FsmMaster]         Position=({position.x:F1}, {position.y:F1}, {position.width:F1}, {position.height:F1}) ColorIndex={state.State.ColorIndex}"));
+            // System.FormattableString/FormattableStringFactory don't exist in net35's mscorlib (a
+            // .NET 4.6 addition needed to convert an interpolated string to FormattableString), so an
+            // explicit string.Format with CultureInfo.InvariantCulture stands in for
+            // FormattableString.Invariant($"...").
+            FsmMasterMod.Instance?.Log(string.Format(
+                CultureInfo.InvariantCulture,
+                "[FsmMaster]         Position=({0:F1}, {1:F1}, {2:F1}, {3:F1}) ColorIndex={4}",
+                position.x, position.y, position.width, position.height, state.State.ColorIndex));
             LogActions(state.Actions);
             foreach (FsmTransitionInfo transition in state.Transitions)
             {
-                _logger.LogInfo($"[FsmMaster]         \"{transition.EventName}\" -> \"{transition.ToState}\"");
+                FsmMasterMod.Instance?.Log($"[FsmMaster]         \"{transition.EventName}\" -> \"{transition.ToState}\"");
             }
         }
 
         if (fsm.GlobalTransitions.Count > 0)
         {
-            _logger.LogInfo($"[FsmMaster]     {fsm.GlobalTransitions.Count} global transition(s)");
+            FsmMasterMod.Instance?.Log($"[FsmMaster]     {fsm.GlobalTransitions.Count} global transition(s)");
             foreach (FsmTransitionInfo transition in fsm.GlobalTransitions)
             {
-                _logger.LogInfo($"[FsmMaster]       \"{transition.EventName}\" -> \"{transition.ToState}\"");
+                FsmMasterMod.Instance?.Log($"[FsmMaster]       \"{transition.EventName}\" -> \"{transition.ToState}\"");
             }
         }
 
         LogFsmVariables(fsm.Fsm.Variables);
     }
 
-    private void LogActions(IReadOnlyList<FsmActionInfo> actions)
+    private void LogActions(List<FsmActionInfo> actions)
     {
-        _logger.LogInfo($"[FsmMaster]         {actions.Count} action(s)");
+        FsmMasterMod.Instance?.Log($"[FsmMaster]         {actions.Count} action(s)");
 
         for (int i = 0; i < actions.Count; i++)
         {
             FsmActionInfo action = actions[i];
-            _logger.LogInfo($"[FsmMaster]           [{i}] {action.ActionType.Name}");
+            FsmMasterMod.Instance?.Log($"[FsmMaster]           [{i}] {action.ActionType.Name}");
 
             foreach (FsmActionFieldInfo field in action.Fields)
             {
@@ -98,7 +98,7 @@ internal sealed class FsmConsoleLogger
                 LogActionFieldArray(action, fieldName, array.Length, i => array.GetValue(i));
                 break;
             default:
-                _logger.LogInfo($"[FsmMaster]             {fieldName}: {FormatActionFieldValue(action, fieldValue)}");
+                FsmMasterMod.Instance?.Log($"[FsmMaster]             {fieldName}: {FormatActionFieldValue(action, fieldValue)}");
                 break;
         }
     }
@@ -110,12 +110,12 @@ internal sealed class FsmConsoleLogger
 
     private void LogActionFieldArray(FsmStateAction action, string fieldName, int length, Func<int, object?> getElement)
     {
-        _logger.LogInfo($"[FsmMaster]             {fieldName}: {length} element(s)");
+        FsmMasterMod.Instance?.Log($"[FsmMaster]             {fieldName}: {length} element(s)");
 
         for (int i = 0; i < length; i++)
         {
             object? element = getElement(i);
-            _logger.LogInfo($"[FsmMaster]               [{i}]: {FormatActionFieldValue(action, element)}");
+            FsmMasterMod.Instance?.Log($"[FsmMaster]               [{i}]: {FormatActionFieldValue(action, element)}");
         }
     }
 
@@ -180,7 +180,7 @@ internal sealed class FsmConsoleLogger
 
     private void LogFsmVariables(FsmVariables variables)
     {
-        _logger.LogInfo("[FsmMaster]     Variables");
+        FsmMasterMod.Instance?.Log("[FsmMaster]     Variables");
 
         LogVariableArray("Float", variables.FloatVariables, v => v.Value);
         LogVariableArray("Int", variables.IntVariables, v => v.Value);
@@ -198,8 +198,9 @@ internal sealed class FsmConsoleLogger
         LogVariableArray("Enum", variables.EnumVariables, v => v.Value);
         // FsmArray has no single Value - its payload lives in one of several typed backing
         // arrays selected by its Type, so Values (boxed, generic across all of them) is used
-        // instead of any one type-specific field.
-        LogVariableArray("Array", variables.ArrayVariables, v => string.Join(", ", v.Values));
+        // instead of any one type-specific field. string.Join only has a string[] overload here
+        // (no object[]/IEnumerable<string> overload), so each boxed element is stringified first.
+        LogVariableArray("Array", variables.ArrayVariables, v => string.Join(", ", v.Values.Select(x => x?.ToString() ?? "null").ToArray()));
     }
 
     private void LogVariableArray<T>(string typeName, T[] items, Func<T, object> getValue) where T : NamedVariable
@@ -211,7 +212,7 @@ internal sealed class FsmConsoleLogger
 
         foreach (T item in items)
         {
-            _logger.LogInfo($"[FsmMaster]       {typeName} \"{item.Name}\": {getValue(item)}");
+            FsmMasterMod.Instance?.Log($"[FsmMaster]       {typeName} \"{item.Name}\": {getValue(item)}");
         }
     }
 }

@@ -50,7 +50,7 @@ internal sealed class VariableOverride
 internal sealed class ActionFieldOverride
 {
     public string StateName = "";
-    public int ActionIndex;
+    public int ActionIndex = 0;
     public string ExpectedActionTypeName = "";
     public string FieldName = "";
 
@@ -92,7 +92,7 @@ internal sealed class TransitionRetarget
 internal sealed class SequencerOverride
 {
     public string StateName = "";
-    public int ActionIndex;
+    public int ActionIndex = 0;
     public List<string> Pattern = new();
-    public int RepeatCount; // 0 = unlimited
+    public int RepeatCount = 0; // 0 = unlimited
 }

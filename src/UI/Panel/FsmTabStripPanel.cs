@@ -81,7 +81,7 @@ internal sealed class FsmTabStripPanel : CanvasPanel
     // are cheap and need to track the active tab/content width every frame regardless.
     private void Refresh()
     {
-        IReadOnlyList<FsmTabState> tabs = _tabManager.Tabs;
+        List<FsmTabState> tabs = _tabManager.Tabs;
         bool changed = tabs.Count != _lastTabsSnapshot.Count;
         if (!changed)
         {
@@ -115,7 +115,7 @@ internal sealed class FsmTabStripPanel : CanvasPanel
         _scrollbar.ActiveSelf = _scrollbar.ShouldBeVisible;
     }
 
-    private void RebuildWidgets(IReadOnlyList<FsmTabState> tabs)
+    private void RebuildWidgets(List<FsmTabState> tabs)
     {
         foreach (TabWidget widget in _tabWidgets)
         {

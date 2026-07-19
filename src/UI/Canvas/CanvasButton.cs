@@ -16,7 +16,7 @@ internal class CanvasButton : CanvasImage
     // Rebuilt only when the own border is added/removed (RebuildOwnChildList) rather than on every
     // ChildList() call - see CanvasNode.ChildList's own comment on why a yield-return version of this
     // was a continuous per-frame GC source.
-    private CanvasNode[] _ownChildList = Array.Empty<CanvasNode>();
+    private CanvasNode[] _ownChildList = ArrayPolyfill.Empty<CanvasNode>();
 
     public CanvasText Text => _text;
 
