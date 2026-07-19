@@ -1,0 +1,12 @@
+<Project>
+  <PropertyGroup>
+    <HollowKnightFolder>C:\Program Files (x86)\Steam\steamapps\common\Hollow Knight</HollowKnightFolder>
+    <HollowKnightManagedFolder>$(HollowKnightFolder)/hollow_knight_Data/Managed</HollowKnightManagedFolder>
+    <!-- The patched, Modding-API-enabled Assembly-CSharp.dll. On a real install this is the same
+         file as the one in HollowKnightManagedFolder above once the Modding API is installed -
+         kept as a separate property so the same csproj can also point it at an unpatched reference
+         copy (see the local, gitignored HollowKnightPath.props) without touching the managed folder. -->
+    <HollowKnightPatchedAssemblyFolder>$(HollowKnightManagedFolder)</HollowKnightPatchedAssemblyFolder>
+    <HollowKnightModsFolder>$(HollowKnightManagedFolder)/Mods</HollowKnightModsFolder>
+  </PropertyGroup>
+</Project>

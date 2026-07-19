@@ -9,6 +9,10 @@ CLAUDE.md
 # / dotnet new silksongpath — holds paths like $(SilksongPluginsFolder))
 SilksongPath.props
 
+# Local machine-specific build config for the hk1221 (Hollow Knight 1) backport branch -
+# holds paths like $(HollowKnightManagedFolder), mirroring SilksongPath.props above.
+HollowKnightPath.props
+
 # Thunderstore/manual-zip release packaging output (regenerated on Release build)
 thunderstore/temp/
 thunderstore/dist/
