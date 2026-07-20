@@ -25,7 +25,7 @@ internal sealed class CanvasScrollView : CanvasNode, IHorizontalScrollSource
     private CanvasNode? _content;
     private float _contentHeightAtLastCheck;
     private float _contentWidthAtLastCheck;
-    private CanvasNode[] _childList = Array.Empty<CanvasNode>();
+    private CanvasNode[] _childList = ArrayPolyfill.Empty<CanvasNode>();
 
     public CanvasNode? Content => _content;
 
@@ -65,7 +65,14 @@ internal sealed class CanvasScrollView : CanvasNode, IHorizontalScrollSource
     public override void Build(Transform? rootParent = null)
     {
         base.Build(rootParent);
+#if NET35
+        // RectMask2D.padding doesn't exist on net35's older UnityEngine.UI.dll (confirmed against the
+        // real hk1221 build) - masking itself still works there, just without ClipPadding's fix for
+        // content flush against the mask's own edge (see the field's own comment).
+        GameObject!.AddComponent<RectMask2D>();
+#else
         GameObject!.AddComponent<RectMask2D>().padding = ClipPadding;
+#endif
     }
 
     private void Poll()

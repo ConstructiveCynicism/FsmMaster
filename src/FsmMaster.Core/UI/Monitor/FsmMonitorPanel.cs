@@ -39,7 +39,7 @@ internal sealed class FsmMonitorPanel : CanvasPanel
     private readonly CanvasScrollView _scrollView;
     private readonly CanvasScrollbar _scrollbar;
     private readonly CanvasResizeHandle _resizeHandle;
-    private readonly FsmPanelLayoutConfig _layout;
+    private readonly IFsmPanelLayoutConfig _layout;
 
     private readonly List<CanvasText> _valueTexts = new();
 
@@ -54,7 +54,7 @@ internal sealed class FsmMonitorPanel : CanvasPanel
     private int _lastScreenWidth = -1;
     private int _lastScreenHeight = -1;
 
-    public FsmMonitorPanel(UICommon ui, FsmVariableTracker tracker, FsmPanelLayoutConfig layout) : base("FsmMonitorPanel")
+    public FsmMonitorPanel(UICommon ui, FsmVariableTracker tracker, IFsmPanelLayoutConfig layout) : base("FsmMonitorPanel")
     {
         _ui = ui;
         _layout = layout;
@@ -120,7 +120,7 @@ internal sealed class FsmMonitorPanel : CanvasPanel
     // unchanged value doesn't cost a format-string allocation every single frame.
     public void RefreshRows(FsmVariableTracker tracker)
     {
-        IReadOnlyList<TrackedVariableValue> values = tracker.GetTracked();
+        List<TrackedVariableValue> values = tracker.GetTracked();
 
         if (tracker.Version != _lastTrackerVersion)
         {
@@ -142,7 +142,7 @@ internal sealed class FsmMonitorPanel : CanvasPanel
         }
     }
 
-    private void RebuildRows(IReadOnlyList<TrackedVariableValue> values)
+    private void RebuildRows(List<TrackedVariableValue> values)
     {
         var content = (CanvasPanel)_scrollView.Content!;
         content.ClearChildren();

@@ -20,6 +20,7 @@ namespace FsmMaster;
 [BepInDependency(DebugMod.DebugMod.Id, BepInDependency.DependencyFlags.SoftDependency)]
 public partial class FsmMasterPlugin : BaseUnityPlugin
 {
+    private IFsmLog? _log;
     private FsmEditManager? _editManager;
     private IDebugModCompat? _debugModCompat;
     private FsmVariableTracker? _variableTracker;
@@ -136,12 +137,14 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
     private void Awake()
     {
         Logger.LogInfo($"Plugin {Name} ({Id}) has loaded!");
+        _log = new BepInExLog(Logger);
 
-        // Only FsmActivatedPatch and GameFileLoadedPatch are attribute-patched here -
-        // ForceCursorVisiblePatch is patched/unpatched on demand instead (see
+        // Only FsmActivatedPatch, GameFileLoadedPatch, and FocusOnHoverSuppressionPatch are
+        // attribute-patched here - ForceCursorVisiblePatch is patched/unpatched on demand instead (see
         // PatchCursorOverride/UnpatchCursorOverride).
         _harmony = Harmony.CreateAndPatchAll(typeof(FsmActivatedPatch));
         _harmony.PatchAll(typeof(GameFileLoadedPatch));
+        _harmony.PatchAll(typeof(FocusOnHoverSuppressionPatch));
 
         _toggleOverlayHotkey = Config.Bind(
             "Hotkeys",
@@ -182,13 +185,20 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
                 null,
                 hiddenFromConfigManager));
 
-        _editManager = new FsmEditManager(Logger);
+        _editManager = new FsmEditManager(_log);
         ActiveEditManagerForPatches = _editManager;
         ActiveInstanceForPatches = this;
         _debugModCompat = DebugModCompatFactory.TryCreate(_editManager, RescanLiveFsmsForDebugModLoad, Logger);
         _variableTracker = new FsmVariableTracker(fsmKey => _editManager.GetLiveInstances(fsmKey));
         _tabManager = new FsmTabManager();
-        _graphOverlay = new FsmGraphOverlay(Logger, _editManager, _tabManager, _toggleOverlayHotkey, toggleMinimalViewHotkey, graphColors, graphPerformance);
+        _graphOverlay = new FsmGraphOverlay(
+            _log,
+            _editManager,
+            _tabManager,
+            new BepInExHotkey(_toggleOverlayHotkey),
+            new BepInExHotkey(toggleMinimalViewHotkey),
+            graphColors,
+            graphPerformance);
 
         // Scene.name has been observed to return null (not "") when Awake fires before the initial
         // scene has finished loading - a timing race, not something confirmed to be platform-specific,
@@ -298,40 +308,51 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
             // the panel's own OnUpdate) is required - a node's own OnUpdate only runs while it's
             // already active, so it can never turn itself back on (see CanvasScrollbar.ShouldBeVisible
             // for the same reasoning applied to the tab strip's scrollbar).
-            _rightPanel.ActiveSelf = _graphOverlay != null && _graphOverlay.IsVisible && _graphOverlay.SelectionUiVisible;
+            bool rightPanelActive = overlayVisible && _graphOverlay!.SelectionUiVisible;
+            _rightPanel.ActiveSelf = rightPanelActive;
 
-            FsmTabState? activeTab = _tabManager?.GetActive();
-            FsmInfo? activeFsm = activeTab is { IsLive: true } ? _graphOverlay?.ResolveFsmInfo(activeTab.FsmKey) : null;
-            _rightPanel.ActiveStatePanel.Refresh(activeFsm, activeTab?.SelectedStateName, activeTab?.FsmKey);
-
-            // One-shot request from a transition click in the graph overlay (see
-            // FsmGraphOverlay.HandleTransitionLeftClick) - consumed and cleared here rather than left on
-            // the tab, so it doesn't re-fire on every subsequent frame this tab stays active.
-            if (activeTab?.PendingScrollActionIndex is { } pendingScrollActionIndex)
+            // Everything below only affects what the panel *shows*, so it's skipped wholesale whenever
+            // the panel isn't actually up - refreshing action-field values re-reads the live FSM by
+            // reflection (RefreshLiveValues) and the subtree walk/per-node Update all cost real work
+            // every frame, none of which is observable while the overlay is off. Setting ActiveSelf
+            // above is idempotent (see CanvasNode.ActiveSelf), so the panel still deactivates cleanly on
+            // the frame the overlay closes; on the frame it reopens, Refresh/RefreshLiveValues and the
+            // StructureVersion-gated CollectSubtree below all re-run and bring the rows current again.
+            if (rightPanelActive)
             {
-                _rightPanel.ActiveStatePanel.ScrollToAction(pendingScrollActionIndex);
-                activeTab.PendingScrollActionIndex = null;
-            }
+                FsmTabState? activeTab = _tabManager?.GetActive();
+                FsmInfo? activeFsm = activeTab is { IsLive: true } ? _graphOverlay?.ResolveFsmInfo(activeTab.FsmKey) : null;
+                _rightPanel.ActiveStatePanel.Refresh(activeFsm, activeTab?.SelectedStateName, activeTab?.FsmKey);
 
-            // Refresh's own fsm/state/subtab cache only gates rebuilding row *structure* - it must not
-            // gate the *values* those rows display, or the Load/Reset buttons (which mutate the live
-            // FSM without changing which tab/state is selected) would appear to do nothing until the
-            // user switches away and back. This re-reads and redisplays every already-built row's
-            // current value every frame regardless of whether Refresh() just rebuilt anything.
-            _rightPanel.ActiveStatePanel.RefreshLiveValues();
-
-            if (_rightPanelSubtreeVersion != CanvasPanel.StructureVersion)
-            {
-                _rightPanelSubtreeBuffer.Clear();
-                _rightPanel.CollectSubtree(_rightPanelSubtreeBuffer);
-                _rightPanelSubtreeVersion = CanvasPanel.StructureVersion;
-            }
-
-            foreach (CanvasNode node in _rightPanelSubtreeBuffer)
-            {
-                if (node.ActiveInHierarchy)
+                // One-shot request from a transition click in the graph overlay (see
+                // FsmGraphOverlay.HandleTransitionLeftClick) - consumed and cleared here rather than left on
+                // the tab, so it doesn't re-fire on every subsequent frame this tab stays active.
+                if (activeTab?.PendingScrollActionIndex is { } pendingScrollActionIndex)
                 {
-                    node.Update();
+                    _rightPanel.ActiveStatePanel.ScrollToAction(pendingScrollActionIndex);
+                    activeTab.PendingScrollActionIndex = null;
+                }
+
+                // Refresh's own fsm/state/subtab cache only gates rebuilding row *structure* - it must not
+                // gate the *values* those rows display, or the Load/Reset buttons (which mutate the live
+                // FSM without changing which tab/state is selected) would appear to do nothing until the
+                // user switches away and back. This re-reads and redisplays every already-built row's
+                // current value every frame regardless of whether Refresh() just rebuilt anything.
+                _rightPanel.ActiveStatePanel.RefreshLiveValues();
+
+                if (_rightPanelSubtreeVersion != CanvasPanel.StructureVersion)
+                {
+                    _rightPanelSubtreeBuffer.Clear();
+                    _rightPanel.CollectSubtree(_rightPanelSubtreeBuffer);
+                    _rightPanelSubtreeVersion = CanvasPanel.StructureVersion;
+                }
+
+                foreach (CanvasNode node in _rightPanelSubtreeBuffer)
+                {
+                    if (node.ActiveInHierarchy)
+                    {
+                        node.Update();
+                    }
                 }
             }
         }
@@ -341,22 +362,30 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
             // Deliberately NOT gated on SelectionUiVisible the way _rightPanel.ActiveSelf is above -
             // the monitor panel must survive the toggle-minimal-view hotkey (only locking/fading, see
             // Locked below) rather than disappearing with the rest of the selection UI.
-            _monitorPanel.ActiveSelf = _graphOverlay != null && _graphOverlay.IsVisible;
-            _monitorPanel.Locked = _graphOverlay != null && !_graphOverlay.SelectionUiVisible;
-            _monitorPanel.RefreshRows(_variableTracker!);
+            _monitorPanel.ActiveSelf = overlayVisible;
 
-            if (_monitorPanelSubtreeVersion != CanvasPanel.StructureVersion)
+            // Same visibility gate as the right panel: RefreshRows polls every tracked variable by
+            // reflection (see FsmVariableTracker.GetTracked) every frame, which is pure waste while the
+            // monitor isn't drawn. RefreshRows self-heals on the first visible frame - it diffs each
+            // row's value against the last displayed one and updates whatever changed while hidden.
+            if (overlayVisible)
             {
-                _monitorPanelSubtreeBuffer.Clear();
-                _monitorPanel.CollectSubtree(_monitorPanelSubtreeBuffer);
-                _monitorPanelSubtreeVersion = CanvasPanel.StructureVersion;
-            }
+                _monitorPanel.Locked = !_graphOverlay!.SelectionUiVisible;
+                _monitorPanel.RefreshRows(_variableTracker!);
 
-            foreach (CanvasNode node in _monitorPanelSubtreeBuffer)
-            {
-                if (node.ActiveInHierarchy)
+                if (_monitorPanelSubtreeVersion != CanvasPanel.StructureVersion)
                 {
-                    node.Update();
+                    _monitorPanelSubtreeBuffer.Clear();
+                    _monitorPanel.CollectSubtree(_monitorPanelSubtreeBuffer);
+                    _monitorPanelSubtreeVersion = CanvasPanel.StructureVersion;
+                }
+
+                foreach (CanvasNode node in _monitorPanelSubtreeBuffer)
+                {
+                    if (node.ActiveInHierarchy)
+                    {
+                        node.Update();
+                    }
                 }
             }
         }
@@ -420,9 +449,9 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
             _editManager!,
             _variableTracker!,
             () => _graphOverlay?.CurrentSnapshot,
-            Logger,
+            _log!,
             _rightPanelLayout!,
-            _autoLoadConfig!,
+            new BepInExConfigValue<bool>(_autoLoadConfig!),
             () => _graphOverlay?.Hide());
 
         // CanvasNode defaults ActiveSelf to true, so without this, Build() below instantiates both

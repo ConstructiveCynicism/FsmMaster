@@ -1,6 +1,4 @@
 using System;
-using BepInEx.Configuration;
-using BepInEx.Logging;
 using UnityEngine;
 using UnityEngine.EventSystems;
 
@@ -75,13 +73,13 @@ internal sealed class FsmRightPanel : CanvasPanel
     private readonly FsmSaveDialog _saveDialog;
     private readonly FsmLoadDialog _loadDialog;
     private readonly CanvasResizeHandle _resizeHandle;
-    private readonly FsmPanelLayoutConfig _layout;
+    private readonly IFsmPanelLayoutConfig _layout;
 
     private int _lastScreenWidth = -1;
     private int _lastScreenHeight = -1;
     private float _statusHideAtUnscaledTime;
 
-    public FsmRightPanel(UICommon ui, FsmTabManager tabManager, FsmEditManager editManager, FsmVariableTracker tracker, Func<FsmSnapshot?> getSnapshot, ManualLogSource logger, FsmPanelLayoutConfig layout, ConfigEntry<bool> autoLoadConfig, Action onCloseAll)
+    public FsmRightPanel(UICommon ui, FsmTabManager tabManager, FsmEditManager editManager, FsmVariableTracker tracker, Func<FsmSnapshot?> getSnapshot, IFsmLog logger, IFsmPanelLayoutConfig layout, IFsmConfigValue<bool> autoLoadConfig, Action onCloseAll)
         : base("FsmRightPanel")
     {
         _ui = ui;
@@ -262,7 +260,7 @@ internal sealed class FsmRightPanel : CanvasPanel
     // Neither one persists/loads anything itself - each just opens the corresponding popup
     // (FsmSaveDialog's text field, FsmLoadDialog's row list), which raises OnConfirm/OnSelected once
     // the user actually picks a name - see ConfirmSave/ConfirmLoad below.
-    private void OpenSaveDialog(FsmTabManager tabManager, ManualLogSource logger)
+    private void OpenSaveDialog(FsmTabManager tabManager, IFsmLog logger)
     {
         FsmTabState? active = tabManager.GetActive();
         if (active?.Component == null)
@@ -276,7 +274,7 @@ internal sealed class FsmRightPanel : CanvasPanel
         _saveDialog.Show(sceneName, active.FsmKey, defaultName);
     }
 
-    private void OpenLoadDialog(FsmTabManager tabManager, ManualLogSource logger)
+    private void OpenLoadDialog(FsmTabManager tabManager, IFsmLog logger)
     {
         FsmTabState? active = tabManager.GetActive();
         if (active?.Component == null)
@@ -292,7 +290,7 @@ internal sealed class FsmRightPanel : CanvasPanel
     // Saves the active edit set for fsmKey under the user-chosen name and remembers it as the
     // configuration to auto-reapply for (sceneName, fsmKey) next time this scene loads (see
     // FsmSaveDataStore.SetLastChosenSaveName / FsmMasterPlugin.ApplyPersistedEditsForScene).
-    private void ConfirmSave(FsmEditManager editManager, ManualLogSource logger, string sceneName, string fsmKey, string saveName)
+    private void ConfirmSave(FsmEditManager editManager, IFsmLog logger, string sceneName, string fsmKey, string saveName)
     {
         string filePath = FsmSaveDataStore.GetFilePath(sceneName, fsmKey, saveName);
         FsmEditSet editSet = editManager.GetActiveEditSet(fsmKey) ?? new FsmEditSet { FsmKey = fsmKey };
@@ -316,7 +314,7 @@ internal sealed class FsmRightPanel : CanvasPanel
 
     // Applies the chosen named save to the live FSM and remembers it as the last-chosen configuration
     // for (sceneName, fsmKey), same as ConfirmSave.
-    private void ConfirmLoad(FsmEditManager editManager, ManualLogSource logger, string sceneName, string fsmKey, string saveName)
+    private void ConfirmLoad(FsmEditManager editManager, IFsmLog logger, string sceneName, string fsmKey, string saveName)
     {
         string filePath = FsmSaveDataStore.GetFilePath(sceneName, fsmKey, saveName);
 
@@ -365,7 +363,7 @@ internal sealed class FsmRightPanel : CanvasPanel
 
     // Pops the active tab's most recent undoable edit, if any - a no-op (with a log line) when the
     // active FSM has no edit history, matching Save/Load's own "no active tab" no-op shape.
-    private void UndoActiveTab(FsmTabManager tabManager, FsmEditManager editManager, ManualLogSource logger)
+    private void UndoActiveTab(FsmTabManager tabManager, FsmEditManager editManager, IFsmLog logger)
     {
         FsmTabState? active = tabManager.GetActive();
         if (active?.Component == null)
@@ -387,7 +385,7 @@ internal sealed class FsmRightPanel : CanvasPanel
 
     // Reverts every edit made this session on the active tab's FSM back to its pristine, as-loaded
     // values (FsmEditManager.ResetFsm) - distinct from Undo, which only steps back one edit at a time.
-    private void ResetActiveTab(FsmTabManager tabManager, FsmEditManager editManager, ManualLogSource logger)
+    private void ResetActiveTab(FsmTabManager tabManager, FsmEditManager editManager, IFsmLog logger)
     {
         FsmTabState? active = tabManager.GetActive();
         if (active?.Component == null)

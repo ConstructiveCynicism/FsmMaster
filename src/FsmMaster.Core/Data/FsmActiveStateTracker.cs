@@ -5,13 +5,21 @@ using UnityEngine;
 
 namespace FsmMaster;
 
-// Tracks which states an FSM's live Fsm instance has actually entered since the last reconciliation,
-// via Fsm.StateChanged - a plain public Action<FsmState> field, invoked synchronously from EnterState
-// right before state.OnEnter() runs. PlayMaker can chain several state entries within a single Unity
-// Update() call - one event immediately causing another transition, and so on - so polling
-// Fsm.ActiveStateName once per rendered frame (the graph overlay's previous approach) silently drops
-// every intermediate state a multi-hop chain passed through within that same frame. Hooking
-// StateChanged instead observes every one of them, in order, as they happen.
+// Tracks which states an FSM's live Fsm instance has actually entered since the last reconciliation.
+//
+// On every TFM except net35, this hooks Fsm.StateChanged - a plain public Action<FsmState> field,
+// invoked synchronously from EnterState right before state.OnEnter() runs. PlayMaker can chain several
+// state entries within a single Unity Update() call - one event immediately causing another transition,
+// and so on - so polling Fsm.ActiveStateName once per rendered frame silently drops every intermediate
+// state a multi-hop chain passed through within that same frame. Hooking StateChanged instead observes
+// every one of them, in order, as they happen.
+//
+// net35's PlayMaker build has no StateChanged field at all (confirmed against the real hk1221
+// PlayMaker.dll - see platform-inventory.md's PlayMaker surface delta table: it's a Silksong-only
+// addition). That TFM instead subscribes to FsmStateChangeBridge, which the HK1221 loader's own Harmony
+// postfix on Fsm.EnterState feeds - see that bridge's own comment for why Core can't hook Harmony
+// directly. Same per-instance, every-state-entered fidelity as the non-net35 path, just routed through
+// one process-wide event instead of a field on Fsm itself.
 //
 // Only ever tracks whichever FSMs FsmGraphOverlay is actually drawing this frame (EnsureTracked is
 // called once per DrawGraph pass, for the active tab plus any pinned tabs) - not every live FSM in the
@@ -24,9 +32,14 @@ internal sealed class FsmActiveStateTracker
     {
         public Fsm Instance = null!;
         public Action<FsmState> Handler = null!;
+#if NET35
+        // Bridge-side handler, wired to only fire for this entry's own Instance - FsmStateChangeBridge
+        // is a single process-wide event covering every live Fsm, not a per-instance one.
+        public Action<Fsm, FsmState>? BridgeHandler;
+#endif
 
-        // States entered (via the StateChanged hook) since the last CommitFrame reconciliation - can
-        // hold more than one entry when the FSM chained several transitions within a single Update().
+        // States entered since the last CommitFrame reconciliation - on every TFM but net35, can hold
+        // more than one entry when the FSM chained several transitions within a single Update().
         public readonly HashSet<string> EnteredSinceCommit = new();
 
         // "Was active, no longer is" - stateName -> Time.unscaledTime it stopped being active. Removed
@@ -59,13 +72,28 @@ internal sealed class FsmActiveStateTracker
             // a freshly-Awoken FSM (FsmTabManager.RebindAfterRefresh). The old instance's own
             // subscription would otherwise sit there forever, since nothing else ever tears it down
             // once its owning scene is gone.
+#if NET35
+            FsmStateChangeBridge.StateEntered -= existing.BridgeHandler;
+#else
             existing.Instance.StateChanged -= existing.Handler;
+#endif
             _tracked.Remove(fsmKey);
         }
 
         var entry = new TrackedFsm { Instance = instance };
+#if NET35
+        entry.BridgeHandler = (fsm, state) =>
+        {
+            if (ReferenceEquals(fsm, entry.Instance) && state != null)
+            {
+                entry.EnteredSinceCommit.Add(state.Name);
+            }
+        };
+        FsmStateChangeBridge.StateEntered += entry.BridgeHandler;
+#else
         entry.Handler = state => entry.EnteredSinceCommit.Add(state.Name);
         instance.StateChanged += entry.Handler;
+#endif
         _tracked[fsmKey] = entry;
     }
 
@@ -87,7 +115,11 @@ internal sealed class FsmActiveStateTracker
             // last thing holding a reference to it) is dropped.
             if (entry.Instance.FsmComponent == null || !_visibleThisFrame.Contains(fsmKey))
             {
+#if NET35
+                FsmStateChangeBridge.StateEntered -= entry.BridgeHandler;
+#else
                 entry.Instance.StateChanged -= entry.Handler;
+#endif
                 (toRemove ??= new List<string>()).Add(fsmKey);
                 continue;
             }
@@ -167,7 +199,11 @@ internal sealed class FsmActiveStateTracker
     {
         foreach (TrackedFsm entry in _tracked.Values)
         {
+#if NET35
+            FsmStateChangeBridge.StateEntered -= entry.BridgeHandler;
+#else
             entry.Instance.StateChanged -= entry.Handler;
+#endif
         }
 
         _tracked.Clear();

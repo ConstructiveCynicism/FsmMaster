@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
-using BepInEx.Logging;
 using HutongGames.PlayMaker;
 using UnityEngine;
 using UnityEngine.EventSystems;
@@ -99,7 +98,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
     private readonly UICommon _ui;
     private readonly FsmEditManager _editManager;
     private readonly FsmVariableTracker _tracker;
-    private readonly ManualLogSource _logger;
+    private readonly IFsmLog _logger;
     private readonly Action<string> _showStatus;
     private readonly CanvasText _header;
     private readonly CanvasToggleDot _stateHeaderDot;
@@ -187,7 +186,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
     private readonly CanvasPanel _dragGhost;
     private readonly CanvasText _dragGhostText;
 
-    public FsmActiveStatePanel(UICommon ui, FsmEditManager editManager, FsmVariableTracker tracker, ManualLogSource logger, Action<string> showStatus) : base("ActiveStatePanel")
+    public FsmActiveStatePanel(UICommon ui, FsmEditManager editManager, FsmVariableTracker tracker, IFsmLog logger, Action<string> showStatus) : base("ActiveStatePanel")
     {
         _ui = ui;
         _editManager = editManager;
@@ -806,7 +805,7 @@ internal sealed class FsmActiveStatePanel : CanvasPanel
 
         if (!FsmEditManager.IsSupportedArrayElementType(array.ElementType))
         {
-            AddReadOnlyRow(content, cursor, $"{variableName} ({array.ElementType})", () => string.Join(", ", array.Values), _ui.ReadOnlyColor, FieldIndent);
+            AddReadOnlyRow(content, cursor, $"{variableName} ({array.ElementType})", () => string.Join(", ", Array.ConvertAll(array.Values, x => x?.ToString() ?? string.Empty)), _ui.ReadOnlyColor, FieldIndent);
             return;
         }
 

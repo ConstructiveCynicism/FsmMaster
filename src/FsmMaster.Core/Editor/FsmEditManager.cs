@@ -4,9 +4,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Linq;
 using System.Reflection;
-using BepInEx.Logging;
 using HutongGames.PlayMaker;
-using Silksong.FsmUtil;
 using UnityEngine;
 
 namespace FsmMaster;
@@ -14,9 +12,8 @@ namespace FsmMaster;
 // The generalized edit/undo engine every FsmMaster mutation funnels through: variable overrides, action
 // field overrides, state neutering, transition retargeting/disabling, and sequencer installs. Each FsmKey
 // (see FsmIdentity) gets its pristine values captured lazily on first touch, so ResetFsm can restore a live
-// FSM without a scene reload. All mutation is done via Silksong.FsmUtil's existing extension methods
-// rather than re-implementing state/transition/action
-// bookkeeping FsmUtil already provides.
+// FSM without a scene reload. All mutation is done via PlayMakerFsmOps's existing extension methods
+// rather than re-implementing state/transition/action bookkeeping it already provides.
 internal sealed class FsmEditManager
 {
     private static readonly string[] ExitEventPriority = { "CANCEL", "FINISHED", "NEXT" };
@@ -40,7 +37,7 @@ internal sealed class FsmEditManager
         VariableType.Float, VariableType.Int, VariableType.Bool, VariableType.String,
     };
 
-    private readonly ManualLogSource _logger;
+    private readonly IFsmLog _logger;
     private readonly Dictionary<string, List<Fsm>> _liveInstances = new();
     private readonly Dictionary<string, FsmPristineSnapshot> _pristine = new();
 
@@ -73,7 +70,7 @@ internal sealed class FsmEditManager
 
     private void BumpEditGeneration() => EditGeneration++;
 
-    public FsmEditManager(ManualLogSource logger)
+    public FsmEditManager(IFsmLog logger)
     {
         _logger = logger;
     }
@@ -87,7 +84,7 @@ internal sealed class FsmEditManager
     // Fsm instances whose owning GameObject was already destroyed - Fsm is a plain C# object, not a
     // UnityEngine.Object, so it never becomes Unity's fake-null and nothing else would ever catch
     // this.
-    public void ReplaceLiveInstances(IReadOnlyDictionary<string, List<Fsm>> instancesByKey)
+    public void ReplaceLiveInstances(Dictionary<string, List<Fsm>> instancesByKey)
     {
         _liveInstances.Clear();
         foreach (KeyValuePair<string, List<Fsm>> entry in instancesByKey)
@@ -117,8 +114,8 @@ internal sealed class FsmEditManager
         }
     }
 
-    public IReadOnlyList<Fsm> GetLiveInstances(string fsmKey) =>
-        _liveInstances.TryGetValue(fsmKey, out List<Fsm>? instances) ? instances : Array.Empty<Fsm>();
+    public List<Fsm> GetLiveInstances(string fsmKey) =>
+        _liveInstances.TryGetValue(fsmKey, out List<Fsm>? instances) ? instances : new List<Fsm>();
 
     // Called by FsmActivatedPatch's Postfix (FsmMasterPlugin.cs) right before it reapplies a pending edit
     // set, to keep _liveInstances in sync for FSMs built from an FsmTemplate. PlayMakerFSM.Awake() calls
@@ -188,7 +185,7 @@ internal sealed class FsmEditManager
     }
 
     // Every FsmKey with at least one edit currently in effect this session.
-    public IReadOnlyCollection<string> GetEditedFsmKeys() => _activeEdits.Keys;
+    public ICollection<string> GetEditedFsmKeys() => _activeEdits.Keys;
 
     public FsmEditSet? GetActiveEditSet(string fsmKey) =>
         _activeEdits.TryGetValue(fsmKey, out FsmEditSet? set) ? set : null;
@@ -967,7 +964,8 @@ internal sealed class FsmEditManager
                         lastFound = fsmEvent;
                         break;
                     case FsmEvent[] { Length: > 0 } fsmEvents:
-                        lastFound = fsmEvents[^1];
+                        // fsmEvents[^1] (System.Index) isn't available on net35.
+                        lastFound = fsmEvents[fsmEvents.Length - 1];
                         break;
                 }
             }
@@ -1314,8 +1312,8 @@ internal sealed class FsmEditManager
         // something else in FsmMaster reading Actions before this Fsm's own Preprocess()/Awake() ever
         // runs would leave a fresh, un-Init'd action here even once Preprocessed later flips true.
         // FsmStateAction.State is only ever set by the action's own Init(FsmState) call, which is exactly
-        // what FsmUtil's InsertActionAfter dereferences, so checking it directly guarantees this can't NRE
-        // regardless of why it's still unset. Skip the physical mutation and leave the override
+        // what PlayMakerFsmOps's InsertActionAfter dereferences, so checking it directly guarantees this
+        // can't NRE regardless of why it's still unset. Skip the physical mutation and leave the override
         // recorded above; FsmActivatedPatch (FsmMasterPlugin.cs) reapplies it via ApplyEditSet once this
         // Fsm's own Preprocess() actually runs and Init's every action, so the override still lands on
         // this instance the moment it activates within the same scene - it just can't happen right now.
@@ -1612,7 +1610,10 @@ internal sealed class FsmEditManager
         VariableType.Rect => FormatFloats(((FsmRect)variable).Value.x, ((FsmRect)variable).Value.y, ((FsmRect)variable).Value.width, ((FsmRect)variable).Value.height),
         VariableType.Quaternion => FormatFloats(((FsmQuaternion)variable).Value.x, ((FsmQuaternion)variable).Value.y, ((FsmQuaternion)variable).Value.z, ((FsmQuaternion)variable).Value.w),
         VariableType.Color => FormatFloats(((FsmColor)variable).Value.r, ((FsmColor)variable).Value.g, ((FsmColor)variable).Value.b, ((FsmColor)variable).Value.a),
-        VariableType.Enum => ((FsmEnum)variable).ToInt().ToString(CultureInfo.InvariantCulture),
+        // NamedVariable.ToInt() is a Silksong-only PlayMaker addition (absent from hk1221/hk1432's
+        // build - see platform-inventory.md's surface delta table), so this goes through the enum's
+        // own boxed Value via Convert.ToInt32 instead, which works identically on every TFM.
+        VariableType.Enum => Convert.ToInt32(((FsmEnum)variable).Value, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture),
         _ => "",
     };
 
@@ -1659,8 +1660,9 @@ internal sealed class FsmEditManager
         }
     }
 
+    // string.Join(string, IEnumerable<string>) isn't available on net35 - only the string[] overload is.
     private static string FormatFloats(params float[] values) =>
-        string.Join(",", values.Select(v => v.ToString("R", CultureInfo.InvariantCulture)));
+        string.Join(",", values.Select(v => v.ToString("R", CultureInfo.InvariantCulture)).ToArray());
 
     private static float[] ParseFloats(string s, int count)
     {

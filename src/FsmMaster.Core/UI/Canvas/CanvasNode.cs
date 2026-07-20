@@ -93,7 +93,7 @@ internal abstract class CanvasNode
     // compiler-generated enumerator object on every single call, and this is invoked every frame,
     // for every leaf node, by CollectSubtree below (see that method's own comment on this same
     // cost for the recursion itself).
-    protected virtual IEnumerable<CanvasNode> ChildList() => Array.Empty<CanvasNode>();
+    protected virtual IEnumerable<CanvasNode> ChildList() => ArrayPolyfill.Empty<CanvasNode>();
 
     // Appends this node and every descendant into `results` via plain recursion rather than a
     // yield-return iterator. FsmMasterPlugin.Update walks this every single frame against a reused

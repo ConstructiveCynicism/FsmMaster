@@ -10,7 +10,16 @@ namespace FsmMaster;
 // suffix recovers the shared base name duplicates were copied from.
 internal static class FsmIdentity
 {
+    // RegexOptions.Compiled throws ArgumentOutOfRangeException on hk1221's embedded Mono runtime
+    // (confirmed live - its old System.Text.RegularExpressions build validates options against a
+    // narrower bitmask that doesn't include Compiled) - this pattern is matched rarely enough (once per
+    // discovered PlayMakerFSM component name, not a hot path) that the JIT-compiled fast path isn't
+    // worth losing net35 support over.
+#if NET35
+    private static readonly Regex DuplicateSuffixPattern = new(@"^(?<base>.+) \(\d+\)$");
+#else
     private static readonly Regex DuplicateSuffixPattern = new(@"^(?<base>.+) \(\d+\)$", RegexOptions.Compiled);
+#endif
 
     public static string GetObjectBaseName(string gameObjectName)
     {

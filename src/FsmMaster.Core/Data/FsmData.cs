@@ -9,7 +9,7 @@ namespace FsmMaster;
 internal sealed class FsmSnapshot
 {
     public string SceneName { get; set; } = "";
-    public IReadOnlyList<FsmIdentityInfo> Fsms { get; set; } = Array.Empty<FsmIdentityInfo>();
+    public List<FsmIdentityInfo> Fsms { get; set; } = new();
 }
 
 // Cheap identity-only entry for one live PlayMakerFSM - RefreshSnapshot builds one of these per FSM
@@ -34,8 +34,8 @@ internal sealed class FsmInfo
     public string FsmName { get; set; } = "";
     public string GameObjectName { get; set; } = "";
     public string ActiveStateName { get; set; } = "";
-    public IReadOnlyList<FsmStateInfo> States { get; set; } = Array.Empty<FsmStateInfo>();
-    public IReadOnlyList<FsmTransitionInfo> GlobalTransitions { get; set; } = Array.Empty<FsmTransitionInfo>();
+    public List<FsmStateInfo> States { get; set; } = new();
+    public List<FsmTransitionInfo> GlobalTransitions { get; set; } = new();
 }
 
 // One state's own actions and outgoing transitions.
@@ -43,8 +43,8 @@ internal sealed class FsmStateInfo
 {
     public FsmState State { get; set; } = null!;
     public string Name { get; set; } = "";
-    public IReadOnlyList<FsmActionInfo> Actions { get; set; } = Array.Empty<FsmActionInfo>();
-    public IReadOnlyList<FsmTransitionInfo> Transitions { get; set; } = Array.Empty<FsmTransitionInfo>();
+    public List<FsmActionInfo> Actions { get; set; } = new();
+    public List<FsmTransitionInfo> Transitions { get; set; } = new();
 }
 
 // One state action instance plus its reflected field list.
@@ -52,7 +52,7 @@ internal sealed class FsmActionInfo
 {
     public FsmStateAction Action { get; set; } = null!;
     public Type ActionType { get; set; } = null!;
-    public IReadOnlyList<FsmActionFieldInfo> Fields { get; set; } = Array.Empty<FsmActionFieldInfo>();
+    public List<FsmActionFieldInfo> Fields { get; set; } = new();
 }
 
 // One reflected field on an action, with its current value and display metadata.

@@ -1,11 +1,17 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- 
+  <!--
   Imports silksong path properties only if present in order to allow CI builds. The file should be gitignored.
   If you are checking out from git and need to create a new one, you can use `dotnet new silksongpath` to generate one.
   -->
-  <Import Condition="Exists('SilksongPath.props')" Project="SilksongPath.props" />
+  <Import Condition="Exists('$(RepoRoot)SilksongPath.props')" Project="$(RepoRoot)SilksongPath.props" />
   <PropertyGroup>
     <TargetFramework>netstandard2.1</TargetFramework>
+    <!-- Keeps the shipped output identical to pre-restructure master (FsmMaster.dll, not
+         FsmMaster.Silksong.dll) - the project file itself is named after the loader for clarity in the
+         solution, but the install layout/Thunderstore package name must not change underneath existing
+         installs. -->
+    <AssemblyName>FsmMaster</AssemblyName>
+    <RootNamespace>FsmMaster</RootNamespace>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <EnableNETAnalyzers>True</EnableNETAnalyzers>
@@ -23,14 +29,19 @@
     <RepositoryUrl>https://github.com/ConstructiveCynicism/FsmMaster</RepositoryUrl>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="..\FsmMaster.Core\FsmMaster.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
     <PackageReference Include="BepInEx.Analyzers" Version="1.0.8" PrivateAssets="all" />
     <PackageReference Include="BepInEx.Core" Version="5.4.21" />
     <PackageReference Include="HarmonyX" Version="2.9.0" />
     <PackageReference Include="Hamunii.BepInEx.AutoPlugin" Version="2.0.1" PrivateAssets="all" />
     <PackageReference Include="Microsoft.Unity.Analyzers" Version="1.25.0" PrivateAssets="all" />
+    <!-- Core also references these two (PrivateAssets="all" there, so they don't flow transitively) -
+         redeclared here since FsmMasterPlugin/DebugModCompat/the Config adapters use PlayMaker and
+         UnityEngine types directly too. -->
     <PackageReference Include="UnityEngine.Modules" Version="6000.0.50" IncludeAssets="compile" />
     <PackageReference Include="Silksong.GameLibs" Version="*-*" PrivateAssets="all" />
-    <PackageReference Include="Silksong.FsmUtil" Version="0.3.16" />
     <PackageReference Include="Silksong.I18N" Version="1.1.1" />
     <!-- Compile-only: DebugMod is an optional soft dependency (see DebugModCompat.cs). If installed, the
          user's own DebugMod plugin supplies this assembly at runtime, so it must not be copied into
@@ -39,11 +50,11 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="README.md" Pack="True" PackagePath="README.md" />
+    <None Include="$(RepoRoot)README.md" Pack="True" PackagePath="README.md" />
   </ItemGroup>
 
   <ItemGroup>
-    <Content Include=".config\dotnet-tools.json" />
+    <Content Include="$(RepoRoot).config\dotnet-tools.json" Link=".config\dotnet-tools.json" />
   </ItemGroup>
 
   <PropertyGroup>
@@ -68,13 +79,13 @@
       <ThunderstoreBinaries Include="$(TargetDir)/$(TargetName).pdb" LocalDir="/" PackDir="/plugins" />
     </ItemGroup>
     <PropertyGroup>
-      <ThunderstoreDir>$(ProjectDir)/thunderstore</ThunderstoreDir>
+      <ThunderstoreDir>$(RepoRoot)thunderstore</ThunderstoreDir>
     </PropertyGroup>
     <RemoveDir Directories="$(ThunderstoreDir)/temp;$(ThunderstoreDir)/build" />
     <MakeDir Directories="$(ThunderstoreDir)/temp" />
     <Copy SourceFiles="@(ThunderstoreBinaries)" DestinationFolder="$(ThunderstoreDir)/temp/%(ThunderstoreBinaries.PackDir)" />
-    <Exec Command="dotnet tool restore" WorkingDirectory="$(ProjectDir)" />
-    <Exec Command="dotnet tcli build --config-path &quot;$(ThunderstoreDir)/thunderstore.toml&quot; --package-name &quot;$(AssemblyTitle)&quot; --package-version $(Version)" StandardOutputImportance="High" StandardErrorImportance="High" WorkingDirectory="$(ProjectDir)" />
+    <Exec Command="dotnet tool restore" WorkingDirectory="$(RepoRoot)" />
+    <Exec Command="dotnet tcli build --config-path &quot;$(ThunderstoreDir)/thunderstore.toml&quot; --package-name &quot;$(AssemblyTitle)&quot; --package-version $(Version)" StandardOutputImportance="High" StandardErrorImportance="High" WorkingDirectory="$(RepoRoot)" />
   </Target>
 
   <Target Name="CreateReleaseZip" AfterTargets="PostBuildEvent" Condition="'$(Configuration)' == 'Release'">
@@ -83,7 +94,7 @@
       <ReleaseBinaries Include="$(TargetDir)/$(TargetName).pdb" LocalDir="/" />
     </ItemGroup>
     <PropertyGroup>
-      <ThunderstoreDir>$(ProjectDir)/thunderstore</ThunderstoreDir>
+      <ThunderstoreDir>$(RepoRoot)thunderstore</ThunderstoreDir>
       <ModlistVersion>0.3.1</ModlistVersion>
       <ModlistUrl>https://github.com/silksong-modding/Silksong.ModList/releases/download/v$(ModlistVersion)/silksong_modding-Modlist-$(ModlistVersion).zip/</ModlistUrl>
       <FsmUtilVersion>0.3.16</FsmUtilVersion>

@@ -1,15 +1,12 @@
 ﻿using System.Collections.Generic;
-using BepInEx.Configuration;
-using BepInEx.Logging;
 using HutongGames.PlayMaker;
-using Silksong.FsmUtil;
 using UnityEngine;
 using UnityEngine.EventSystems;
 
 namespace FsmMaster;
 
 // In-game IMGUI overlay for browsing live FSMs and their state graphs, toggled by the configurable
-// toggle-overlay hotkey (BepInEx config, default "0"). Collects its own FsmSnapshot (see
+// toggle-overlay hotkey (loader-configured, default "0"). Collects its own FsmSnapshot (see
 // RefreshSnapshot) rather than sharing FsmMasterPlugin's - FsmMasterPlugin calls RefreshSnapshot for
 // it on initial Awake and on every scene load (it already owns the SceneManager.sceneLoaded
 // subscription for its own persisted-edit reapplication, so this reuses that rather than adding a
@@ -38,6 +35,10 @@ internal sealed class FsmGraphOverlay
     private const int MinBezierSegments = 6;
     private const int MaxBezierSegments = 40;
     private const float DynamicFontPointSize = 12f;
+
+    // Below this rendered point size (DynamicFontPointSize * _zoom) the graph's state-name/transition
+    // labels are too small to read, so DrawCachedGraph skips its whole label pass - see that call site.
+    private const float MinLegibleLabelPointSize = 5f;
     private const float TransitionLineThickness = 3f;
     private const float ActiveTransitionLineThickness = 6f;
     private const float SelectedTransitionOutlineMargin = 3f;
@@ -48,9 +49,9 @@ internal sealed class FsmGraphOverlay
     // default, "Arial" covers Mac and Wine-mapped fonts).
     private static readonly string[] DynamicFontNames = ["Segoe UI", "DejaVu Sans", "Liberation Sans", "Arial"];
 
-    // Every named color this overlay draws with is now a live BepInEx ConfigEntry<Color> (see
-    // FsmGraphColorConfig and the _colors field below) rather than a hardcoded constant, so the whole
-    // palette can be retuned via Configuration Manager's color picker without a recompile.
+    // Every named color this overlay draws with comes from the loader's own IFsmGraphColorConfig (see
+    // the _colors field below) rather than a hardcoded constant, so the whole palette can be retuned via
+    // whatever settings UI the loader provides, without a recompile.
 
     // Action-zone/drag-to-rebind tuning - fixed screen pixels, not scaled by zoom (see
     // TryHitTestTransitionLine's own comment on why click-precision tolerances stay fixed).
@@ -58,13 +59,14 @@ internal sealed class FsmGraphOverlay
     private const float DragStartThreshold = 4f;
     private const double DoubleClickWindowSeconds = 0.35;
 
-    private readonly ManualLogSource _logger;
+    private readonly IFsmLog _logger;
+    private readonly GraphProfiler _profiler;
     private readonly FsmEditManager _editManager;
     private readonly FsmTabManager _tabManager;
-    private readonly ConfigEntry<KeyboardShortcut> _toggleOverlayHotkey;
-    private readonly ConfigEntry<KeyboardShortcut> _toggleMinimalViewHotkey;
-    private readonly FsmGraphColorConfig _colors;
-    private readonly FsmGraphPerformanceConfig _performance;
+    private readonly IFsmHotkey _toggleOverlayHotkey;
+    private readonly IFsmHotkey _toggleMinimalViewHotkey;
+    private readonly IFsmGraphColorConfig _colors;
+    private readonly IFsmGraphPerformanceConfig _performance;
 
     // Unlit, vertex-colored built-in shader shared by every GL batch this overlay draws (transition
     // lines and node chrome alike) instead of one GUI.DrawTexture call per line segment/rounded-rect
@@ -237,28 +239,59 @@ internal sealed class FsmGraphOverlay
         // texture per corner).
         public readonly List<(Vector2 Position, Color Color)> ChromeVertexBuffer = new();
 
-        // Everything DrawCachedGraph's node/pseudo-node chrome gathering pass actually reads that isn't
-        // already covered by NodeLayoutVersion (pan/zoom/canvas/selection/edit-generation) - tracked
-        // alongside it so that pass can be skipped (leaving ChromeVertexBuffer exactly as the previous
-        // Repaint left it) on every frame where none of it has actually changed, rather than
-        // re-tessellating every rounded rect on the graph from scratch on every single Repaint
-        // regardless. This is the cost Detailed box style pays that Standard mostly doesn't (see
-        // GraphBoxStyle) - a state box with several transition rows emits multiple
-        // AddRoundedRectToChromeBuffer calls, each an 8-segment trig-driven fan per rounded corner, and
-        // a large FSM's worth of that redone every frame whether or not anything actually moved was the
-        // dominant remaining Detailed-mode cost once per-frame work was already gated to Repaint-only
-        // and off-screen-culled (see the comments earlier in DrawCachedGraph). activeStateName is read
-        // live (see DrawCachedGraph) since it drives the active-halo ring and title color and changes
-        // independently of everything NodeLayoutVersion tracks; the selected state and BoxStyle are
-        // likewise read live rather than folded into edit generation. ConfigGeneration (see
-        // FsmGraphPerformanceConfig) is what keeps a color retuned live via Configuration Manager from
-        // going stale here for longer than one frame. Dimming (see ApplyDim) is deliberately NOT part
-        // of this cache key - it's applied as a pure per-flush color multiplier at draw time, so the
-        // same cached buffer contents are correct whether or not this pass happens to be dimmed.
+        // Retained GPU mesh built from ChromeVertexBuffer, so FlushChromeBufferGL can draw the whole
+        // frame's chrome in one Graphics.DrawMeshNow call instead of a GL.Vertex3 per vertex (tens of
+        // thousands on a large FSM - the measured dominant Repaint cost). Rebuilt only when the gathered
+        // geometry actually changes (ChromeBufferRevision, bumped wherever the buffer is rebuilt) or the
+        // dim multiplier baked into its vertex colors differs (ChromeMeshDim); on a static frame the same
+        // mesh is simply redrawn. A UnityEngine.Object, so it must be Destroyed on scene reload/shutdown
+        // (see InvalidateGraphCaches/Shutdown) rather than just dropped, like _glMaterial/_dynamicFont.
+        public Mesh? ChromeMesh;
+        public int ChromeBufferRevision;
+        public int ChromeMeshRevision = -1;
+        public bool ChromeMeshDim;
+
+        // Retained line mesh, mirroring the chrome mesh above, plus the tessellated vertex buffer it's
+        // built from (the Emit* helpers walk each polyline in LineDrawBuffer into this). Topology depends
+        // on the line style - triangles for Thick (filled, anti-aliased quads), lines for Thin/Straight -
+        // so LineMeshTriangles records which the current mesh was built as, forcing a rebuild on a style
+        // switch. Rebuilt only when the tessellation actually changes (LineBufferRevision) or the dim/
+        // topology baked in differs; otherwise redrawn as-is, the same way the chrome mesh is. Also a
+        // UnityEngine.Object needing Destroy on scene reload/shutdown.
+        public readonly List<(Vector2 Position, Color Color)> LineVertexBuffer = new();
+        public Mesh? LineMesh;
+        public int LineBufferRevision;
+        public int LineMeshRevision = -1;
+        public bool LineMeshDim;
+        public bool LineMeshTriangles;
+
+        // Base-line tessellation cache key - the inputs LineVertexBuffer's contents depend on. Unlike the
+        // chrome base cache, lines DO depend on the active/selected state (the active state's outgoing
+        // lines draw thicker/cyan, a selected state's get an outline), and on the line style, so those
+        // are part of the key here. A drag-preview line (whose endpoint tracks the mouse every frame)
+        // forces a rebuild while present - see LineCacheDragPreview.
+        public int LineCacheLayoutVersion = -1;
+        public Rect LineCacheVisibleRect;
+        public string? LineCacheActiveStateName;
+        public string? LineCacheSelectedStateName;
+        public GraphLineStyle LineCacheStyle;
+        public int LineCacheConfigGeneration = -1;
+        public bool LineCacheDragPreview;
+
+        // Everything DrawCachedGraph's BASE (non-highlight) chrome gathering pass reads that isn't
+        // already covered by NodeLayoutVersion (pan/zoom/canvas/edit-generation) - tracked alongside it
+        // so that pass, and the mesh upload it feeds, can be skipped (reusing ChromeVertexBuffer and its
+        // mesh exactly as the previous Repaint left them) on every frame none of it changed, rather than
+        // re-tessellating every rounded rect from scratch. Deliberately does NOT include the active/
+        // selected/fade state: those drive only the small per-frame _dynamicChromeBuffer overlay drawn on
+        // top (see DrawCachedGraph's dynamic pass), so a boss changing states many times a second leaves
+        // this base geometry cached instead of invalidating all of it every frame - the single biggest
+        // remaining combat cost before that split. BoxStyle changes the base geometry (rounded vs square,
+        // dividers) so it stays here; ConfigGeneration (see FsmGraphPerformanceConfig) keeps a live color
+        // retune from going stale for longer than one frame. Dimming (see ApplyDim) is NOT part of this
+        // key - it's a per-draw color multiplier, so the same cached contents are correct dimmed or not.
         public int ChromeCacheLayoutVersion = -1;
         public Rect ChromeCacheVisibleRect;
-        public string? ChromeCacheActiveStateName;
-        public string? ChromeCacheSelectedStateName;
         public GraphBoxStyle ChromeCacheBoxStyle;
         public int ChromeCacheConfigGeneration = -1;
     }
@@ -304,16 +337,17 @@ internal sealed class FsmGraphOverlay
     private DraggingTransition? _draggingTransition;
 
     public FsmGraphOverlay(
-        ManualLogSource logger,
+        IFsmLog logger,
         FsmEditManager editManager,
         FsmTabManager tabManager,
-        ConfigEntry<KeyboardShortcut> toggleOverlayHotkey,
-        ConfigEntry<KeyboardShortcut> toggleMinimalViewHotkey,
-        FsmGraphColorConfig colors,
-        FsmGraphPerformanceConfig performance,
+        IFsmHotkey toggleOverlayHotkey,
+        IFsmHotkey toggleMinimalViewHotkey,
+        IFsmGraphColorConfig colors,
+        IFsmGraphPerformanceConfig performance,
         bool startVisible = false)
     {
         _logger = logger;
+        _profiler = new GraphProfiler(logger);
         _editManager = editManager;
         _tabManager = tabManager;
         _toggleOverlayHotkey = toggleOverlayHotkey;
@@ -330,6 +364,10 @@ internal sealed class FsmGraphOverlay
         // still-live Fsm instances forever, stacked underneath whatever the next Awake's own tracker
         // subscribes afresh.
         _activeStateTracker.UnsubscribeAll();
+
+        // Destroys every cache's retained ChromeMesh (a UnityEngine.Object) alongside the material/font
+        // below, so a ScriptEngine reload doesn't leak them - same teardown symmetry as the rest here.
+        InvalidateGraphCaches();
 
         if (_glMaterial != null)
         {
@@ -383,7 +421,7 @@ internal sealed class FsmGraphOverlay
         // Both hotkeys are gated on !CanvasTextField.AnyFieldFocused - values typed into the Actions/
         // Events/Variables panel's edit fields (FsmActiveStatePanel) routinely contain digits matching
         // these hotkeys' default bindings, which would otherwise toggle this overlay mid-edit.
-        if (!CanvasTextField.AnyFieldFocused && _toggleOverlayHotkey.Value.IsDown())
+        if (!CanvasTextField.AnyFieldFocused && _toggleOverlayHotkey.IsDown())
         {
             bool wasVisible = _isVisible;
             _isVisible = !_isVisible;
@@ -398,7 +436,7 @@ internal sealed class FsmGraphOverlay
         // toggle-minimal-view is a secondary toggle nested within that. Pressing it again restores it.
         // Only active while the overlay itself is on. Line/box rendering detail is a separate, always-
         // applied setting now (see FsmGraphPerformanceConfig), not tied to this hotkey.
-        if (_isVisible && !CanvasTextField.AnyFieldFocused && _toggleMinimalViewHotkey.Value.IsDown())
+        if (_isVisible && !CanvasTextField.AnyFieldFocused && _toggleMinimalViewHotkey.IsDown())
         {
             _selectionUiVisible = !_selectionUiVisible;
             _logger.LogInfo($"[FsmMaster] Graph overlay: minimal view {(!_selectionUiVisible ? "on" : "off")}.");
@@ -736,7 +774,31 @@ internal sealed class FsmGraphOverlay
     // path - a pinned tab's cache rebuilding on the next frame it's drawn costs nothing meaningful.
     private void InvalidateGraphCaches()
     {
+        // Each cache's retained chrome/line meshes are UnityEngine.Objects - dropping the cache without
+        // Destroying them would leak the native meshes on every scene load, so tear them down first.
+        foreach (GraphLayoutCache cache in _layoutCachesByFsmKey.Values)
+        {
+            DestroyCacheMeshes(cache);
+        }
+
         _layoutCachesByFsmKey.Clear();
+    }
+
+    private static void DestroyCacheMeshes(GraphLayoutCache cache)
+    {
+        if (cache.ChromeMesh != null)
+        {
+            UnityEngine.Object.Destroy(cache.ChromeMesh);
+            cache.ChromeMesh = null;
+            cache.ChromeMeshRevision = -1;
+        }
+
+        if (cache.LineMesh != null)
+        {
+            UnityEngine.Object.Destroy(cache.LineMesh);
+            cache.LineMesh = null;
+            cache.LineMeshRevision = -1;
+        }
     }
 
     // FsmState.Position values live in PlayMaker's own unbounded editor-canvas space, authored
@@ -837,7 +899,14 @@ internal sealed class FsmGraphOverlay
 
         if (structuralCacheStale)
         {
+            bool diagLayout = _performance.DiagnosticsEnabled.Value;
+            long layoutStart = diagLayout ? _profiler.Now() : 0L;
             RebuildNodeLayoutCache(fsm, localCanvasRect);
+            if (diagLayout)
+            {
+                _profiler.Record(GraphProfiler.Phase.LayoutRebuild, layoutStart);
+            }
+
             _currentCache.NodeLayoutVersion++;
             _currentCache.LayoutCacheComponent = fsm.Component;
             _currentCache.LayoutCachePanCenter = _panWorldCenter;
@@ -1185,6 +1254,35 @@ internal sealed class FsmGraphOverlay
         return new Rect(minX, minY, maxX - minX, maxY - minY);
     }
 
+    // Snapshots this Repaint's total span and the geometry it drew into the profiler - called from both
+    // DrawCachedGraph exit paths (labels drawn, and labels skipped when zoomed out) so a skipped-label
+    // frame still shows up in the summary rather than silently dropping out of the window's averages.
+    // Only ever called while diagnostics are enabled (see the diag guards at each call site).
+    private void ReportProfilerFrame(long frameStart, bool chromeCacheValid, bool labelsSkipped)
+    {
+        long repaintTicks = _profiler.Now() - frameStart;
+
+        int nodes = 0;
+        int rows = 0;
+        if (_currentCache.NodeLayoutCache != null)
+        {
+            nodes = _currentCache.NodeLayoutCache.Count;
+            foreach (NodeLayout node in _currentCache.NodeLayoutCache.Values)
+            {
+                rows += node.Rows.Count;
+            }
+        }
+
+        _profiler.FrameComplete(
+            repaintTicks,
+            nodes,
+            rows,
+            _currentCache.LineDrawBuffer.Count,
+            _currentCache.ChromeVertexBuffer.Count,
+            chromeCacheValid,
+            labelsSkipped);
+    }
+
     // Renders one FSM's graph from its already-built layout cache: gathers line/chrome geometry into
     // GL batches, draws state/event labels, then (when interactive) hit-tests this frame's mouse-down
     // against transition action zones and node rects to drive click/drag handling.
@@ -1199,12 +1297,6 @@ internal sealed class FsmGraphOverlay
         // the layout cache (which only tracks pan/zoom/selection/canvas-size).
         string? activeStateName = fsm.Fsm.ActiveStateName;
 
-        // Whether ANY state on this FSM currently has a "was active" fade running - forces the chrome
-        // cache below to rebuild every Repaint while true, since a fade's progress changes continuously
-        // and none of chromeCacheValid's other inputs (layout version, active/selected state name, box
-        // style, config generation) would otherwise ever catch that on their own.
-        bool anyFading = _activeStateTracker.HasAnyFading(fsmKey);
-
         // Unity dispatches OnGUI once per Layout pass plus once per queued input event (MouseMove,
         // ScrollWheel, etc.), in addition to Repaint - only Repaint actually puts pixels on screen,
         // so issuing the full set of DrawTexture/Label calls on every other event type was pure
@@ -1212,8 +1304,6 @@ internal sealed class FsmGraphOverlay
         // Click-through detection further below still needs to run on MouseDown regardless.
         if (Event.current.type == EventType.Repaint)
         {
-            EnsureTextStyles();
-
             // Off-screen nodes/edges are skipped entirely rather than drawn-then-clipped by GUIClip -
             // a boss or late-game enemy FSM can easily have 100+ states, and once zoomed/panned in on
             // a small region most of them sit outside the canvas. GUIClip still eats the CPU cost of
@@ -1230,6 +1320,13 @@ internal sealed class FsmGraphOverlay
             // which bypasses GUIClip entirely - so the only way to keep it out of the panel's screen
             // region is to never add it to those GL buffers in the first place.
             Rect visibleRect = interactiveRect;
+
+            // Per-phase timing for the diagnostics summary (see GraphProfiler) - every read/Record below
+            // is gated on this flag, so with diagnostics off the Repaint path is untouched. frameStart
+            // spans the whole Repaint branch; each phase brackets its own section within it.
+            bool diag = _performance.DiagnosticsEnabled.Value;
+            long frameStart = diag ? _profiler.Now() : 0L;
+
             _currentCache.LineDrawBuffer.Clear();
 
             // See the _chromeCache* fields' declaration comment - true when every input the chrome
@@ -1237,18 +1334,32 @@ internal sealed class FsmGraphOverlay
             // _currentCache.ChromeVertexBuffer, letting that whole pass be skipped and the previous frame's buffer
             // reused untouched instead of re-tessellating every rounded rect on the graph again for an
             // output that would come out pixel-identical anyway.
+            // Deliberately independent of the active/fading/selected state now - those drive only the
+            // per-frame dynamic highlight overlay (see the dynamic pass below), never this cached base
+            // chrome, so a boss changing states many times a second no longer re-tessellates and
+            // re-uploads the whole graph's geometry every frame. Base chrome only rebuilds on an actual
+            // layout/pan/zoom/edit change (NodeLayoutVersion), a viewport change, a box-style switch, or
+            // a live color retune (ConfigGeneration).
             bool chromeCacheValid = _currentCache.ChromeCacheLayoutVersion == _currentCache.NodeLayoutVersion
                 && _currentCache.ChromeCacheVisibleRect == visibleRect
-                && _currentCache.ChromeCacheActiveStateName == activeStateName
-                && _currentCache.ChromeCacheSelectedStateName == _selectedStateName
                 && _currentCache.ChromeCacheBoxStyle == _performance.BoxStyle.Value
-                && _currentCache.ChromeCacheConfigGeneration == _performance.Generation
-                && !anyFading;
+                && _currentCache.ChromeCacheConfigGeneration == _performance.Generation;
 
             if (!chromeCacheValid)
             {
                 _currentCache.ChromeVertexBuffer.Clear();
+
+                // Marks the buffer contents as changed so FlushChromeBufferGL rebuilds its retained mesh
+                // from them this frame; a cache-valid frame leaves this untouched and reuses the mesh.
+                _currentCache.ChromeBufferRevision++;
             }
+
+            // Base (non-highlight) chrome - the pseudo-node outlines and every node's default appearance -
+            // is gathered into the cached buffer; the dynamic highlight overlay further down retargets the
+            // Add*ToChromeBuffer helpers to _dynamicChromeBuffer instead.
+            _chromeTarget = _currentCache.ChromeVertexBuffer;
+
+            long lineGatherStart = diag ? _profiler.Now() : 0L;
 
             if (_currentCache.GlobalPseudoNodeCache != null)
             {
@@ -1361,6 +1472,13 @@ internal sealed class FsmGraphOverlay
                 }
             }
 
+            if (diag)
+            {
+                _profiler.Record(GraphProfiler.Phase.LineGather, lineGatherStart);
+            }
+
+            long chromeGatherStart = diag ? _profiler.Now() : 0L;
+
             // Nodes (title band + transition rows) - chrome geometry collected here, actually drawn
             // in the chrome GL batch below (once every node's geometry has been gathered), so it
             // renders as one batch on top of the lines above. The title band and the last row each
@@ -1382,155 +1500,51 @@ internal sealed class FsmGraphOverlay
                         continue;
                     }
 
-                    // One shared radius for every rounded rect belonging to this node (active ring,
-                    // outer ring, title, last row). Previously each of those called GetScreenCornerRadius
-                    // on its own rect, and since the title/row bands are much shorter than the node as a
-                    // whole (TitleBarHeight/TransitionRowHeight vs. the node's full height), their radius
-                    // clamped down independently to a smaller value than the outer ring's - the two
-                    // curves no longer matched, leaving a thin "hook" of the outer ring's color poking out
-                    // past the tighter inner curve at every corner. Concentric rings (outer ring, active
-                    // ring) still need a correspondingly larger radius so their curve stays parallel to
-                    // this one rather than reusing it as-is, which is what the "+ offset" below does.
-                    bool standardBoxStyle = _performance.BoxStyle.Value == GraphBoxStyle.Standard;
-                    float cornerRadius = standardBoxStyle ? 0f : GetNodeCornerRadius(node.ScreenRect);
-
-                    // The active-indicator ring is the outer "chrome" halo - drawn behind and larger than
-                    // the inner ring below, so only its outer edge shows past it. Always the fixed
-                    // ActiveStateColor (cyan), regardless of the state's own theme - it's a generic
-                    // "this is active" signal, not a color-identity one. Disabled styling takes precedence
-                    // over active styling (see the line-color pass above for the same rule) - a disabled
-                    // state never shows the active halo even if it's still ActiveStateName for one frame.
-                    bool isActive = !node.IsDisabled && activeStateName != null && node.Name == activeStateName;
-                    bool isSelected = _selectedStateName != null && node.Name == _selectedStateName;
-
-                    // "Was active this frame (per the StateChanged hook - see FsmActiveStateTracker),
-                    // but isn't the FSM's final resolved active state" - 0 right after it stopped being
-                    // active, 1 once its 1s fade has fully settled back to this node's own default look.
-                    // Never set for an already-active or disabled node - disabled matches the isActive
-                    // rule above, and a node can't be both active and fading for the same reconciliation.
-                    float? fadeT = node.IsDisabled ? null : _activeStateTracker.GetFadeProgress(fsmKey, node.Name);
-
-                    // Selected-state ring(s) are added first (outermost), so the active halo and inner
-                    // ring below still draw on top of them. A state that's both active and selected gets
-                    // a third ring further out than the normal active halo; a state that's only selected
-                    // gets a single ring in the same slot the active halo would otherwise occupy.
-                    if (isActive && isSelected)
-                    {
-                        float selectedOffset = (NodeBorderThickness + NodeActiveOutlineThickness + NodeSelectedOutlineThickness) * _zoom;
-                        var selectedRect = new Rect(
-                            node.ScreenRect.x - selectedOffset,
-                            node.ScreenRect.y - selectedOffset,
-                            node.ScreenRect.width + selectedOffset * 2f,
-                            node.ScreenRect.height + selectedOffset * 2f);
-                        AddRoundedRectToChromeBuffer(selectedRect, cornerRadius + selectedOffset, _colors.SelectedStateColor.Value);
-                    }
-                    else if (isSelected)
-                    {
-                        float selectedOffset = (NodeBorderThickness + NodeActiveOutlineThickness) * _zoom;
-                        var selectedRect = new Rect(
-                            node.ScreenRect.x - selectedOffset,
-                            node.ScreenRect.y - selectedOffset,
-                            node.ScreenRect.width + selectedOffset * 2f,
-                            node.ScreenRect.height + selectedOffset * 2f);
-                        AddRoundedRectToChromeBuffer(selectedRect, cornerRadius + selectedOffset, _colors.SelectedStateColor.Value);
-                    }
-
-                    if (isActive || fadeT.HasValue)
-                    {
-                        // Same ring, same position, for both cases - only its color differs: solid
-                        // ActiveStateColor while genuinely active, or that same color fading toward
-                        // fully transparent (never toward a literal "default ring color," since a
-                        // non-active node has no ring of its own to fade into - see GetFadingActiveColor)
-                        // while merely fading. isSelected's own "not active" offset above already
-                        // reserves this exact radial slot regardless of which of the two this is, so a
-                        // fading + selected node's rings still stack correctly.
-                        Color ringColor = isActive ? _colors.ActiveStateColor.Value : GetFadingActiveColor(fadeT!.Value);
-                        float activeOffset = (NodeBorderThickness + NodeActiveOutlineThickness) * _zoom;
-                        var activeRect = new Rect(
-                            node.ScreenRect.x - activeOffset,
-                            node.ScreenRect.y - activeOffset,
-                            node.ScreenRect.width + activeOffset * 2f,
-                            node.ScreenRect.height + activeOffset * 2f);
-                        AddRoundedRectToChromeBuffer(activeRect, cornerRadius + activeOffset, ringColor);
-                    }
-
-                    // The inner ring - drawn on top of the active halo above - is NodeOutlineColor's white
-                    // by default, switching to the state's own theme color (or the ActiveStateColor
-                    // fallback for an unthemed (colorIndex 0) state - see GetActiveOutlineColor) while
-                    // active, or DisabledOutlineColor's grey while disabled (right-click-disabled state).
-                    // Title/rows below are drawn full node width and round their own top/bottom corners
-                    // themselves, fully covering the inner area, so no separate inner fill pass is needed
-                    // here. Always present in the Detailed box style; in Standard it's skipped for a plain,
-                    // non-active/non-selected state, so only active/selected states show a border at all.
-                    Color innerOutlineColor = node.IsDisabled
-                        ? _colors.DisabledOutlineColor.Value
-                        : isActive
-                            ? GetActiveOutlineColor(node.ColorIndex)
-                            : fadeT.HasValue
-                                ? Color.Lerp(GetActiveOutlineColor(node.ColorIndex), _colors.NodeOutlineColor.Value, fadeT.Value)
-                                : _colors.NodeOutlineColor.Value;
-                    if (!standardBoxStyle || isActive || isSelected || fadeT.HasValue)
-                    {
-                        float outlineThickness = NodeBorderThickness * _zoom;
-                        var outerRect = new Rect(
-                            node.ScreenRect.x - outlineThickness,
-                            node.ScreenRect.y - outlineThickness,
-                            node.ScreenRect.width + outlineThickness * 2f,
-                            node.ScreenRect.height + outlineThickness * 2f);
-                        AddRoundedRectToChromeBuffer(outerRect, cornerRadius + outlineThickness, innerOutlineColor);
-                    }
-
-                    // Title band is this state's own color by default (colorIndex 0 baked to black - see
-                    // NodeLayout.FillColor), switching to the fixed ActiveTitleBackgroundColor (light blue)
-                    // while it's the active state - see the label pass below for its matching black text.
-                    bool titleIsOnlyBand = node.Rows.Count == 0;
-                    Color titleFillColor = isActive
-                        ? _colors.ActiveTitleBackgroundColor.Value
-                        : fadeT.HasValue
-                            ? Color.Lerp(_colors.ActiveTitleBackgroundColor.Value, node.FillColor, fadeT.Value)
-                            : node.FillColor;
-                    AddRoundedRectToChromeBuffer(node.TitleRect, cornerRadius, titleFillColor, roundTop: true, roundBottom: titleIsOnlyBand);
-                    // Title/row labels are deliberately NOT drawn here (see the label pass after both GL
-                    // flushes below).
-
-                    // Title/row divider - same color as the inner ring (see above), so every separator on
-                    // the node reads as one consistent "outline" whether or not the state is active. Skipped
-                    // entirely in the Standard box style ("no separating lines"), regardless of active/
-                    // selected state.
-                    float dividerThickness = NodeBorderThickness * _zoom;
-                    if (!standardBoxStyle && node.Rows.Count > 0)
-                    {
-                        AddFilledRectToChromeBuffer(new Rect(node.ScreenRect.x, node.TitleRect.yMax - dividerThickness / 2f, node.ScreenRect.width, dividerThickness), innerOutlineColor);
-                    }
-
-                    for (int i = 0; i < node.Rows.Count; i++)
-                    {
-                        TransitionRow row = node.Rows[i];
-                        bool isLastRow = i == node.Rows.Count - 1;
-
-                        if (isLastRow)
-                        {
-                            AddRoundedRectToChromeBuffer(row.Rect, cornerRadius, _colors.TransitionRowBackgroundColor.Value, roundTop: false, roundBottom: true);
-                        }
-                        else
-                        {
-                            AddFilledRectToChromeBuffer(row.Rect, _colors.TransitionRowBackgroundColor.Value);
-                        }
-
-                        if (!standardBoxStyle && !isLastRow)
-                        {
-                            AddFilledRectToChromeBuffer(new Rect(node.ScreenRect.x, row.Rect.yMax - dividerThickness / 2f, node.ScreenRect.width, dividerThickness), innerOutlineColor);
-                        }
-                    }
+                    // Base appearance only - active/selected/fade highlights are the dynamic overlay's
+                    // job below, deliberately kept out of this cached base geometry so a state change
+                    // never invalidates and rebuilds it.
+                    GatherNodeChrome(node, isActive: false, isSelected: false, fadeT: null);
                 }
+            }
+
+            // Per-frame highlight overlay: only the handful of nodes currently active, fading, or selected
+            // re-emit their full chrome (rings, halo, active-colored outline/title) into a small buffer
+            // drawn on top of the cached base mesh (see FlushDynamicChromeGL). This is what lets the base
+            // chrome stay cached across a boss's rapid state changes - previously each state change/fade
+            // forced the whole graph to re-tessellate and re-upload every frame, the dominant combat cost.
+            // The highlighted node's base version underneath is fully overdrawn by this (same rects, plus
+            // rings extending outward), so the result matches the old single-pass appearance.
+            _dynamicChromeBuffer.Clear();
+            _chromeTarget = _dynamicChromeBuffer;
+            foreach (NodeLayout node in _currentCache.NodeLayoutCache.Values)
+            {
+                if (!node.ScreenRect.Overlaps(visibleRect))
+                {
+                    continue;
+                }
+
+                // Disabled styling takes precedence over active styling (see the line-color pass above) -
+                // a disabled state never shows the active halo even if it's still ActiveStateName for one
+                // frame, hence the !node.IsDisabled guard.
+                bool isActive = !node.IsDisabled && activeStateName != null && node.Name == activeStateName;
+                bool isSelected = _selectedStateName != null && node.Name == _selectedStateName;
+                float? fadeT = node.IsDisabled ? null : _activeStateTracker.GetFadeProgress(fsmKey, node.Name);
+
+                if (isActive || isSelected || fadeT.HasValue)
+                {
+                    GatherNodeChrome(node, isActive, isSelected, fadeT);
+                }
+            }
+
+            if (diag)
+            {
+                _profiler.Record(GraphProfiler.Phase.ChromeGather, chromeGatherStart);
             }
 
             if (!chromeCacheValid)
             {
                 _currentCache.ChromeCacheLayoutVersion = _currentCache.NodeLayoutVersion;
                 _currentCache.ChromeCacheVisibleRect = visibleRect;
-                _currentCache.ChromeCacheActiveStateName = activeStateName;
-                _currentCache.ChromeCacheSelectedStateName = _selectedStateName;
                 _currentCache.ChromeCacheBoxStyle = _performance.BoxStyle.Value;
                 _currentCache.ChromeCacheConfigGeneration = _performance.Generation;
             }
@@ -1538,12 +1552,59 @@ internal sealed class FsmGraphOverlay
             // One GL batch for every line gathered above - drawn before the chrome batch below so
             // node/pseudo chrome sits on top of the lines, matching the layering the old per-shape
             // GUI.DrawTexture calls also preserved.
-            DrawLineBufferGL(canvasScreenOffset, interactiveRect.width, dim);
+            long lineEmitStart = diag ? _profiler.Now() : 0L;
+            DrawLineBufferGL(
+                canvasScreenOffset,
+                interactiveRect.width,
+                dim,
+                activeStateName,
+                visibleRect,
+                dragPreviewActive: interactive && _draggingTransition is { HasCrossedThreshold: true });
+            if (diag)
+            {
+                _profiler.Record(GraphProfiler.Phase.LineEmit, lineEmitStart);
+            }
 
             // One GL batch for every rounded-rect/fill gathered above - drawn after the line batch so
             // node/pseudo chrome sits on top of the lines, matching the layering the old per-shape
             // GUI.DrawTexture calls also preserved.
+            long chromeEmitStart = diag ? _profiler.Now() : 0L;
             FlushChromeBufferGL(canvasScreenOffset, interactiveRect.width, dim);
+
+            // The active/selected/fade highlight overlay, drawn on top of the cached base chrome mesh.
+            // Kept as an immediate-mode GL batch rather than its own retained mesh: it covers only the few
+            // highlighted nodes, so its vertex count is tiny, and it changes every frame (fades, active-
+            // state moves), which is exactly the case a retained mesh doesn't help.
+            FlushDynamicChromeGL(canvasScreenOffset, interactiveRect.width, dim);
+            if (diag)
+            {
+                _profiler.Record(GraphProfiler.Phase.ChromeEmit, chromeEmitStart);
+            }
+
+            // Below this rendered point size the state-name/transition labels are too small to read - a
+            // whole large FSM zoomed out to fit on screen renders them at ~1-4px - so the entire label
+            // pass (the graph's most expensive per-item draw: one GUI.Label per visible state name and
+            // transition row, each doing its own text layout) is skipped once the text is illegible
+            // anyway. The colored node/line chrome drawn above still conveys the graph's structure, so
+            // only the unreadable text is dropped. DynamicFontPointSize * _zoom is exactly the title
+            // font's own rendered size (see EnsureTextStyles), matching MinLegibleLabelPointSize's units.
+            // Returning is safe here specifically: nothing else runs in this Repaint branch after the
+            // label pass, and the MouseDown hit-testing below is guarded on EventType.MouseDown, which
+            // never coincides with the Repaint event type this branch already requires.
+            if (DynamicFontPointSize * _zoom < MinLegibleLabelPointSize)
+            {
+                if (diag)
+                {
+                    ReportProfilerFrame(frameStart, chromeCacheValid, labelsSkipped: true);
+                }
+
+                return;
+            }
+
+            // Deferred until here (rather than the top of the Repaint branch) so a zoomed-out graph
+            // whose labels are skipped above never pays to rebuild the GUIStyles on a zoom-only change.
+            long labelsStart = diag ? _profiler.Now() : 0L;
+            EnsureTextStyles();
 
             // Labels are drawn last, only once every line/chrome GL batch above has actually been
             // rendered. Drawing them earlier (interleaved with chrome collection, as a first attempt
@@ -1609,6 +1670,12 @@ internal sealed class FsmGraphOverlay
 
             GUI.color = previousGuiColor;
             GUI.EndGroup();
+
+            if (diag)
+            {
+                _profiler.Record(GraphProfiler.Phase.Labels, labelsStart);
+                ReportProfilerFrame(frameStart, chromeCacheValid, labelsSkipped: false);
+            }
         }
 
         // Gated on interactiveRect (not just node.ScreenRect) so a click on the uGUI right panel never
@@ -1800,7 +1867,7 @@ internal sealed class FsmGraphOverlay
     // reflection walk it already does for read-only display, not a new one) for a field whose value is
     // an FsmEvent with a matching .Name, or an FsmEvent[] containing one - compared by name, not
     // reference, since FsmEvent.GetFsmEvent only interns while PlayMakerGlobals.IsPlaying and
-    // FsmUtil.AddGlobalTransition builds events via `new FsmEvent(...)` instead of that interning path.
+    // PlayMakerFsmOps.AddGlobalTransition builds events via `new FsmEvent(...)` instead of that interning path.
     // First match wins, consistent with FsmEditManager.FindExitEvent's own first/last-match precedent.
     private static int? FindActionIndexForEvent(FsmStateInfo state, string eventName)
     {
@@ -1860,7 +1927,7 @@ internal sealed class FsmGraphOverlay
             {
                 if (row.EventName == eventName)
                 {
-                    isSourceEnd = Vector2.Distance(mousePos, row.CurvePoints[0]) <= Vector2.Distance(mousePos, row.CurvePoints[^1]);
+                    isSourceEnd = Vector2.Distance(mousePos, row.CurvePoints[0]) <= Vector2.Distance(mousePos, row.CurvePoints[row.CurvePoints.Length - 1]);
                     break;
                 }
             }
@@ -2232,13 +2299,164 @@ internal sealed class FsmGraphOverlay
         return new Color(active.r, active.g, active.b, active.a * (1f - fadeT));
     }
 
-    private const int CornerFanSegments = 8;
+    // Appends one node's chrome (selection/active rings, halo, inner outline, title band, transition
+    // rows) into the current _chromeTarget. Called two ways: with all-default flags for the cached base
+    // pass (every visible node, into the retained mesh) and with the node's real active/selected/fade
+    // state for the per-frame highlight overlay (only the few affected nodes, into _dynamicChromeBuffer,
+    // drawn on top). Splitting it this way is what keeps the base geometry cached across a boss's rapid
+    // state changes - only the highlight redraws each frame. See DrawCachedGraph's two chrome passes.
+    private void GatherNodeChrome(NodeLayout node, bool isActive, bool isSelected, float? fadeT)
+    {
+        // One shared radius for every rounded rect belonging to this node (rings, outline, title, last
+        // row) - see GetNodeCornerRadius for why they must share one value rather than each clamping its
+        // own (shorter) band down independently, which used to leave mismatched concentric curves.
+        bool standardBoxStyle = _performance.BoxStyle.Value == GraphBoxStyle.Standard;
+        float cornerRadius = standardBoxStyle ? 0f : GetNodeCornerRadius(node.ScreenRect);
+
+        // Selected-state ring(s) are added first (outermost), so the active halo and inner ring below
+        // still draw on top of them. A state that's both active and selected gets a third ring further
+        // out than the normal active halo; a state that's only selected gets a single ring in the slot
+        // the active halo would otherwise occupy.
+        if (isActive && isSelected)
+        {
+            float selectedOffset = (NodeBorderThickness + NodeActiveOutlineThickness + NodeSelectedOutlineThickness) * _zoom;
+            var selectedRect = new Rect(
+                node.ScreenRect.x - selectedOffset,
+                node.ScreenRect.y - selectedOffset,
+                node.ScreenRect.width + selectedOffset * 2f,
+                node.ScreenRect.height + selectedOffset * 2f);
+            AddRoundedRectToChromeBuffer(selectedRect, cornerRadius + selectedOffset, _colors.SelectedStateColor.Value);
+        }
+        else if (isSelected)
+        {
+            float selectedOffset = (NodeBorderThickness + NodeActiveOutlineThickness) * _zoom;
+            var selectedRect = new Rect(
+                node.ScreenRect.x - selectedOffset,
+                node.ScreenRect.y - selectedOffset,
+                node.ScreenRect.width + selectedOffset * 2f,
+                node.ScreenRect.height + selectedOffset * 2f);
+            AddRoundedRectToChromeBuffer(selectedRect, cornerRadius + selectedOffset, _colors.SelectedStateColor.Value);
+        }
+
+        if (isActive || fadeT.HasValue)
+        {
+            // Solid ActiveStateColor while genuinely active, or that same color fading toward fully
+            // transparent while merely fading (see GetFadingActiveColor). isSelected's own "not active"
+            // offset above already reserves this exact radial slot, so a fading + selected node's rings
+            // still stack correctly.
+            Color ringColor = isActive ? _colors.ActiveStateColor.Value : GetFadingActiveColor(fadeT!.Value);
+            float activeOffset = (NodeBorderThickness + NodeActiveOutlineThickness) * _zoom;
+            var activeRect = new Rect(
+                node.ScreenRect.x - activeOffset,
+                node.ScreenRect.y - activeOffset,
+                node.ScreenRect.width + activeOffset * 2f,
+                node.ScreenRect.height + activeOffset * 2f);
+            AddRoundedRectToChromeBuffer(activeRect, cornerRadius + activeOffset, ringColor);
+        }
+
+        // The inner ring - drawn on top of the halo above - is NodeOutlineColor's white by default,
+        // switching to the state's own theme color (or the ActiveStateColor fallback for an unthemed
+        // colorIndex 0 state - see GetActiveOutlineColor) while active, the fade-lerp between them while
+        // fading, or DisabledOutlineColor's grey while disabled. Always present in Detailed; in Standard
+        // it's drawn only for an active/selected/fading state, so a plain state shows no border there.
+        Color innerOutlineColor = node.IsDisabled
+            ? _colors.DisabledOutlineColor.Value
+            : isActive
+                ? GetActiveOutlineColor(node.ColorIndex)
+                : fadeT.HasValue
+                    ? Color.Lerp(GetActiveOutlineColor(node.ColorIndex), _colors.NodeOutlineColor.Value, fadeT.Value)
+                    : _colors.NodeOutlineColor.Value;
+        if (!standardBoxStyle || isActive || isSelected || fadeT.HasValue)
+        {
+            float outlineThickness = NodeBorderThickness * _zoom;
+            var outerRect = new Rect(
+                node.ScreenRect.x - outlineThickness,
+                node.ScreenRect.y - outlineThickness,
+                node.ScreenRect.width + outlineThickness * 2f,
+                node.ScreenRect.height + outlineThickness * 2f);
+            AddRoundedRectToChromeBuffer(outerRect, cornerRadius + outlineThickness, innerOutlineColor);
+        }
+
+        // Title band is this state's own color by default (colorIndex 0 baked to black - see
+        // NodeLayout.FillColor), switching to the fixed ActiveTitleBackgroundColor (light blue) while
+        // active, or the fade-lerp toward it - see the label pass for its matching text color.
+        bool titleIsOnlyBand = node.Rows.Count == 0;
+        Color titleFillColor = isActive
+            ? _colors.ActiveTitleBackgroundColor.Value
+            : fadeT.HasValue
+                ? Color.Lerp(_colors.ActiveTitleBackgroundColor.Value, node.FillColor, fadeT.Value)
+                : node.FillColor;
+        AddRoundedRectToChromeBuffer(node.TitleRect, cornerRadius, titleFillColor, roundTop: true, roundBottom: titleIsOnlyBand);
+
+        // Title/row divider - same color as the inner ring, so every separator reads as one consistent
+        // outline whether or not the state is active. Skipped entirely in the Standard box style.
+        float dividerThickness = NodeBorderThickness * _zoom;
+        if (!standardBoxStyle && node.Rows.Count > 0)
+        {
+            AddFilledRectToChromeBuffer(new Rect(node.ScreenRect.x, node.TitleRect.yMax - dividerThickness / 2f, node.ScreenRect.width, dividerThickness), innerOutlineColor);
+        }
+
+        for (int i = 0; i < node.Rows.Count; i++)
+        {
+            TransitionRow row = node.Rows[i];
+            bool isLastRow = i == node.Rows.Count - 1;
+
+            if (isLastRow)
+            {
+                AddRoundedRectToChromeBuffer(row.Rect, cornerRadius, _colors.TransitionRowBackgroundColor.Value, roundTop: false, roundBottom: true);
+            }
+            else
+            {
+                AddFilledRectToChromeBuffer(row.Rect, _colors.TransitionRowBackgroundColor.Value);
+            }
+
+            if (!standardBoxStyle && !isLastRow)
+            {
+                AddFilledRectToChromeBuffer(new Rect(node.ScreenRect.x, row.Rect.yMax - dividerThickness / 2f, node.ScreenRect.width, dividerThickness), innerOutlineColor);
+            }
+        }
+    }
+
+    private const int MaxCornerFanSegments = 8;
+    private const int MinCornerFanSegments = 2;
+
+    // Target on-screen arc length per corner-fan segment. A corner rounded to a ~3px radius (a large FSM
+    // zoomed to fit) needs nowhere near the 8 segments a big zoomed-in corner does to still read as
+    // round, and each segment is one more triangle (3 vertices) in the chrome buffer that
+    // FlushChromeBufferGL then has to emit every Repaint - the dominant per-frame cost on a large graph.
+    // Scaling the count to the corner's actual radius keeps small corners cheap and large ones smooth.
+    private const float CornerArcTargetPixels = 3f;
+
+    private static int CornerSegmentsForRadius(float radius)
+    {
+        float quarterArcLength = radius * (Mathf.PI / 2f);
+        return Mathf.Clamp(Mathf.RoundToInt(quarterArcLength / CornerArcTargetPixels), MinCornerFanSegments, MaxCornerFanSegments);
+    }
+
+    // Whichever vertex buffer the chrome-gathering helpers currently append into - set to the cached
+    // base buffer (_currentCache.ChromeVertexBuffer) while gathering the pseudo-node outlines and every
+    // node's default appearance, and to _dynamicChromeBuffer while gathering the per-frame active/
+    // selected/fade highlight overlay. Lets the same Add*ToChromeBuffer helpers feed either without a
+    // target parameter threaded through all of them.
+    private List<(Vector2 Position, Color Color)> _chromeTarget = null!;
+
+    // Per-frame (never cached) buffer for the active/selected/fading nodes' highlight chrome, drawn on
+    // top of the cached base mesh each Repaint. Cleared and refilled every DrawCachedGraph call and
+    // emitted immediately (see FlushDynamicChromeGL) before the next call reuses it, so a single shared
+    // instance is safe across the active and any pinned-ghost passes.
+    private readonly List<(Vector2 Position, Color Color)> _dynamicChromeBuffer = new();
+
+    // Whichever line vertex buffer the Emit* line helpers currently append into - set to the drawing
+    // cache's LineVertexBuffer during tessellation (see DrawLineBufferGL). Mirrors _chromeTarget.
+    private List<(Vector2 Position, Color Color)> _lineTarget = null!;
+
+    private void AddLineVertex(Vector2 position, Color color) => _lineTarget.Add((position, color));
 
     private void AddTriangleToChromeBuffer(Vector2 a, Vector2 b, Vector2 c, Color color)
     {
-        _currentCache.ChromeVertexBuffer.Add((a, color));
-        _currentCache.ChromeVertexBuffer.Add((b, color));
-        _currentCache.ChromeVertexBuffer.Add((c, color));
+        _chromeTarget.Add((a, color));
+        _chromeTarget.Add((b, color));
+        _chromeTarget.Add((c, color));
     }
 
     private void AddFilledRectToChromeBuffer(Rect rect, Color color)
@@ -2303,10 +2521,11 @@ internal sealed class FsmGraphOverlay
             return;
         }
 
-        for (int i = 0; i < CornerFanSegments; i++)
+        int segments = CornerSegmentsForRadius(radius);
+        for (int i = 0; i < segments; i++)
         {
-            float angle0 = (fromDegrees + 90f * i / CornerFanSegments) * Mathf.Deg2Rad;
-            float angle1 = (fromDegrees + 90f * (i + 1) / CornerFanSegments) * Mathf.Deg2Rad;
+            float angle0 = (fromDegrees + 90f * i / segments) * Mathf.Deg2Rad;
+            float angle1 = (fromDegrees + 90f * (i + 1) / segments) * Mathf.Deg2Rad;
             Vector2 p0 = center + new Vector2(Mathf.Cos(angle0), Mathf.Sin(angle0)) * radius;
             Vector2 p1 = center + new Vector2(Mathf.Cos(angle1), Mathf.Sin(angle1)) * radius;
             AddTriangleToChromeBuffer(center, p0, p1, color);
@@ -2361,10 +2580,117 @@ internal sealed class FsmGraphOverlay
         return blended;
     }
 
-    // Draws every triangle gathered into _currentCache.ChromeVertexBuffer this frame as a single GL batch.
+    // Reused across every RebuildChromeMesh call (only one mesh is ever built at a time - _currentCache
+    // points at whichever FsmKey is drawing) so a rebuild copies the buffer into these instead of
+    // allocating fresh arrays. List.Clear keeps the backing array, so after warmup a rebuild allocates
+    // nothing; SetVertices/SetColors/SetTriangles then bulk-copy them into the mesh natively.
+    private readonly List<Vector3> _meshVertsScratch = new();
+    private readonly List<Color> _meshColorsScratch = new();
+    private readonly List<int> _meshIndicesScratch = new();
+
+    // Draws every triangle gathered into _currentCache.ChromeVertexBuffer this frame via a single
+    // retained-mesh draw call. The mesh is rebuilt only when the gathered geometry changed
+    // (ChromeBufferRevision) or the dim multiplier differs from what was baked into it - on a static
+    // frame (the common case: the layout and chrome cache are both valid) neither happens and the same
+    // mesh is redrawn, which is what replaces the tens of thousands of per-vertex immediate-mode calls
+    // this used to issue every Repaint on a large FSM.
     private void FlushChromeBufferGL(Vector2 canvasScreenOffset, float clipRightAbsolute, bool dim)
     {
         if (_currentCache.ChromeVertexBuffer.Count == 0)
+        {
+            return;
+        }
+
+        EnsureGlMaterial();
+        if (_glMaterial == null)
+        {
+            return;
+        }
+
+        if (_currentCache.ChromeMesh == null
+            || _currentCache.ChromeMeshRevision != _currentCache.ChromeBufferRevision
+            || _currentCache.ChromeMeshDim != dim)
+        {
+            RebuildChromeMesh(_currentCache, dim);
+        }
+
+        if (_currentCache.ChromeMesh == null)
+        {
+            return;
+        }
+
+        GL.PushMatrix();
+        ApplyClippedPixelMatrix(canvasScreenOffset, clipRightAbsolute);
+        _glMaterial.SetPass(0);
+
+        // The mesh holds the same absolute screen-space positions the GL.Vertex3 path fed directly, so
+        // it draws under the identity model matrix within the same pixel-space projection/viewport clip
+        // ApplyClippedPixelMatrix just set - mapping pixel-for-pixel exactly as the old per-vertex path.
+        Graphics.DrawMeshNow(_currentCache.ChromeMesh, Matrix4x4.identity);
+
+        GL.PopMatrix();
+        ResetGlViewport();
+    }
+
+    // Copies the gathered ChromeVertexBuffer (a flat triangle list, 3 vertices per triangle in draw
+    // order, so its index buffer is just the identity sequence) into the cache's retained Mesh, baking
+    // the dim multiplier into the vertex colors. UInt32 indices so a very large FSM can exceed the
+    // 65535-vertex 16-bit limit; MarkDynamic since it's re-uploaded whenever the chrome changes.
+    private void RebuildChromeMesh(GraphLayoutCache cache, bool dim)
+    {
+        List<(Vector2 Position, Color Color)> buffer = cache.ChromeVertexBuffer;
+        int count = buffer.Count;
+
+        _meshVertsScratch.Clear();
+        _meshColorsScratch.Clear();
+        for (int i = 0; i < count; i++)
+        {
+            (Vector2 position, Color color) = buffer[i];
+            _meshVertsScratch.Add(new Vector3(position.x, position.y, 0f));
+            _meshColorsScratch.Add(ApplyDim(color, dim));
+        }
+
+        while (_meshIndicesScratch.Count < count)
+        {
+            _meshIndicesScratch.Add(_meshIndicesScratch.Count);
+        }
+
+        if (_meshIndicesScratch.Count > count)
+        {
+            _meshIndicesScratch.RemoveRange(count, _meshIndicesScratch.Count - count);
+        }
+
+        if (cache.ChromeMesh == null)
+        {
+            cache.ChromeMesh = new Mesh { hideFlags = HideFlags.HideAndDontSave };
+            cache.ChromeMesh.MarkDynamic();
+        }
+
+        Mesh mesh = cache.ChromeMesh;
+        mesh.Clear();
+#if !NET35
+        // 32-bit indices so a very large FSM can exceed the 65535-vertex 16-bit default. Mesh.indexFormat
+        // is a 2017.3+ addition absent from the older Unity the HK1221 (net35) build targets; there the
+        // mesh keeps the 16-bit default, a ceiling the viewport-culled chrome buffer has stayed well
+        // under in practice (peak observed ~44k on a 164-state boss FSM).
+        mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+#endif
+        mesh.SetVertices(_meshVertsScratch);
+        mesh.SetColors(_meshColorsScratch);
+        mesh.SetTriangles(_meshIndicesScratch, 0);
+
+        cache.ChromeMeshRevision = cache.ChromeBufferRevision;
+        cache.ChromeMeshDim = dim;
+    }
+
+    // Draws the per-frame active/selected/fade highlight overlay (_dynamicChromeBuffer) as an immediate-
+    // mode GL triangle batch on top of the cached base chrome mesh. Small (only highlighted nodes) and
+    // rebuilt every frame, so immediate mode fits it better than a retained mesh would. GL.Color is
+    // deduped per color run - a node's rings/title/rows are long same-color spans - exactly as the base
+    // mesh bakes its own colors.
+    private void FlushDynamicChromeGL(Vector2 canvasScreenOffset, float clipRightAbsolute, bool dim)
+    {
+        if (_dynamicChromeBuffer.Count == 0)
         {
             return;
         }
@@ -2380,9 +2706,17 @@ internal sealed class FsmGraphOverlay
         _glMaterial.SetPass(0);
 
         GL.Begin(GL.TRIANGLES);
-        foreach ((Vector2 position, Color color) in _currentCache.ChromeVertexBuffer)
+        bool hasColor = false;
+        Color lastColor = default;
+        foreach ((Vector2 position, Color color) in _dynamicChromeBuffer)
         {
-            GL.Color(ApplyDim(color, dim));
+            if (!hasColor || color != lastColor)
+            {
+                GL.Color(ApplyDim(color, dim));
+                lastColor = color;
+                hasColor = true;
+            }
+
             GL.Vertex3(position.x, position.y, 0f);
         }
         GL.End();
@@ -2461,7 +2795,11 @@ internal sealed class FsmGraphOverlay
     // and easy to mistake for "fixed by zooming in" when large zoomed-in nodes happen to still overlap it).
     // clipRightAbsolute is interactiveRect.width (screen minus the uGUI right panel's docked strip -
     // see ApplyClippedPixelMatrix for why this needs a real Viewport clip, not just bounds culling).
-    private void DrawLineBufferGL(Vector2 canvasScreenOffset, float clipRightAbsolute, bool dim)
+    // Reused identity index buffer for the line mesh - like the chrome mesh's, but kept as an int[] since
+    // MeshTopology (Lines vs Triangles) is chosen per style and only Mesh.SetIndices takes a topology.
+    private int[] _lineIndexArray = ArrayPolyfill.Empty<int>();
+
+    private void DrawLineBufferGL(Vector2 canvasScreenOffset, float clipRightAbsolute, bool dim, string? activeStateName, Rect visibleRect, bool dragPreviewActive)
     {
         if (_currentCache.LineDrawBuffer.Count == 0)
         {
@@ -2474,52 +2812,150 @@ internal sealed class FsmGraphOverlay
             return;
         }
 
+        GraphLineStyle style = _performance.LineStyle.Value;
+
+        // Re-tessellate the polylines into LineVertexBuffer only when an input their geometry/color
+        // depends on has changed since the mesh was last built - mirrors chromeCacheValid. Lines DO
+        // depend on the active/selected state (active-state lines draw thicker/cyan, a selected state's
+        // get an outline) and on the line style, so those are part of the key. dim is deliberately NOT:
+        // like the chrome mesh, the raw color is stored here and the dim multiplier is baked in at mesh-
+        // build time (RebuildLineMesh), so a pinned-ghost pass only rebuilds the mesh, not this buffer.
+        // A drag-preview line tracks the mouse every frame, so its presence (now or last frame) forces a
+        // rebuild until the drag ends.
+        bool lineCacheValid = _currentCache.LineMesh != null
+            && _currentCache.LineCacheLayoutVersion == _currentCache.NodeLayoutVersion
+            && _currentCache.LineCacheVisibleRect == visibleRect
+            && _currentCache.LineCacheActiveStateName == activeStateName
+            && _currentCache.LineCacheSelectedStateName == _selectedStateName
+            && _currentCache.LineCacheStyle == style
+            && _currentCache.LineCacheConfigGeneration == _performance.Generation
+            && !dragPreviewActive
+            && !_currentCache.LineCacheDragPreview;
+
+        if (!lineCacheValid)
+        {
+            _currentCache.LineVertexBuffer.Clear();
+            _lineTarget = _currentCache.LineVertexBuffer;
+
+            // Line detail level is a persistent, always-applied config choice (see
+            // FsmGraphPerformanceConfig). Thin/Straight ignore each line's own Thickness (a plain line
+            // list has no per-vertex width); Straight also skips the arrowhead and the curve itself,
+            // drawing only the transition's real source/target anchors - points[0]/points[^1] of the
+            // cached bezier polyline are always those true endpoints (see SampleBezierCurve). Raw colors
+            // are stored; dim is applied when the mesh is built.
+            switch (style)
+            {
+                case GraphLineStyle.Straight:
+                    foreach ((Vector2[] points, Color color, _, _, _) in _currentCache.LineDrawBuffer)
+                    {
+                        if (points.Length >= 2)
+                        {
+                            EmitThinSegment(points[0], points[points.Length - 1], color);
+                        }
+                    }
+
+                    break;
+
+                case GraphLineStyle.Thin:
+                    foreach ((Vector2[] points, Color color, _, float baseArrowLength, float baseOutlineMargin) in _currentCache.LineDrawBuffer)
+                    {
+                        EmitThinPolyline(points, color, baseArrowLength * _zoom, baseOutlineMargin * _zoom);
+                    }
+
+                    break;
+
+                default:
+                    foreach ((Vector2[] points, Color color, float baseThickness, float baseArrowLength, float baseOutlineMargin) in _currentCache.LineDrawBuffer)
+                    {
+                        EmitThickPolyline(points, color, baseThickness * _zoom, baseArrowLength * _zoom, baseOutlineMargin * _zoom);
+                    }
+
+                    break;
+            }
+
+            _currentCache.LineBufferRevision++;
+            _currentCache.LineCacheLayoutVersion = _currentCache.NodeLayoutVersion;
+            _currentCache.LineCacheVisibleRect = visibleRect;
+            _currentCache.LineCacheActiveStateName = activeStateName;
+            _currentCache.LineCacheSelectedStateName = _selectedStateName;
+            _currentCache.LineCacheStyle = style;
+            _currentCache.LineCacheConfigGeneration = _performance.Generation;
+            _currentCache.LineCacheDragPreview = dragPreviewActive;
+        }
+
+        if (_currentCache.LineVertexBuffer.Count == 0)
+        {
+            return;
+        }
+
+        // Thick fills triangles (soft-edged quads); Thin/Straight are a plain GL line list.
+        bool triangles = style == GraphLineStyle.Thick;
+
+        if (_currentCache.LineMesh == null
+            || _currentCache.LineMeshRevision != _currentCache.LineBufferRevision
+            || _currentCache.LineMeshDim != dim
+            || _currentCache.LineMeshTriangles != triangles)
+        {
+            RebuildLineMesh(_currentCache, triangles, dim);
+        }
+
+        if (_currentCache.LineMesh == null)
+        {
+            return;
+        }
+
         GL.PushMatrix();
         ApplyClippedPixelMatrix(canvasScreenOffset, clipRightAbsolute);
         _glMaterial.SetPass(0);
-
-        // Line detail level is a persistent, always-applied config choice (see FsmGraphPerformanceConfig)
-        // rather than tied to the toggle-minimal-view hotkey. Thin/Straight ignore each line's own
-        // Thickness (GL.LINES has no per-vertex width control); Straight also skips the arrowhead
-        // entirely and the curve itself, drawing only the transition's real source/target anchors -
-        // points[0]/points[^1] of the cached bezier polyline are always those true endpoints regardless
-        // of how the curve bends between them (see SampleBezierCurve), so no separate cache is needed
-        // for this style.
-        switch (_performance.LineStyle.Value)
-        {
-            case GraphLineStyle.Straight:
-                GL.Begin(GL.LINES);
-                foreach ((Vector2[] points, Color color, _, _, _) in _currentCache.LineDrawBuffer)
-                {
-                    if (points.Length >= 2)
-                    {
-                        EmitThinSegment(points[0], points[^1], ApplyDim(color, dim));
-                    }
-                }
-                GL.End();
-                break;
-
-            case GraphLineStyle.Thin:
-                GL.Begin(GL.LINES);
-                foreach ((Vector2[] points, Color color, _, float baseArrowLength, float baseOutlineMargin) in _currentCache.LineDrawBuffer)
-                {
-                    EmitThinPolyline(points, ApplyDim(color, dim), baseArrowLength * _zoom, baseOutlineMargin * _zoom);
-                }
-                GL.End();
-                break;
-
-            default:
-                GL.Begin(GL.TRIANGLES);
-                foreach ((Vector2[] points, Color color, float baseThickness, float baseArrowLength, float baseOutlineMargin) in _currentCache.LineDrawBuffer)
-                {
-                    EmitThickPolyline(points, ApplyDim(color, dim), baseThickness * _zoom, baseArrowLength * _zoom, baseOutlineMargin * _zoom);
-                }
-                GL.End();
-                break;
-        }
-
+        Graphics.DrawMeshNow(_currentCache.LineMesh, Matrix4x4.identity);
         GL.PopMatrix();
         ResetGlViewport();
+    }
+
+    // Copies the tessellated LineVertexBuffer into the cache's retained line mesh, baking in the dim
+    // multiplier and using the topology the current style needs. Mirrors RebuildChromeMesh; the index
+    // buffer is the identity sequence (Lines topology reads it as vertex pairs, Triangles as triples).
+    private void RebuildLineMesh(GraphLayoutCache cache, bool triangles, bool dim)
+    {
+        List<(Vector2 Position, Color Color)> buffer = cache.LineVertexBuffer;
+        int count = buffer.Count;
+
+        _meshVertsScratch.Clear();
+        _meshColorsScratch.Clear();
+        for (int i = 0; i < count; i++)
+        {
+            (Vector2 position, Color color) = buffer[i];
+            _meshVertsScratch.Add(new Vector3(position.x, position.y, 0f));
+            _meshColorsScratch.Add(ApplyDim(color, dim));
+        }
+
+        if (_lineIndexArray.Length != count)
+        {
+            _lineIndexArray = new int[count];
+            for (int i = 0; i < count; i++)
+            {
+                _lineIndexArray[i] = i;
+            }
+        }
+
+        if (cache.LineMesh == null)
+        {
+            cache.LineMesh = new Mesh { hideFlags = HideFlags.HideAndDontSave };
+            cache.LineMesh.MarkDynamic();
+        }
+
+        Mesh mesh = cache.LineMesh;
+        mesh.Clear();
+#if !NET35
+        mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+#endif
+        mesh.SetVertices(_meshVertsScratch);
+        mesh.SetColors(_meshColorsScratch);
+        mesh.SetIndices(_lineIndexArray, triangles ? MeshTopology.Triangles : MeshTopology.Lines, 0);
+
+        cache.LineMeshRevision = cache.LineBufferRevision;
+        cache.LineMeshDim = dim;
+        cache.LineMeshTriangles = triangles;
     }
 
     // Base screen-space arrowhead size at the default TransitionLineThickness (scaled by zoom like
@@ -2604,7 +3040,7 @@ internal sealed class FsmGraphOverlay
     // Plain 1px hard-edged GL.LINES, used when the selection UI is hidden - no thickness or
     // antialiasing control on the line itself, matching the more minimal look of that mode. Only
     // arrowLength is used (for the arrowhead) - the line itself has no per-vertex width control.
-    private static void EmitThinPolyline(Vector2[] points, Color color, float arrowLength, float outlineMargin)
+    private void EmitThinPolyline(Vector2[] points, Color color, float arrowLength, float outlineMargin)
     {
         for (int i = 0; i < points.Length - 1; i++)
         {
@@ -2617,17 +3053,16 @@ internal sealed class FsmGraphOverlay
         }
     }
 
-    private static void EmitThinSegment(Vector2 from, Vector2 to, Color color)
+    private void EmitThinSegment(Vector2 from, Vector2 to, Color color)
     {
-        GL.Color(color);
-        GL.Vertex3(from.x, from.y, 0f);
-        GL.Vertex3(to.x, to.y, 0f);
+        AddLineVertex(from, color);
+        AddLineVertex(to, color);
     }
 
     // GL.LINES can't fill a shape, so this draws the outline of the same triangle EmitThickArrowhead
     // fills solid (see below) - closing the third edge between the two wing tips reads as a proper
     // arrowhead rather than the old open two-stroke chevron.
-    private static void EmitThinArrowhead(Vector2[] points, Color color, float arrowLength, float outlineMargin)
+    private void EmitThinArrowhead(Vector2[] points, Color color, float arrowLength, float outlineMargin)
     {
         Vector2 to = points[points.Length - 1];
         Vector2 from = WalkBackAlongPolyline(points, arrowLength * ArrowheadAngleLookbackFactor);
@@ -2678,7 +3113,7 @@ internal sealed class FsmGraphOverlay
     // direction so the head reads correctly on a curve rather than pointing along the start-to-end
     // straight line - same approach the old DrawBezierArrow used, now emitting GL triangles instead
     // of issuing a GUI.DrawTexture call per segment.
-    private static void EmitThickPolyline(Vector2[] points, Color color, float thickness, float arrowLength, float outlineMargin)
+    private void EmitThickPolyline(Vector2[] points, Color color, float thickness, float arrowLength, float outlineMargin)
     {
         if (points.Length < 2)
         {
@@ -2708,7 +3143,7 @@ internal sealed class FsmGraphOverlay
     // transition's own thickness - see the ArrowLength field comment on _currentCache.LineDrawBuffer. outlineMargin
     // (zero for every ordinary arrowhead) pushes all 3 vertices outward from the triangle's own
     // centroid by a constant distance for the selected-state outline pass - see PushTriangleOutward.
-    private static void EmitThickArrowhead(Vector2[] points, Color color, float arrowLength, float outlineMargin)
+    private void EmitThickArrowhead(Vector2[] points, Color color, float arrowLength, float outlineMargin)
     {
         Vector2 to = points[points.Length - 1];
         Vector2 from = WalkBackAlongPolyline(points, arrowLength * ArrowheadAngleLookbackFactor);
@@ -2728,10 +3163,9 @@ internal sealed class FsmGraphOverlay
             PushTriangleOutward(ref to, ref left, ref right, outlineMargin);
         }
 
-        GL.Color(color);
-        GL.Vertex3(to.x, to.y, 0f);
-        GL.Vertex3(left.x, left.y, 0f);
-        GL.Vertex3(right.x, right.y, 0f);
+        AddLineVertex(to, color);
+        AddLineVertex(left, color);
+        AddLineVertex(right, color);
     }
 
     // One thickness-wide solid quad down the segment's length, flanked by two slightly wider quads
@@ -2739,7 +3173,7 @@ internal sealed class FsmGraphOverlay
     // _lineMaskTexture the old GUI.DrawTexture-based DrawLine stretched across a line's thickness.
     // Hidden/Internal-Colored interpolates per-vertex color (including alpha) linearly across each
     // triangle, so the fade needs no texture, just the right vertex colors.
-    private static void EmitThickSegment(Vector2 from, Vector2 to, Color color, float thickness)
+    private void EmitThickSegment(Vector2 from, Vector2 to, Color color, float thickness)
     {
         Vector2 direction = to - from;
         float length = direction.magnitude;
@@ -2760,21 +3194,15 @@ internal sealed class FsmGraphOverlay
 
     // Emits a quad (a-b-c-d in order around the perimeter) as two GL triangles, one vertex color per
     // corner - used both for the solid inner band and the soft-edge bands of EmitThickSegment.
-    private static void EmitQuad(Vector2 a, Vector2 b, Vector2 c, Vector2 d, Color colorA, Color colorB, Color colorC, Color colorD)
+    private void EmitQuad(Vector2 a, Vector2 b, Vector2 c, Vector2 d, Color colorA, Color colorB, Color colorC, Color colorD)
     {
-        GL.Color(colorA);
-        GL.Vertex3(a.x, a.y, 0f);
-        GL.Color(colorB);
-        GL.Vertex3(b.x, b.y, 0f);
-        GL.Color(colorC);
-        GL.Vertex3(c.x, c.y, 0f);
+        AddLineVertex(a, colorA);
+        AddLineVertex(b, colorB);
+        AddLineVertex(c, colorC);
 
-        GL.Color(colorA);
-        GL.Vertex3(a.x, a.y, 0f);
-        GL.Color(colorC);
-        GL.Vertex3(c.x, c.y, 0f);
-        GL.Color(colorD);
-        GL.Vertex3(d.x, d.y, 0f);
+        AddLineVertex(a, colorA);
+        AddLineVertex(c, colorC);
+        AddLineVertex(d, colorD);
     }
 
     private sealed class NodeLayout

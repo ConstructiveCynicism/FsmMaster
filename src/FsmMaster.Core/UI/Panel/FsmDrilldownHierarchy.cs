@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace FsmMaster;
 
@@ -27,7 +28,31 @@ internal static class FsmDrilldownHierarchy
             }
 
             GameObject gameObject = fsm.Component.gameObject;
-            string sceneName = gameObject.scene.name;
+
+            // Three cases, bucketed under readable pseudo-scene names rather than an empty-string scene
+            // entry in the Open dropdown's scene list:
+            //  - a real, named, valid scene: used as-is.
+            //  - a valid scene with no name (the normal shape of Unity's own DontDestroyOnLoad pseudo-
+            //    scene on most platforms): "DontDestroyOnLoad".
+            //  - no valid scene at all - only reachable via FsmMasterDriver.FindAllPlayMakerFsms' own
+            //    Fsm.Preprocessed fallback (see that method's comment: on hk1221, hundreds of genuinely
+            //    live, persistent objects - charm-slot and Hunter's Journal UI templates, confirmed via
+            //    FsmActivatedPatch diagnostic logging - report an invalid scene despite having already
+            //    run Awake()/Preprocess() for real): "Preprocessed".
+            Scene scene = gameObject.scene;
+            string sceneName;
+            if (scene.IsValid() && !string.IsNullOrEmpty(scene.name))
+            {
+                sceneName = scene.name;
+            }
+            else if (scene.IsValid())
+            {
+                sceneName = "DontDestroyOnLoad";
+            }
+            else
+            {
+                sceneName = "Preprocessed";
+            }
 
             if (!scenesByName.TryGetValue(sceneName, out SceneGroup? sceneGroup))
             {

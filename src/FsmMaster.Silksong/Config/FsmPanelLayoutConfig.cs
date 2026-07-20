@@ -9,21 +9,26 @@ namespace FsmMaster;
 // actually drags/resizes it (see FsmRightPanel/FsmMonitorPanel's own Reposition). Hidden from
 // Configuration Manager (Browsable = false) - this is auto-managed UI state, not a setting meant to be
 // hand-edited there; dragging/resizing the panel itself is what changes it.
-internal sealed class FsmPanelLayoutConfig
+internal sealed class FsmPanelLayoutConfig : IFsmPanelLayoutConfig
 {
     private const string Section = "UI Layout";
     private static readonly Vector2 Unset = new(-1f, -1f);
 
-    public ConfigEntry<Vector2> Position { get; }
-    public ConfigEntry<Vector2> Size { get; }
+    private readonly ConfigEntry<Vector2> _position;
+    private readonly ConfigEntry<Vector2> _size;
 
-    public bool HasSavedPosition => Position.Value.x >= 0f && Position.Value.y >= 0f;
-    public bool HasSavedSize => Size.Value.x >= 0f && Size.Value.y >= 0f;
+    public IFsmConfigValue<Vector2> Position { get; }
+    public IFsmConfigValue<Vector2> Size { get; }
+
+    public bool HasSavedPosition => _position.Value.x >= 0f && _position.Value.y >= 0f;
+    public bool HasSavedSize => _size.Value.x >= 0f && _size.Value.y >= 0f;
 
     private FsmPanelLayoutConfig(ConfigEntry<Vector2> position, ConfigEntry<Vector2> size)
     {
-        Position = position;
-        Size = size;
+        _position = position;
+        _size = size;
+        Position = new BepInExConfigValue<Vector2>(position);
+        Size = new BepInExConfigValue<Vector2>(size);
     }
 
     public static FsmPanelLayoutConfig Bind(ConfigFile config, string panelName)

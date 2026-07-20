@@ -1,5 +1,10 @@
 <Project>
   <PropertyGroup>
+    <!-- Lets a project under src/<Project>/ reach repo-root files (thunderstore/, README.md, the
+         gitignored *Path.props local dev files) without hardcoding a relative ../.. everywhere. -->
+    <RepoRoot>$(MSBuildThisFileDirectory)</RepoRoot>
+  </PropertyGroup>
+  <PropertyGroup>
     <!-- These properties will control the generated plugin info and Thunderstore manifest. -->
     <!-- 
     This is the name of your plugin as it would appear in-game and in a mod installer. 

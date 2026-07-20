@@ -17,8 +17,16 @@ internal sealed class FsmOpenDropdown : CanvasPanel
     private const float Width = 260f;
     private const float RowHeight = 22f;
     private const float HeaderHeight = 22f;
+    private const float FooterHeight = 22f;
     private const float BackButtonWidth = 70f;
     private const float ScrollbarWidth = 10f;
+    private const float PageButtonWidth = 28f;
+
+    // Some scene groups (e.g. hk1221's "Preprocessed" bucket - see FsmDrilldownHierarchy's own comment)
+    // can run into the hundreds of objects - building/rendering every one of them as its own CanvasButton
+    // at once was both slow and unusable to scroll through, unlike the small scene/object counts this
+    // dropdown was originally designed around.
+    private const int PageSize = 50;
 
     private enum Level
     {
@@ -40,10 +48,15 @@ internal sealed class FsmOpenDropdown : CanvasPanel
     private readonly CanvasPanel _rowsContainer;
     private readonly List<CanvasButton> _rowButtons = new();
 
+    private readonly CanvasButton _prevPageButton;
+    private readonly CanvasButton _nextPageButton;
+    private readonly CanvasText _pageLabelText;
+
     private Level _level = Level.Scenes;
     private List<SceneGroup>? _sceneGroups;
     private int _selectedSceneIndex = -1;
     private int _selectedObjectIndex = -1;
+    private int _pageIndex;
 
     public FsmOpenDropdown(UICommon ui, FsmTabManager tabManager, Func<FsmSnapshot?> getSnapshot, CanvasButton anchorButton, Action<string> showStatus)
         : base("OpenDropdown")
@@ -84,6 +97,32 @@ internal sealed class FsmOpenDropdown : CanvasPanel
 
         _rowsScrollbar = Add(new CanvasScrollbar("RowsScrollbar", ui) { ScrollView = _rowsScrollView });
 
+        // Only shown (ActiveSelf toggled in RebuildRows) when the current level's row count exceeds
+        // PageSize - built once here like _backButton/_headerText rather than per RebuildRows, since
+        // they're structural chrome, not data-driven rows.
+        _prevPageButton = Add(new CanvasButton("PrevPage", ui));
+        _prevPageButton.Size = new Vector2(PageButtonWidth, FooterHeight);
+        _prevPageButton.Text.Text = "<";
+        _prevPageButton.OnClicked += () =>
+        {
+            _pageIndex = Mathf.Max(0, _pageIndex - 1);
+            RebuildRows();
+        };
+
+        _nextPageButton = Add(new CanvasButton("NextPage", ui));
+        _nextPageButton.Size = new Vector2(PageButtonWidth, FooterHeight);
+        _nextPageButton.Text.Text = ">";
+        _nextPageButton.OnClicked += () =>
+        {
+            _pageIndex++;
+            RebuildRows();
+        };
+
+        _pageLabelText = Add(new CanvasText("PageLabel", ui));
+        _pageLabelText.Size = new Vector2(Width - ScrollbarWidth - PageButtonWidth * 2f, FooterHeight);
+        _pageLabelText.Alignment = TextAnchor.MiddleCenter;
+        _pageLabelText.Overflow = HorizontalWrapMode.Overflow;
+
         OnUpdate += CloseOnOutsideClick;
         // Mirrors FsmActiveStatePanel/FsmMonitorPanel's own pattern: the scrollbar can't decide its own
         // visibility (its OnUpdate only runs once already active - see CanvasScrollbar.ShouldBeVisible),
@@ -109,6 +148,7 @@ internal sealed class FsmOpenDropdown : CanvasPanel
         _level = Level.Scenes;
         _selectedSceneIndex = -1;
         _selectedObjectIndex = -1;
+        _pageIndex = 0;
 
         FsmSnapshot? snapshot = _getSnapshot();
         _sceneGroups = snapshot != null ? FsmDrilldownHierarchy.Build(snapshot) : new List<SceneGroup>();
@@ -147,6 +187,8 @@ internal sealed class FsmOpenDropdown : CanvasPanel
 
     private void GoBack()
     {
+        _pageIndex = 0;
+
         switch (_level)
         {
             case Level.Objects:
@@ -176,9 +218,19 @@ internal sealed class FsmOpenDropdown : CanvasPanel
 
         float rowsWidth = Width - ScrollbarWidth;
 
+        List<(string Label, Action OnClick)> allRows = BuildRowList();
+        int totalCount = allRows.Count;
+        bool paginated = totalCount > PageSize;
+
+        int pageCount = Mathf.Max(1, Mathf.CeilToInt(totalCount / (float)PageSize));
+        _pageIndex = Mathf.Clamp(_pageIndex, 0, pageCount - 1);
+        int startIndex = paginated ? _pageIndex * PageSize : 0;
+        int endIndexExclusive = paginated ? Mathf.Min(startIndex + PageSize, totalCount) : totalCount;
+
         float y = 0f;
-        foreach ((string label, Action onClick) in BuildRowList())
+        for (int i = startIndex; i < endIndexExclusive; i++)
         {
+            (string label, Action onClick) = allRows[i];
             CanvasButton button = _rowsContainer.Add(new CanvasButton($"Row{_rowButtons.Count}", _ui));
             button.LocalPosition = new Vector2(0f, y);
             button.Size = new Vector2(rowsWidth, RowHeight);
@@ -194,6 +246,8 @@ internal sealed class FsmOpenDropdown : CanvasPanel
 
         _rowsContainer.Size = new Vector2(rowsWidth, Mathf.Max(RowHeight, y));
 
+        float footerHeight = paginated ? FooterHeight : 0f;
+
         // Caps the popup's own total height at whatever room is actually left below its anchor
         // position inside the parent panel (FsmRightPanel, which the user can freely resize down to a
         // small MinPanelHeight) - without this, a scene/object/FSM list long enough to need more room
@@ -201,16 +255,28 @@ internal sealed class FsmOpenDropdown : CanvasPanel
         // scrolling within it. Falls back to the unclamped natural height if this ever runs with no
         // parent yet (shouldn't happen in practice - FsmRightPanel always Add()s this before Show() can
         // run).
-        float desiredHeight = HeaderHeight + _rowsContainer.Size.y;
-        float maxHeight = Parent != null ? Mathf.Max(HeaderHeight + RowHeight, Parent.Size.y - LocalPosition.y) : desiredHeight;
+        float desiredHeight = HeaderHeight + _rowsContainer.Size.y + footerHeight;
+        float maxHeight = Parent != null ? Mathf.Max(HeaderHeight + RowHeight + footerHeight, Parent.Size.y - LocalPosition.y) : desiredHeight;
         float totalHeight = Mathf.Min(desiredHeight, maxHeight);
 
         Size = new Vector2(Width, totalHeight);
 
-        float rowsViewportHeight = Mathf.Max(0f, totalHeight - HeaderHeight);
+        float rowsViewportHeight = Mathf.Max(0f, totalHeight - HeaderHeight - footerHeight);
         _rowsScrollView.Size = new Vector2(rowsWidth, rowsViewportHeight);
         _rowsScrollbar.LocalPosition = new Vector2(rowsWidth, HeaderHeight);
         _rowsScrollbar.Size = new Vector2(ScrollbarWidth, rowsViewportHeight);
+
+        _prevPageButton.ActiveSelf = paginated;
+        _nextPageButton.ActiveSelf = paginated;
+        _pageLabelText.ActiveSelf = paginated;
+        if (paginated)
+        {
+            float footerY = HeaderHeight + rowsViewportHeight;
+            _prevPageButton.LocalPosition = new Vector2(0f, footerY);
+            _pageLabelText.LocalPosition = new Vector2(PageButtonWidth, footerY);
+            _nextPageButton.LocalPosition = new Vector2(Width - PageButtonWidth, footerY);
+            _pageLabelText.Text = $"({startIndex + 1}-{endIndexExclusive}) / {totalCount}";
+        }
     }
 
     private List<(string Label, Action OnClick)> BuildRowList()
@@ -231,6 +297,7 @@ internal sealed class FsmOpenDropdown : CanvasPanel
                     {
                         _selectedSceneIndex = index;
                         _level = Level.Objects;
+                        _pageIndex = 0;
                         RebuildRows();
                     }));
                 }
@@ -246,6 +313,7 @@ internal sealed class FsmOpenDropdown : CanvasPanel
                     {
                         _selectedObjectIndex = index;
                         _level = Level.Fsms;
+                        _pageIndex = 0;
                         RebuildRows();
                     }));
                 }

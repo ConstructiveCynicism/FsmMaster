@@ -17,7 +17,7 @@ internal class CanvasImage : CanvasNode
     // Rebuilt only in AddBorder/RemoveBorder (rare, setup-time calls) rather than on every ChildList()
     // call - see CanvasNode.ChildList's own comment on why a yield-return version of this was a
     // continuous per-frame GC source.
-    private CanvasNode[] _childList = Array.Empty<CanvasNode>();
+    private CanvasNode[] _childList = ArrayPolyfill.Empty<CanvasNode>();
 
     public CanvasBorder? Border => _border;
     public bool IsBackground { get; set; }
@@ -59,7 +59,7 @@ internal class CanvasImage : CanvasNode
 
     private void RebuildChildList()
     {
-        _childList = _border != null ? new CanvasNode[] { _border } : Array.Empty<CanvasNode>();
+        _childList = _border != null ? new CanvasNode[] { _border } : ArrayPolyfill.Empty<CanvasNode>();
     }
 
     protected override IEnumerable<CanvasNode> ChildList() => _childList;

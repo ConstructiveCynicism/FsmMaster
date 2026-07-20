@@ -1,19 +1,16 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
-using HarmonyLib;
-using InControl;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
 
 namespace FsmMaster;
 
-// Click-to-type, Enter-or-click-away-to-confirm text field, including a Harmony patch on
-// HollowKnightInputModule.ProcessMove (see FocusOnHoverSuppressionPatch below): focusOnMouseHover
-// runs unconditionally for mouse input (gated only on allowMouseInput/Cursor.visible, not on gamepad
-// presence), so without this patch, moving the mouse toward another interactive element while a field
-// is focused deselects the field mid-click and can swallow the click.
+// Click-to-type, Enter-or-click-away-to-confirm text field. Each loader also installs a hook that
+// suppresses the game's own input-module "select whatever the mouse is hovering" behavior while a
+// field is focused - see FocusOnHoverSuppressionPatch in the Silksong/HK1221 loader projects (the
+// underlying type/hooking library differs per platform, so that patch can't live here in Core).
 //
 // This is a CanvasNode that owns a child InteractiveLabel, rather than a CanvasText subclass with the
 // InputField living directly on the same GameObject as the Text component. Unity's
@@ -133,12 +130,17 @@ internal sealed class CanvasTextField : CanvasNode
         _inputField.caretColor = _ui.CaretColor;
         _inputField.caretWidth = (byte)Mathf.Max(1, UICommon.ScaleWidth(2));
 
+#if !NET35
+        // InputField.onSubmit doesn't exist on net35's older UnityEngine.UI.dll (confirmed against the
+        // real hk1221 build) - that TFM falls through to onEndEdit's own !_submittedThisEdit branch
+        // below for every commit, Enter-press included, matching this wrapper's pre-onSubmit behavior.
         _inputField.onSubmit.AddListener(text =>
         {
             _submittedThisEdit = true;
             Text = text;
             OnSubmit?.Invoke(text);
         });
+#endif
 
         _inputField.onEndEdit.AddListener(_ =>
         {
@@ -152,7 +154,8 @@ internal sealed class CanvasTextField : CanvasNode
             // was typed: Unity's InputField writes keystrokes straight into the live text component,
             // bypassing this wrapper's own cached Text field entirely, so reading/restoring the stale
             // Text here (the previous behavior) both lost the edit and visibly snapped the label back to
-            // its pre-edit value.
+            // its pre-edit value. On net35 (no onSubmit), this branch is unconditionally the only commit
+            // path - _submittedThisEdit never gets set to true up above, so it always re-commits here.
             if (!_submittedThisEdit)
             {
                 string typed = _inputField!.text;
@@ -254,6 +257,15 @@ internal sealed class CanvasTextField : CanvasNode
     // this cannot be a compile-time reference here. Resolved via reflection instead, and silently a
     // no-op if the type isn't found at runtime either (most likely explanation: this Silksong build
     // doesn't use InControl at all) - this assumption is unverified until checked in-game.
+    //
+    // On hk1221, InControl's types are compiled directly into Assembly-CSharp rather than shipped as
+    // their own InControl.dll (confirmed - no such file exists in that build's Managed folder), so a
+    // Type.GetType("InControl.InputManager, InControl") assembly-qualified lookup never finds it;
+    // searching every loaded assembly for the type by name instead works regardless of which assembly
+    // actually declares it. The real member is also PascalCase ("Enabled"), not "enabled" - confirmed
+    // against InControl.InputManager.AnyKeyIsPressed's own casing elsewhere in the hk1221 reference
+    // sources, and against FsmMasterDriver's own compile-time InputManager.Enabled reference on that
+    // loader.
     private static bool s_resolutionAttempted;
     private static PropertyInfo? s_inputManagerEnabled;
 
@@ -264,8 +276,17 @@ internal sealed class CanvasTextField : CanvasNode
             s_resolutionAttempted = true;
             try
             {
-                Type? inputManagerType = Type.GetType("InControl.InputManager, InControl");
-                s_inputManagerEnabled = inputManagerType?.GetProperty("enabled", BindingFlags.Public | BindingFlags.Static);
+                Type? inputManagerType = null;
+                foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    inputManagerType = assembly.GetType("InControl.InputManager");
+                    if (inputManagerType != null)
+                    {
+                        break;
+                    }
+                }
+
+                s_inputManagerEnabled = inputManagerType?.GetProperty("Enabled", BindingFlags.Public | BindingFlags.Static);
             }
             catch
             {
@@ -280,7 +301,9 @@ internal sealed class CanvasTextField : CanvasNode
 
         try
         {
-            s_inputManagerEnabled.SetValue(null, !locked);
+            // The 2-arg SetValue(object, object) overload is a .NET 4.5 addition, not present on net35 -
+            // this 3-arg form (index: null, since this is a non-indexed property) works on every TFM.
+            s_inputManagerEnabled.SetValue(null, !locked, null);
         }
         catch
         {
@@ -302,30 +325,5 @@ internal sealed class InteractiveLabel : CanvasText
 
     public InteractiveLabel(string name, UICommon ui) : base(name, ui)
     {
-    }
-}
-
-// Suppresses HollowKnightInputModule's "select whatever the mouse is hovering" behavior while any
-// CanvasTextField is focused, restoring it immediately afterward. Without this, moving the mouse
-// toward another clickable widget (e.g. the Load button) while a field is focused deselects that
-// field mid-hover, which can interfere with the click landing on the intended target in the same
-// input pass.
-[HarmonyPatch(typeof(HollowKnightInputModule), nameof(HollowKnightInputModule.ProcessMove))]
-internal static class FocusOnHoverSuppressionPatch
-{
-    [HarmonyPrefix]
-    private static void Prefix(HollowKnightInputModule __instance, out bool __state)
-    {
-        __state = __instance.focusOnMouseHover;
-        if (CanvasTextField.AnyFieldFocused)
-        {
-            __instance.focusOnMouseHover = false;
-        }
-    }
-
-    [HarmonyPostfix]
-    private static void Postfix(HollowKnightInputModule __instance, bool __state)
-    {
-        __instance.focusOnMouseHover = __state;
     }
 }

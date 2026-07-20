@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Merges FsmMaster.dll with its own copy-local dependencies (HarmonyX/MonoMod/Mono.Cecil) into a
+       single self-contained assembly. The old Modding API loads every DLL dropped in the Mods folder
+       independently with no per-mod dependency isolation, so shipping those as loose files risks
+       colliding with same-named assemblies other mods - or the game's own Managed folder - may already
+       have loaded at a different version. FsmMaster.dll is listed first so its own types stay public
+       and its assembly attributes are kept; everything merged in after it gets internalized. -->
+  <Target Name="ILRepacker" AfterTargets="Build">
+    <ItemGroup>
+      <MergeAssemblies Include="$(TargetPath)" />
+      <MergeAssemblies Include="@(ReferenceCopyLocalPaths)" Condition="'%(ReferenceCopyLocalPaths.Extension)' == '.dll'" />
+    </ItemGroup>
+    <ILRepack
+        Parallel="true"
+        DebugInfo="$(DebugSymbols)"
+        Internalize="true"
+        InputAssemblies="@(MergeAssemblies)"
+        TargetKind="Dll"
+        OutputFile="$(TargetPath)"
+    />
+    <!-- The loose copies MSBuild placed in the output directory as part of the normal build are no
+         longer needed once their contents are merged into FsmMaster.dll - remove them so the output
+         folder matches what actually gets shipped. -->
+    <Delete Files="@(ReferenceCopyLocalPaths->'$(OutDir)%(DestinationSubDirectory)%(Filename)%(Extension)')" />
+  </Target>
+</Project>

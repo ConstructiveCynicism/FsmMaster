@@ -80,7 +80,7 @@ internal static class FsmSaveDataStore
             return result;
         }
 
-        foreach (string filePath in Directory.EnumerateFiles(fsmDirectory, "*.json"))
+        foreach (string filePath in Directory.GetFiles(fsmDirectory, "*.json"))
         {
             result.Add(Path.GetFileNameWithoutExtension(filePath));
         }
@@ -251,18 +251,18 @@ internal static class FsmSaveDataStore
             parts.Add($"{keysAndValues[i]}{KeyValueSeparator}{keysAndValues[i + 1]}");
         }
 
-        return string.Join(PairSeparator, parts);
+        return string.Join(PairSeparator, parts.ToArray());
     }
 
     private static Dictionary<string, string> SplitPairs(string joined)
     {
         var result = new Dictionary<string, string>();
-        foreach (string part in joined.Split(PairSeparator))
+        foreach (string part in joined.Split(new[] { PairSeparator }, StringSplitOptions.None))
         {
             int eq = part.IndexOf(KeyValueSeparator, StringComparison.Ordinal);
             if (eq >= 0)
             {
-                result[part[..eq]] = part[(eq + 1)..];
+                result[part.Substring(0, eq)] = part.Substring(eq + 1);
             }
         }
 
@@ -311,7 +311,7 @@ internal static class FsmSaveDataStore
                 "state", seq.StateName,
                 "action", seq.ActionIndex.ToString(CultureInfo.InvariantCulture),
                 "repeat", seq.RepeatCount.ToString(CultureInfo.InvariantCulture),
-                "pattern", string.Join(PatternSeparator, seq.Pattern)));
+                "pattern", string.Join(PatternSeparator, seq.Pattern.ToArray())));
         }
 
         return wire;
@@ -384,7 +384,7 @@ internal static class FsmSaveDataStore
 
             if (p.TryGetValue("pattern", out string? pattern) && pattern.Length > 0)
             {
-                seq.Pattern.AddRange(pattern.Split(PatternSeparator));
+                seq.Pattern.AddRange(pattern.Split(new[] { PatternSeparator }, StringSplitOptions.None));
             }
 
             edits.SequencerOverrides.Add(seq);

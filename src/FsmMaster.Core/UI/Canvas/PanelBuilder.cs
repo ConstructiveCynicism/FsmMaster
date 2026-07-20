@@ -1,5 +1,4 @@
 using System.Collections.Generic;
-using BepInEx.Logging;
 using UnityEngine;
 
 namespace FsmMaster;
@@ -12,7 +11,7 @@ namespace FsmMaster;
 internal sealed class PanelBuilder
 {
     private readonly CanvasPanel _panel;
-    private readonly ManualLogSource? _logger;
+    private readonly IFsmLog? _logger;
     private readonly List<Entry> _entries = new();
 
     public bool Horizontal { get; set; }
@@ -20,7 +19,7 @@ internal sealed class PanelBuilder
     public float OuterPadding { get; set; }
     public float InnerPadding { get; set; }
 
-    public PanelBuilder(CanvasPanel panel, ManualLogSource? logger = null)
+    public PanelBuilder(CanvasPanel panel, IFsmLog? logger = null)
     {
         _panel = panel;
         _logger = logger;

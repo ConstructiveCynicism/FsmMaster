@@ -9,6 +9,11 @@ CLAUDE.md
 # / dotnet new silksongpath — holds paths like $(SilksongPluginsFolder))
 SilksongPath.props
 
+# Local machine-specific Hollow Knight install path (not yet referenced by any csproj on this branch -
+# only relevant once Phase 2/3 wires up the hk1221/hk1432 loaders - kept out of git the same way
+# SilksongPath.props is)
+HollowKnightPath.props
+
 # Thunderstore/manual-zip release packaging output (regenerated on Release build)
 thunderstore/temp/
 thunderstore/dist/

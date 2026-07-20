@@ -1,6 +1,6 @@
 using System;
 using System.Collections.Generic;
-using BepInEx.Logging;
+using System.Globalization;
 using HutongGames.PlayMaker;
 using UnityEngine;
 
@@ -9,9 +9,9 @@ namespace FsmMaster;
 // Formats an FsmSnapshot (produced by FsmDataCollector) as console log lines.
 internal sealed class FsmConsoleLogger
 {
-    private readonly ManualLogSource _logger;
+    private readonly IFsmLog _logger;
 
-    public FsmConsoleLogger(ManualLogSource logger)
+    public FsmConsoleLogger(IFsmLog logger)
     {
         _logger = logger;
     }
@@ -50,8 +50,14 @@ internal sealed class FsmConsoleLogger
         {
             _logger.LogInfo($"[FsmMaster]       State \"{state.Name}\"");
             Rect position = state.State.Position;
-            _logger.LogInfo(FormattableString.Invariant(
-                $"[FsmMaster]         Position=({position.x:F1}, {position.y:F1}, {position.width:F1}, {position.height:F1}) ColorIndex={state.State.ColorIndex}"));
+            // System.FormattableString/FormattableStringFactory don't exist in net35's mscorlib (a
+            // .NET 4.6 addition needed to convert an interpolated string to FormattableString), so an
+            // explicit string.Format with CultureInfo.InvariantCulture stands in for
+            // FormattableString.Invariant($"...").
+            _logger.LogInfo(string.Format(
+                CultureInfo.InvariantCulture,
+                "[FsmMaster]         Position=({0:F1}, {1:F1}, {2:F1}, {3:F1}) ColorIndex={4}",
+                position.x, position.y, position.width, position.height, state.State.ColorIndex));
             LogActions(state.Actions);
             foreach (FsmTransitionInfo transition in state.Transitions)
             {
@@ -71,7 +77,7 @@ internal sealed class FsmConsoleLogger
         LogFsmVariables(fsm.Fsm.Variables);
     }
 
-    private void LogActions(IReadOnlyList<FsmActionInfo> actions)
+    private void LogActions(List<FsmActionInfo> actions)
     {
         _logger.LogInfo($"[FsmMaster]         {actions.Count} action(s)");
 
@@ -199,7 +205,7 @@ internal sealed class FsmConsoleLogger
         // FsmArray has no single Value - its payload lives in one of several typed backing
         // arrays selected by its Type, so Values (boxed, generic across all of them) is used
         // instead of any one type-specific field.
-        LogVariableArray("Array", variables.ArrayVariables, v => string.Join(", ", v.Values));
+        LogVariableArray("Array", variables.ArrayVariables, v => string.Join(", ", Array.ConvertAll(v.Values, x => x?.ToString() ?? string.Empty)));
     }
 
     private void LogVariableArray<T>(string typeName, T[] items, Func<T, object> getValue) where T : NamedVariable

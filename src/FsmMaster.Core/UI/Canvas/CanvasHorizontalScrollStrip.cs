@@ -19,7 +19,7 @@ internal sealed class CanvasHorizontalScrollStrip : CanvasNode, IHorizontalScrol
 
     private CanvasNode? _content;
     private float _contentWidthAtLastCheck;
-    private CanvasNode[] _childList = Array.Empty<CanvasNode>();
+    private CanvasNode[] _childList = ArrayPolyfill.Empty<CanvasNode>();
 
     public CanvasNode? Content => _content;
 

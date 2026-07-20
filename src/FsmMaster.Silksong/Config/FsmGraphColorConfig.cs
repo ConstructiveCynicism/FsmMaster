@@ -7,50 +7,50 @@ namespace FsmMaster;
 // FSM graph color palette can be retuned live via Configuration Manager's built-in color picker instead
 // of being baked into the DLL. Defaults reproduce the palette FsmGraphOverlay originally hardcoded -
 // see the per-entry descriptions below for what each one actually draws.
-internal sealed class FsmGraphColorConfig
+internal sealed class FsmGraphColorConfig : IFsmGraphColorConfig
 {
     private const string StateSection = "Graph Colors - State Palette";
     private const string TransitionSection = "Graph Colors - Transition Palette";
     private const string OverlaySection = "Graph Colors - Overlay";
 
-    public ConfigEntry<Color>[] StateColors { get; }
-    public ConfigEntry<Color>[] TransitionColors { get; }
-    public ConfigEntry<Color> GlobalTransitionColor { get; }
-    public ConfigEntry<Color> VignetteColor { get; }
-    public ConfigEntry<Color> GlobalPseudoNodeColor { get; }
-    public ConfigEntry<Color> GlobalPseudoNodeOutlineColor { get; }
-    public ConfigEntry<Color> GlobalPseudoNodeTextColor { get; }
-    public ConfigEntry<Color> NodeOutlineColor { get; }
-    public ConfigEntry<Color> TransitionRowBackgroundColor { get; }
-    public ConfigEntry<Color> ActiveStateColor { get; }
-    public ConfigEntry<Color> ActiveTitleBackgroundColor { get; }
-    public ConfigEntry<Color> ActiveTitleTextColor { get; }
-    public ConfigEntry<Color> SelectedStateColor { get; }
-    public ConfigEntry<Color> DisabledOutlineColor { get; }
-    public ConfigEntry<Color> DisabledTitleTextColor { get; }
-    public ConfigEntry<Color> DisabledEventTextColor { get; }
-    public ConfigEntry<Color> DisabledTransitionLineColor { get; }
-    public ConfigEntry<Color> DragTransitionColor { get; }
+    public IFsmConfigValue<Color>[] StateColors { get; }
+    public IFsmConfigValue<Color>[] TransitionColors { get; }
+    public IFsmConfigValue<Color> GlobalTransitionColor { get; }
+    public IFsmConfigValue<Color> VignetteColor { get; }
+    public IFsmConfigValue<Color> GlobalPseudoNodeColor { get; }
+    public IFsmConfigValue<Color> GlobalPseudoNodeOutlineColor { get; }
+    public IFsmConfigValue<Color> GlobalPseudoNodeTextColor { get; }
+    public IFsmConfigValue<Color> NodeOutlineColor { get; }
+    public IFsmConfigValue<Color> TransitionRowBackgroundColor { get; }
+    public IFsmConfigValue<Color> ActiveStateColor { get; }
+    public IFsmConfigValue<Color> ActiveTitleBackgroundColor { get; }
+    public IFsmConfigValue<Color> ActiveTitleTextColor { get; }
+    public IFsmConfigValue<Color> SelectedStateColor { get; }
+    public IFsmConfigValue<Color> DisabledOutlineColor { get; }
+    public IFsmConfigValue<Color> DisabledTitleTextColor { get; }
+    public IFsmConfigValue<Color> DisabledEventTextColor { get; }
+    public IFsmConfigValue<Color> DisabledTransitionLineColor { get; }
+    public IFsmConfigValue<Color> DragTransitionColor { get; }
 
     private FsmGraphColorConfig(
-        ConfigEntry<Color>[] stateColors,
-        ConfigEntry<Color>[] transitionColors,
-        ConfigEntry<Color> globalTransitionColor,
-        ConfigEntry<Color> vignetteColor,
-        ConfigEntry<Color> globalPseudoNodeColor,
-        ConfigEntry<Color> globalPseudoNodeOutlineColor,
-        ConfigEntry<Color> globalPseudoNodeTextColor,
-        ConfigEntry<Color> nodeOutlineColor,
-        ConfigEntry<Color> transitionRowBackgroundColor,
-        ConfigEntry<Color> activeStateColor,
-        ConfigEntry<Color> activeTitleBackgroundColor,
-        ConfigEntry<Color> activeTitleTextColor,
-        ConfigEntry<Color> selectedStateColor,
-        ConfigEntry<Color> disabledOutlineColor,
-        ConfigEntry<Color> disabledTitleTextColor,
-        ConfigEntry<Color> disabledEventTextColor,
-        ConfigEntry<Color> disabledTransitionLineColor,
-        ConfigEntry<Color> dragTransitionColor)
+        IFsmConfigValue<Color>[] stateColors,
+        IFsmConfigValue<Color>[] transitionColors,
+        IFsmConfigValue<Color> globalTransitionColor,
+        IFsmConfigValue<Color> vignetteColor,
+        IFsmConfigValue<Color> globalPseudoNodeColor,
+        IFsmConfigValue<Color> globalPseudoNodeOutlineColor,
+        IFsmConfigValue<Color> globalPseudoNodeTextColor,
+        IFsmConfigValue<Color> nodeOutlineColor,
+        IFsmConfigValue<Color> transitionRowBackgroundColor,
+        IFsmConfigValue<Color> activeStateColor,
+        IFsmConfigValue<Color> activeTitleBackgroundColor,
+        IFsmConfigValue<Color> activeTitleTextColor,
+        IFsmConfigValue<Color> selectedStateColor,
+        IFsmConfigValue<Color> disabledOutlineColor,
+        IFsmConfigValue<Color> disabledTitleTextColor,
+        IFsmConfigValue<Color> disabledEventTextColor,
+        IFsmConfigValue<Color> disabledTransitionLineColor,
+        IFsmConfigValue<Color> dragTransitionColor)
     {
         StateColors = stateColors;
         TransitionColors = transitionColors;
@@ -106,14 +106,14 @@ internal sealed class FsmGraphColorConfig
             new Color(197f / 255f, 159f / 255f, 225f / 255f),
         };
 
-        var stateColors = new ConfigEntry<Color>[stateDefaults.Length];
+        var stateColors = new IFsmConfigValue<Color>[stateDefaults.Length];
         for (int i = 0; i < stateDefaults.Length; i++)
         {
             stateColors[i] = BindColor(config, StateSection, $"State Color {i}", stateDefaults[i],
                 $"Fill color for a state whose FsmState.ColorIndex is {i} (colorIndex 0 is PlayMaker's \"no color set\" default).");
         }
 
-        var transitionColors = new ConfigEntry<Color>[transitionDefaults.Length];
+        var transitionColors = new IFsmConfigValue<Color>[transitionDefaults.Length];
         for (int i = 0; i < transitionDefaults.Length; i++)
         {
             transitionColors[i] = BindColor(config, TransitionSection, $"Transition Color {i}", transitionDefaults[i],
@@ -164,9 +164,10 @@ internal sealed class FsmGraphColorConfig
     // BepInEx.ConfigurationManager has no fold/collapse of its own for a category (only the whole
     // plugin header collapses) - flagging every color entry IsAdvanced instead hides all 32 of them
     // behind that mod's own "Advanced settings" checkbox, the closest equivalent it actually offers.
-    private static ConfigEntry<Color> BindColor(ConfigFile config, string section, string key, Color defaultValue, string description)
+    private static IFsmConfigValue<Color> BindColor(ConfigFile config, string section, string key, Color defaultValue, string description)
     {
-        return config.Bind(section, key, defaultValue,
+        ConfigEntry<Color> entry = config.Bind(section, key, defaultValue,
             new ConfigDescription(description, null, new ConfigurationManagerAttributes { IsAdvanced = true }));
+        return new BepInExConfigValue<Color>(entry);
     }
 }
