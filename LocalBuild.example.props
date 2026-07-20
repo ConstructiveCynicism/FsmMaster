@@ -1,0 +1,20 @@
+<Project>
+  <!--
+  Template for the machine-local LocalBuild.props (which is gitignored). Copy this file to
+  LocalBuild.props and edit the roots to match your own installs. Only set the roots for the
+  targets you actually build/deploy locally; leave the rest blank. The Managed/Mods/plugins
+  sub-paths are derived structurally in Directory.Build.props, so only install roots go here.
+  -->
+  <PropertyGroup>
+    <!-- Silksong (BepInEx 5). Defaults to the standard Steam install. -->
+    <SilksongFolder>C:\Program Files (x86)\Steam\steamapps\common\Hollow Knight Silksong</SilksongFolder>
+    <!-- Set this to a BepInEx/scripts folder to hot-reload Debug builds via ScriptEngine;
+         left blank, Debug builds install into BepInEx/plugins/FsmMaster like Release. -->
+    <SilksongScriptsFolder></SilksongScriptsFolder>
+
+    <!-- Hollow Knight installs (Managed/Mods layout). Blank = target not deployed locally. -->
+    <HK1221Folder></HK1221Folder>
+    <HK1432Folder></HK1432Folder>
+    <HK1578Folder>C:\Program Files (x86)\Steam\steamapps\common\Hollow Knight</HK1578Folder>
+  </PropertyGroup>
+</Project>

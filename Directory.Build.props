@@ -18,4 +18,28 @@
     -->
     <Version>0.3.2</Version>
   </PropertyGroup>
+
+  <!--
+  Machine-local install paths for deploying built plugins and (for the Hollow Knight targets)
+  referencing game assemblies. Gitignored; copy LocalBuild.example.props to LocalBuild.props and
+  edit it. Absent on CI, so every path derived below is empty-safe and every consuming build step
+  is guarded on the folder existing.
+  -->
+  <Import Condition="Exists('$(RepoRoot)LocalBuild.props')" Project="$(RepoRoot)LocalBuild.props" />
+
+  <!-- Structural sub-paths derived from the machine-local roots above. Not machine-specific, so
+       they live here rather than in LocalBuild.props; each stays empty when its root is unset. -->
+  <PropertyGroup>
+    <SilksongPluginsFolder Condition="'$(SilksongFolder)' != ''">$(SilksongFolder)\BepInEx\plugins</SilksongPluginsFolder>
+
+    <HK1221ManagedFolder Condition="'$(HK1221Folder)' != ''">$(HK1221Folder)\hollow_knight_Data\Managed</HK1221ManagedFolder>
+    <HK1221ModsFolder Condition="'$(HK1221Folder)' != ''">$(HK1221ManagedFolder)\Mods</HK1221ModsFolder>
+
+    <HK1432ManagedFolder Condition="'$(HK1432Folder)' != ''">$(HK1432Folder)\hollow_knight_Data\Managed</HK1432ManagedFolder>
+    <HK1432ModsFolder Condition="'$(HK1432Folder)' != ''">$(HK1432ManagedFolder)\Mods</HK1432ModsFolder>
+
+    <HK1578ManagedFolder Condition="'$(HK1578Folder)' != ''">$(HK1578Folder)\hollow_knight_Data\Managed</HK1578ManagedFolder>
+    <!-- hk1578 installs into its own subfolder (Mods/FsmMaster), unlike hk1221/hk1432 which are flat. -->
+    <HK1578ModsFolder Condition="'$(HK1578Folder)' != ''">$(HK1578ManagedFolder)\Mods</HK1578ModsFolder>
+  </PropertyGroup>
 </Project>

@@ -6,6 +6,7 @@ using BepInEx;
 using BepInEx.Configuration;
 using HarmonyLib;
 using HutongGames.PlayMaker;
+using InControl;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.SceneManagement;
@@ -297,6 +298,17 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
         }
 
         ForceCursorVisible = overlayVisible;
+
+        // The overlay's uGUI panels don't receive pointer events until the player has opened the pause
+        // menu at least once: InControlInputModule.allowMouseInput starts false and stays false until
+        // the game's own pause code first sets it, and while it's false the module suppresses all of its
+        // own click/hover dispatch even though the underlying GraphicRaycaster resolves hits correctly
+        // the whole time (the raycast lands on the right widget by name, but nothing ever fires). Forced
+        // true here while the overlay is open rather than waiting for the pause menu to do it.
+        if (overlayVisible && EventSystem.current?.currentInputModule is InControlInputModule inControlInputModule)
+        {
+            inControlInputModule.allowMouseInput = true;
+        }
 
         if (_rightPanel != null)
         {

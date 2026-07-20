@@ -1,9 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!--
-  Imports Hollow Knight path properties only if present, in order to allow CI builds. The file
-  should be gitignored - see HollowKnightPath.example.props for the template.
-  -->
-  <Import Condition="Exists('$(RepoRoot)HollowKnightPath.props')" Project="$(RepoRoot)HollowKnightPath.props" />
+  <!-- Machine-local install paths (HK1221ManagedFolder/HK1221ModsFolder) come from LocalBuild.props
+       via Directory.Build.props; absent on CI, so the game references and deploy target below are
+       guarded. -->
   <PropertyGroup>
     <TargetFramework>net35</TargetFramework>
     <!-- Keeps the shipped output identical to what the old Modding API's flat Mods folder expects
@@ -41,26 +39,26 @@
   </ItemGroup>
 
   <!-- Local game/engine assembly references - this loader has no NuGet-packaged equivalent of
-       Silksong.GameLibs, so these come from HollowKnightManagedFolder/HollowKnightPatchedAssemblyFolder
-       (see HollowKnightPath.props) instead of PackageReference. Core also references PlayMaker/
+       Silksong.GameLibs, so these come from HK1221ManagedFolder (derived from LocalBuild.props'
+       HK1221Folder in Directory.Build.props) instead of PackageReference. Core also references PlayMaker/
        UnityEngine/UnityEngine.UI (PrivateAssets="all" there, so they don't flow transitively) -
        redeclared here since FsmMasterDriver/FsmMasterMod/DebugModSavestateCompat use these types
        directly too, plus Assembly-CSharp for the old Modding API's own Mod<,>/IMod/IModSettings types. -->
   <ItemGroup>
     <Reference Include="Assembly-CSharp">
-      <HintPath>$(HollowKnightPatchedAssemblyFolder)/Assembly-CSharp.dll</HintPath>
+      <HintPath>$(HK1221ManagedFolder)/Assembly-CSharp.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine">
-      <HintPath>$(HollowKnightManagedFolder)/UnityEngine.dll</HintPath>
+      <HintPath>$(HK1221ManagedFolder)/UnityEngine.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.UI">
-      <HintPath>$(HollowKnightManagedFolder)/UnityEngine.UI.dll</HintPath>
+      <HintPath>$(HK1221ManagedFolder)/UnityEngine.UI.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="PlayMaker">
-      <HintPath>$(HollowKnightManagedFolder)/PlayMaker.dll</HintPath>
+      <HintPath>$(HK1221ManagedFolder)/PlayMaker.dll</HintPath>
       <Private>False</Private>
     </Reference>
   </ItemGroup>
@@ -74,7 +72,7 @@
       <Binaries Include="$(TargetPath)" />
       <Binaries Include="$(TargetDir)/$(TargetName).pdb" />
     </ItemGroup>
-    <Copy SourceFiles="@(Binaries)" DestinationFolder="$(HollowKnightModsFolder)/" Condition="'$(HollowKnightModsFolder)' != '' And Exists('$(HollowKnightModsFolder)')" />
+    <Copy SourceFiles="@(Binaries)" DestinationFolder="$(HK1221ModsFolder)/" Condition="'$(HK1221ModsFolder)' != '' And Exists('$(HK1221ModsFolder)')" />
   </Target>
 
   <!-- ILRepack.targets in this same directory is auto-imported by ILRepack.Lib.MSBuild.Task's own

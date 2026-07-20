@@ -1,9 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!--
-  Imports silksong path properties only if present in order to allow CI builds. The file should be gitignored.
-  If you are checking out from git and need to create a new one, you can use `dotnet new silksongpath` to generate one.
-  -->
-  <Import Condition="Exists('$(RepoRoot)SilksongPath.props')" Project="$(RepoRoot)SilksongPath.props" />
+  <!-- Machine-local install paths (SilksongFolder/SilksongPluginsFolder/SilksongScriptsFolder) come
+       from LocalBuild.props via Directory.Build.props; absent on CI, so the deploy target below is
+       guarded on the install folder existing. -->
   <PropertyGroup>
     <TargetFramework>netstandard2.1</TargetFramework>
     <!-- Keeps the shipped output identical to pre-restructure master (FsmMaster.dll, not
@@ -58,8 +56,11 @@
   </ItemGroup>
 
   <PropertyGroup>
-    <CopyDestinationFolder Condition="'$(HotReload)' == 'true'">$(SilksongPluginsFolder)/</CopyDestinationFolder>
-    <CopyDestinationFolder Condition="'$(HotReload)' != 'true'">$(SilksongPluginsFolder)/ConstructiveCynicism-$(AssemblyTitle)/</CopyDestinationFolder>
+    <!-- Release (and any Debug build without a scripts folder configured) installs into the plugin's
+         own folder under BepInEx/plugins. When a scripts folder is set, Debug builds are copied loose
+         into it instead so BepInEx's ScriptEngine hot-reloads them. -->
+    <CopyDestinationFolder Condition="'$(SilksongPluginsFolder)' != ''">$(SilksongPluginsFolder)/$(AssemblyName)/</CopyDestinationFolder>
+    <CopyDestinationFolder Condition="'$(Configuration)' == 'Debug' And '$(SilksongScriptsFolder)' != ''">$(SilksongScriptsFolder)/</CopyDestinationFolder>
   </PropertyGroup>
 
   <Target Name="CopyToPluginsFolder" AfterTargets="PostBuildEvent">
@@ -67,7 +68,7 @@
       <Binaries Include="$(TargetPath)" />
       <Binaries Include="$(TargetDir)/$(TargetName).pdb" />
     </ItemGroup>
-    <Copy SourceFiles="@(Binaries)" DestinationFolder="$(CopyDestinationFolder)" Condition="'$(SilksongPluginsFolder)' != '' And Exists('$(SilksongPluginsFolder)')" />
+    <Copy SourceFiles="@(Binaries)" DestinationFolder="$(CopyDestinationFolder)" Condition="'$(CopyDestinationFolder)' != '' And Exists('$(SilksongFolder)')" />
   </Target>
 
   <!-- Release packaging: builds the Thunderstore package and a manual-install zip, both

@@ -3,8 +3,10 @@
   net472 (hk1578) joins this list once its own committed reference stubs exist to build against -
   adding the TFM alone without real PlayMaker/UnityEngine references for it would just fail every
   file in this project for that target.
+
+  Machine-local install paths (HK1221ManagedFolder) come from LocalBuild.props via
+  Directory.Build.props; absent on CI, so the net35 game references below are guarded.
   -->
-  <Import Condition="Exists('$(RepoRoot)HollowKnightPath.props')" Project="$(RepoRoot)HollowKnightPath.props" />
   <PropertyGroup>
     <TargetFrameworks>net35;netstandard2.1</TargetFrameworks>
     <LangVersion>latest</LangVersion>
@@ -26,24 +28,24 @@
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
   </ItemGroup>
   <!-- Local game/engine assembly references for the old Modding API target - no NuGet-packaged
-       equivalent of Silksong.GameLibs exists for this loader, so these come from
-       HollowKnightManagedFolder/HollowKnightPatchedAssemblyFolder (see HollowKnightPath.props)
-       instead of PackageReference. -->
+       equivalent of Silksong.GameLibs exists for this loader, so these come from HK1221ManagedFolder
+       (derived from LocalBuild.props' HK1221Folder in Directory.Build.props) instead of
+       PackageReference. -->
   <ItemGroup Condition="'$(TargetFramework)' == 'net35'">
     <Reference Include="Assembly-CSharp">
-      <HintPath>$(HollowKnightPatchedAssemblyFolder)/Assembly-CSharp.dll</HintPath>
+      <HintPath>$(HK1221ManagedFolder)/Assembly-CSharp.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine">
-      <HintPath>$(HollowKnightManagedFolder)/UnityEngine.dll</HintPath>
+      <HintPath>$(HK1221ManagedFolder)/UnityEngine.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.UI">
-      <HintPath>$(HollowKnightManagedFolder)/UnityEngine.UI.dll</HintPath>
+      <HintPath>$(HK1221ManagedFolder)/UnityEngine.UI.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="PlayMaker">
-      <HintPath>$(HollowKnightManagedFolder)/PlayMaker.dll</HintPath>
+      <HintPath>$(HK1221ManagedFolder)/PlayMaker.dll</HintPath>
       <Private>False</Private>
     </Reference>
   </ItemGroup>
