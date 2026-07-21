@@ -1,0 +1,69 @@
+name: Build
+
+# Validation build. Runs directly on pushes to master, and is called by pr.yml for pull
+# requests (which has to run in the base repo's trust context to get the reference-assembly
+# token - see that file).
+
+on:
+  push:
+    branches: [master]
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to check out. Empty means the ref that triggered the run.
+        type: string
+        required: false
+        default: ''
+
+concurrency:
+  group: build-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Windows rather than Linux: the net35/net472 targets and the ILRepack merge each project
+    # runs after compilation are only exercised on Windows during development, and a release
+    # must be built exactly the way it was tested. Only the Silksong target is TFM-portable.
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Fetch Hollow Knight reference assemblies
+        env:
+          FSMMASTER_HK_REFS_TOKEN: ${{ secrets.FSMMASTER_HK_REFS_TOKEN }}
+        run: ./fetch-hk-refs.sh
+
+      - name: Select build scope
+        run: |
+          if [ -f CIRefs.props ]; then
+            echo "BUILD_TARGET=FsmMaster.sln" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No Hollow Knight reference assemblies available - building the Silksong target only. The HK1221/HK1432/HK1578 targets are not validated by this run."
+            echo "BUILD_TARGET=src/FsmMaster.Silksong/FsmMaster.Silksong.csproj" >> "$GITHUB_ENV"
+          fi
+
+      - name: Restore
+        run: dotnet restore "$BUILD_TARGET"
+
+      - name: Build
+        run: dotnet build "$BUILD_TARGET" --configuration Release --no-restore
+
+      - name: Upload release zips
+        uses: actions/upload-artifact@v4
+        with:
+          name: FsmMaster-zips
+          path: |
+            release/*.zip
+            thunderstore/build/*.zip
+          if-no-files-found: error

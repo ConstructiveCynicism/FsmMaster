@@ -1,0 +1,23 @@
+name: PR
+
+# Deliberately pull_request_target, not pull_request: the Hollow Knight targets can only be
+# compiled against the reference assemblies fetched by fetch-hk-refs.sh, and a plain
+# pull_request run on a fork never receives repository secrets - so those three targets would
+# silently go unbuilt on exactly the PRs that most need checking.
+#
+# pull_request_target runs in the base repository's trust context and therefore does get the
+# secret, at the cost of the PR's own code running with it in scope. That is acceptable here
+# only because FSMMASTER_HK_REFS_TOKEN is a fine-grained PAT with read-only contents access to
+# a single private repository holding metadata-only reference stubs, and nothing else: leaking
+# it costs nothing an attacker could not get by asking. Checkouts pin the PR head commit
+# explicitly and use persist-credentials: false so no writable credential is left on disk.
+
+on:
+  pull_request_target:
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}
+    secrets: inherit
