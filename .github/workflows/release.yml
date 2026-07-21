@@ -24,6 +24,8 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     defaults:
       run:
         shell: bash
@@ -103,6 +105,25 @@ jobs:
           done
           ls -l staging
 
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: staging/*.zip
+
+      - name: Publish to Thunderstore
+        if: contains(env.PLATFORMS, 'silksong')
+        env:
+          TCLI_AUTH_TOKEN: ${{ secrets.TCLI_AUTH_TOKEN }}
+        run: |
+          if [ -z "$TCLI_AUTH_TOKEN" ]; then
+            echo "::error::This release includes silksong, but TCLI_AUTH_TOKEN is not configured."
+            exit 1
+          fi
+          dotnet tool restore
+          dotnet tcli publish \
+            --config-path thunderstore/thunderstore.toml \
+            --file thunderstore/build/*.zip
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -110,3 +131,61 @@ jobs:
           gh release create "$TAG" staging/*.zip \
             --title "FsmMaster $VERSION" \
             --notes "FsmMaster $VERSION for: $PLATFORMS. Install instructions are in the README."
+
+      - name: Open modlinks PR (hk1578)
+        # Bumps the existing FsmMaster <Manifest> entry in hk-modding/modlinks - requires the
+        # one-time manual listing PR (adds Name/Description/Dependencies/Authors) to already be
+        # merged upstream; this step only ever patches Version/Link/SHA256 on an entry that's
+        # already there. Runs after "Publish release" so the versioned asset URL it links to
+        # already resolves.
+        if: contains(env.PLATFORMS, 'hk1578')
+        env:
+          MODLINKS_PAT: ${{ secrets.MODLINKS_PAT }}
+          GH_TOKEN: ${{ secrets.MODLINKS_PAT }}
+        run: |
+          if [ -z "$MODLINKS_PAT" ]; then
+            echo "::error::This release includes hk1578, but MODLINKS_PAT is not configured."
+            exit 1
+          fi
+
+          rm -rf modlinks-fork
+          git clone "https://x-access-token:${MODLINKS_PAT}@github.com/ConstructiveCynicism/modlinks.git" modlinks-fork
+          cd modlinks-fork
+          git remote add upstream https://github.com/hk-modding/modlinks.git
+          git fetch upstream main
+          # Sync the fork's main from upstream before branching, so the PR diff is exactly the
+          # three fields this step changes - nothing stale from a previous sync.
+          git checkout -B main upstream/main
+          git push origin main
+          BRANCH="fsmmaster-v${VERSION}"
+          git checkout -b "$BRANCH"
+
+          LINK="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/FsmMaster-hk1578.zip"
+          SHA256=$(sha256sum ../staging/FsmMaster-hk1578.zip | cut -d' ' -f1)
+
+          node - "$VERSION" "$LINK" "$SHA256" <<'NODE'
+          const fs = require('fs');
+          const [, , version, link, sha256] = process.argv;
+          const path = 'ModLinks.xml';
+          const content = fs.readFileSync(path, 'utf8');
+          const re = /(<Manifest>\s*<Name>FsmMaster<\/Name>\s*<Description>[^<]*<\/Description>\s*<Version>)[^<]*(<\/Version>\s*<Link SHA256=")[0-9a-fA-F]+("[^>]*>\s*<!\[CDATA\[)[^\]]*(\]\]>)/;
+          if (!re.test(content)) {
+            console.error('FsmMaster manifest entry not found - has the first-time listing PR been merged yet?');
+            process.exit(1);
+          }
+          fs.writeFileSync(path, content.replace(re, `$1${version}$2${sha256}$3${link}$4`));
+          NODE
+
+          git add ModLinks.xml
+          if git diff --cached --quiet; then
+            echo "::error::No changes produced - FsmMaster manifest entry not found or already up to date."
+            exit 1
+          fi
+          git -c user.name="FsmMaster release bot" -c user.email="actions@users.noreply.github.com" commit -m "Update FsmMaster to ${VERSION}"
+          git push origin "$BRANCH" --force
+
+          gh pr create --repo hk-modding/modlinks \
+            --head "ConstructiveCynicism:${BRANCH}" \
+            --base main \
+            --title "Update FsmMaster to ${VERSION}" \
+            --body "Automated version bump for FsmMaster's Hollow Knight 1.5.78 release. Updates Version/Link/SHA256 for tag ${TAG}."
