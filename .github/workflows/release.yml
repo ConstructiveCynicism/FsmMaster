@@ -1,21 +1,26 @@
 name: Release
 
-# One tag, one platform, one release. Tags are <platform>-v<version> (silksong-v0.3.3,
-# hk1221-v0.3.3, ...); release.sh at the repo root creates and pushes them. A multi-platform
-# release is just several tags pushed together, which start several independent runs of this
-# workflow - there is no shared state between them.
+# One tag, one release, every platform in it. Tags are v<version> (v0.3.5), created by
+# release.sh at the repo root, which also records which platforms the release covers in the
+# tag's message. Each platform contributes one asset named FsmMaster-<platform>.zip, so both
+# of the URLs that matter stay stable:
+#
+#   releases/latest/download/FsmMaster-hk1221.zip   always the newest release
+#   releases/download/v0.3.5/FsmMaster-hk1578.zip   immutable, safe to pin a checksum to
+#
+# Including a platform is also what publishes it: a release containing silksong goes to
+# Thunderstore, one containing hk1578 opens a modlinks PR. Leave a platform out and it is
+# neither built nor published.
 
 on:
   push:
     tags:
-      - 'silksong-v*'
-      - 'hk1221-v*'
-      - 'hk1432-v*'
-      - 'hk1578-v*'
+      - 'v*'
 
 jobs:
   release:
-    # Same runner as the validation build, for the same reason - see build.yml.
+    # The net35/net472 targets and the per-project ILRepack merge are only exercised on Windows
+    # during development, and a release must be built the way it was tested.
     runs-on: windows-latest
     permissions:
       contents: write
@@ -32,75 +37,76 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Parse tag
+      - name: Read version and platforms from the tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="$GITHUB_REF_NAME"
-          PLATFORM="${TAG%%-v*}"
-          VERSION="${TAG#*-v}"
-          case "$PLATFORM" in
-            silksong) PROJECT=src/FsmMaster.Silksong/FsmMaster.Silksong.csproj; PREFIX=silk ;;
-            hk1221)   PROJECT=src/FsmMaster.HK1221/FsmMaster.HK1221.csproj;     PREFIX=hk1221 ;;
-            hk1432)   PROJECT=src/FsmMaster.HK1432/FsmMaster.HK1432.csproj;     PREFIX=hk1432 ;;
-            hk1578)   PROJECT=src/FsmMaster.HK1578/FsmMaster.HK1578.csproj;     PREFIX=hk1578 ;;
-            *) echo "::error::Unrecognised platform '$PLATFORM' in tag '$TAG'." ; exit 1 ;;
-          esac
+          VERSION="${TAG#v}"
+          ALL="silksong hk1221 hk1432 hk1578"
+
+          # release.sh writes "platforms: <names>" into the annotated tag message. Read it from
+          # the API rather than the checkout, so this does not depend on the tag object having
+          # been fetched. A hand-made or lightweight tag has no such line and releases everything.
+          OBJ=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.sha' 2>/dev/null || echo '')
+          MESSAGE=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$OBJ" --jq '.message' 2>/dev/null || echo '')
+          PLATFORMS=$(printf '%s\n' "$MESSAGE" | sed -n 's/^platforms:[[:space:]]*//p' | head -1)
+          [ -n "$PLATFORMS" ] || PLATFORMS="$ALL"
+
+          for platform in $PLATFORMS; do
+            case " $ALL " in
+              *" $platform "*) ;;
+              *) echo "::error::Unrecognised platform '$platform' in the tag message." ; exit 1 ;;
+            esac
+          done
+
+          echo "Releasing $VERSION for: $PLATFORMS"
           {
             echo "TAG=$TAG"
-            echo "PLATFORM=$PLATFORM"
             echo "VERSION=$VERSION"
-            echo "PROJECT=$PROJECT"
-            # Matches ModReleaseName from Directory.Build.targets: the zip each project writes
-            # into release/ is named <prefix>_<version>.zip.
-            echo "ZIP=release/${PREFIX}_${VERSION}.zip"
-            echo "LATEST_ZIP=release/FsmMaster-${PLATFORM}.zip"
+            echo "PLATFORMS=$PLATFORMS"
           } >> "$GITHUB_ENV"
 
       - name: Fetch Hollow Knight reference assemblies
-        # Skipped for silksong, whose game assemblies come from NuGet - it has no use for the
-        # Hollow Knight stubs, and must not be held up by a problem fetching them.
-        if: env.PLATFORM != 'silksong'
+        # Only the Hollow Knight targets need these; silksong's game assemblies come from NuGet,
+        # so a silksong-only release must not be held up by them.
+        if: contains(env.PLATFORMS, 'hk')
         env:
           FSMMASTER_HK_REFS_TOKEN: ${{ secrets.FSMMASTER_HK_REFS_TOKEN }}
-        run: ./fetch-hk-refs.sh
-
-      - name: Check reference assemblies are present
-        # Only the Silksong target gets its game assemblies from NuGet; releasing a Hollow Knight
-        # target without the reference stubs cannot work, and must fail here rather than half way
-        # through a build.
         run: |
-          if [ "$PLATFORM" != "silksong" ] && [ ! -f CIRefs.props ]; then
-            echo "::error::$PLATFORM needs the Hollow Knight reference assemblies, but FSMMASTER_HK_REFS_TOKEN is not configured."
+          ./fetch-hk-refs.sh
+          if [ ! -f CIRefs.props ]; then
+            echo "::error::This release includes Hollow Knight targets, but FSMMASTER_HK_REFS_TOKEN is not configured."
             exit 1
           fi
 
-      - name: Restore
-        run: dotnet restore "$PROJECT"
-
-      - name: Build
-        # The version in Directory.Build.props is only the default; the tag is authoritative for a
-        # release, so no file has to be edited to cut one.
-        run: dotnet build "$PROJECT" --configuration Release --no-restore -p:Version="$VERSION"
+      - name: Build and stage each platform
+        run: |
+          mkdir -p staging
+          for platform in $PLATFORMS; do
+            case "$platform" in
+              silksong) project=src/FsmMaster.Silksong/FsmMaster.Silksong.csproj; prefix=silk ;;
+              hk1221)   project=src/FsmMaster.HK1221/FsmMaster.HK1221.csproj;     prefix=hk1221 ;;
+              hk1432)   project=src/FsmMaster.HK1432/FsmMaster.HK1432.csproj;     prefix=hk1432 ;;
+              hk1578)   project=src/FsmMaster.HK1578/FsmMaster.HK1578.csproj;     prefix=hk1578 ;;
+            esac
+            echo "::group::$platform"
+            # The tag is authoritative for a release, so no file has to be edited to cut one.
+            dotnet restore "$project"
+            dotnet build "$project" --configuration Release --no-restore -p:Version="$VERSION"
+            # Each project's own CreateReleaseZip target writes release/<prefix>_<version>.zip in
+            # that loader's install layout; only the asset name is normalised here.
+            built="release/${prefix}_${VERSION}.zip"
+            test -f "$built" || { echo "::error::Expected $built after building $platform."; exit 1; }
+            cp "$built" "staging/FsmMaster-${platform}.zip"
+            echo "::endgroup::"
+          done
+          ls -l staging
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          test -f "$ZIP" || { echo "::error::Expected $ZIP to exist after the build."; exit 1; }
-          gh release create "$TAG" "$ZIP" \
-            --title "FsmMaster $VERSION ($PLATFORM)" \
-            --notes "FsmMaster $VERSION for $PLATFORM. Install instructions are in the README."
-
-      - name: Refresh rolling latest release
-        # A release whose asset name never changes, so the README can link one URL per platform
-        # that always points at the newest build. Recreated rather than updated so the tag moves
-        # with it. The versioned release above keeps its versioned asset name and stays immutable,
-        # which is what anything pinning a checksum (modlinks) must link to.
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          cp "$ZIP" "$LATEST_ZIP"
-          gh release delete "latest-$PLATFORM" -y --cleanup-tag || true
-          gh release create "latest-$PLATFORM" "$LATEST_ZIP" \
-            --target "$GITHUB_SHA" \
-            --title "Latest ($PLATFORM)" \
-            --notes "Rolling pointer to the newest $PLATFORM release, currently $VERSION ($TAG). This release is replaced on every $PLATFORM release; link to the versioned release instead if you need a stable checksum."
+          gh release create "$TAG" staging/*.zip \
+            --title "FsmMaster $VERSION" \
+            --notes "FsmMaster $VERSION for: $PLATFORMS. Install instructions are in the README."
