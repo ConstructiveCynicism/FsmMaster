@@ -21,7 +21,7 @@
     Directory.Build.targets. Pass -p:Version=x.y.z on the build command line to override it for a
     single build without editing this file.
     -->
-    <Version>0.3.3</Version>
+    <Version>0.3.5</Version>
   </PropertyGroup>
 
   <!--
