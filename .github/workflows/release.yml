@@ -56,6 +56,9 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Fetch Hollow Knight reference assemblies
+        # Skipped for silksong, whose game assemblies come from NuGet - it has no use for the
+        # Hollow Knight stubs, and must not be held up by a problem fetching them.
+        if: env.PLATFORM != 'silksong'
         env:
           FSMMASTER_HK_REFS_TOKEN: ${{ secrets.FSMMASTER_HK_REFS_TOKEN }}
         run: ./fetch-hk-refs.sh

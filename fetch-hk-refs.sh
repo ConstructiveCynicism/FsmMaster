@@ -21,7 +21,14 @@ fi
 
 if [ ! -d "$REFS_DIR" ]; then
   echo "fetch-hk-refs: cloning $REFS_REPO into $REFS_DIR"
-  git clone --depth 1 "https://x-access-token:${FSMMASTER_HK_REFS_TOKEN}@github.com/${REFS_REPO}.git" "$REFS_DIR"
+  if ! git clone --depth 1 "https://x-access-token:${FSMMASTER_HK_REFS_TOKEN}@github.com/${REFS_REPO}.git" "$REFS_DIR"; then
+    # A token that is set but can't read the repo is a misconfiguration, not the "no token"
+    # case handled above - fail loudly rather than quietly dropping the HK targets. A 403 here
+    # usually means the token doesn't list $REFS_REPO under its repository access, or lacks
+    # read access to repository contents.
+    echo "fetch-hk-refs: FSMMASTER_HK_REFS_TOKEN is set but cannot clone $REFS_REPO." >&2
+    exit 1
+  fi
 fi
 
 cat > "$REPO_ROOT/CIRefs.props" <<EOF
