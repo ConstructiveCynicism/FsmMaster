@@ -92,6 +92,11 @@ for tag in "${tags[@]}"; do
   git tag -a "$tag" -m "${tag%%-v*} ${tag#*-v}"
 done
 
-git push "$REMOTE" "${tags[@]}"
+# One push per tag, deliberately. GitHub does not trigger workflows for a push that creates more
+# than three refs at once, so pushing all four platform tags together silently produces no release
+# builds at all - the tags simply appear on the remote with nothing running.
+for tag in "${tags[@]}"; do
+  git push "$REMOTE" "$tag"
+done
 
 echo "Pushed ${#tags[@]} tag(s) to $REMOTE; each one starts its own release build."
