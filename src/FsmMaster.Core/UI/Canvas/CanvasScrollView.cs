@@ -15,7 +15,7 @@ namespace FsmMaster;
 // whose rows a caller adds to, and scrolling moves that child's LocalPosition.y within the viewport,
 // clamped so content never scrolls past its own bounds. Mouse-wheel scrolling polls
 // Input.mouseScrollDelta directly, independent of EventSystem/GraphicRaycaster - see
-// FsmGraphOverlay's interactiveRect/IsPointerOverGameObject gating, which exists precisely so the
+// FsmGraphOverlay's panel-rect/IsPointerOverGameObject gating, which exists precisely so the
 // graph canvas's own scroll-wheel zoom doesn't also fire while the pointer is over a scroll view like
 // this one.
 internal sealed class CanvasScrollView : CanvasNode, IHorizontalScrollSource

@@ -1,12 +1,12 @@
-#if NET35
+#if NET35 || NET472
 namespace System.Diagnostics.CodeAnalysis
 {
-    // net35's mscorlib predates C#'s nullable-reference-type analysis attributes entirely, so the
-    // compiler has nothing to bind [NotNullWhen] to - this is a pure compile-time marker with no
-    // runtime behavior, matching the real BCL type's shape exactly so usage elsewhere reads the same
-    // as it would on a modern target. Guarded to net35 only - netstandard2.1/net472 already define this
-    // attribute in their own reference assemblies, and an unconditional copy here collides with it
-    // (CS0436).
+    // Both net35's and net472's mscorlib predate C#'s nullable-reference-type analysis attributes
+    // entirely (never backported to classic .NET Framework, any version), so the compiler has nothing
+    // to bind [NotNullWhen] to - this is a pure compile-time marker with no runtime behavior, matching
+    // the real BCL type's shape exactly so usage elsewhere reads the same as it would on a modern
+    // target. Guarded off netstandard2.1 only, which already defines this attribute in its own
+    // reference assemblies - an unconditional copy here would collide with it (CS0436).
     [AttributeUsage(AttributeTargets.Parameter)]
     internal sealed class NotNullWhenAttribute : Attribute
     {
@@ -18,12 +18,17 @@ namespace System.Diagnostics.CodeAnalysis
         public bool ReturnValue { get; }
     }
 }
+#endif
 
+#if NET35
 namespace System.Runtime.CompilerServices
 {
     // Emitted by the compiler on every member that returns or holds a *named*-element tuple (e.g.
     // `(Vector2 Position, Color Color)`) - purely a compile-time marker read by tooling, with no
-    // runtime behavior of its own. Guarded to net35 only, same reasoning as NotNullWhenAttribute above.
+    // runtime behavior of its own. Guarded to net35 only: net472 (unlike net35) already has
+    // System.ValueTuple built into mscorlib since .NET Framework 4.7, tuple-attribute included, so an
+    // unconditional copy on net472 would collide with it (CS0436) the same way it would on
+    // netstandard2.1.
     [AttributeUsage(AttributeTargets.All)]
     public sealed class TupleElementNamesAttribute : Attribute
     {

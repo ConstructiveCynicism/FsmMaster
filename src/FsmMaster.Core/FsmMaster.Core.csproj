@@ -1,14 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <!--
-  net472 (hk1578) joins this list once its own committed reference stubs exist to build against -
-  adding the TFM alone without real PlayMaker/UnityEngine references for it would just fail every
-  file in this project for that target.
-
-  Machine-local install paths (HK1221ManagedFolder) come from LocalBuild.props via
-  Directory.Build.props; absent on CI, so the net35 game references below are guarded.
+  Machine-local install paths (HK1221ManagedFolder/HK1578ManagedFolder) come from LocalBuild.props via
+  Directory.Build.props; absent on CI, so the net35/net472 game references below are guarded. CI's
+  path to building net472 without a real install is tracked as a Phase 3 CI prerequisite (committed
+  reference stubs or HKBuildUtils) - not yet wired up.
   -->
   <PropertyGroup>
-    <TargetFrameworks>net35;netstandard2.1</TargetFrameworks>
+    <TargetFrameworks>net35;net472;netstandard2.1</TargetFrameworks>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <EnableNETAnalyzers>True</EnableNETAnalyzers>
@@ -52,6 +50,72 @@
   <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.1'">
     <PackageReference Include="UnityEngine.Modules" Version="6000.0.50" IncludeAssets="compile" PrivateAssets="all" />
     <PackageReference Include="Silksong.GameLibs" Version="*-*" PrivateAssets="all" />
+  </ItemGroup>
+  <!-- Local game/engine assembly references for the modern MonoMod-based Modding API targets
+       (hk1432/hk1578) - no NuGet-packaged equivalent of Silksong.GameLibs exists for this loader
+       generation either, so these come from HK1578ManagedFolder (derived from LocalBuild.props'
+       HK1578Folder in Directory.Build.props) instead of PackageReference. hk1578's PlayMaker.dll is a
+       strict-by-name superset of hk1432's own build (see platform-inventory.md's PlayMaker surface
+       delta table) for every member Core actually calls, so building once against hk1578's copy and
+       shipping the same Core.dll to both loaders is safe - hk1432's loader project references this
+       same net472 Core.dll and runs it against hk1432's own (older) PlayMaker.dll at runtime without
+       ever hitting a member Core built against hk1578 but hk1432 lacks. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net472'">
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(HK1578ManagedFolder)/Assembly-CSharp.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(HK1578ManagedFolder)/UnityEngine.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(HK1578ManagedFolder)/UnityEngine.UI.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="PlayMaker">
+      <HintPath>$(HK1578ManagedFolder)/PlayMaker.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <!-- UnityEngine.dll on this Unity version is just a facade that type-forwards to these per-module
+         assemblies - the compiler needs the real assembly referenced directly to resolve a forwarded
+         type, even though the forwarding facade itself is also referenced above. -->
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(HK1578ManagedFolder)/UnityEngine.CoreModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(HK1578ManagedFolder)/UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>$(HK1578ManagedFolder)/UnityEngine.UIModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>$(HK1578ManagedFolder)/UnityEngine.TextRenderingModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(HK1578ManagedFolder)/UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.Physics2DModule">
+      <HintPath>$(HK1578ManagedFolder)/UnityEngine.Physics2DModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.ImageConversionModule">
+      <HintPath>$(HK1578ManagedFolder)/UnityEngine.ImageConversionModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.AudioModule">
+      <HintPath>$(HK1578ManagedFolder)/UnityEngine.AudioModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.JSONSerializeModule">
+      <HintPath>$(HK1578ManagedFolder)/UnityEngine.JSONSerializeModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Unity.Analyzers" Version="1.25.0" PrivateAssets="all" />

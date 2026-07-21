@@ -7,7 +7,7 @@ namespace FsmMaster;
 
 // Tracks which states an FSM's live Fsm instance has actually entered since the last reconciliation.
 //
-// On every TFM except net35, this hooks Fsm.StateChanged - a plain public Action<FsmState> field,
+// On netstandard2.1 (Silksong), this hooks Fsm.StateChanged - a plain public Action<FsmState> field,
 // invoked synchronously from EnterState right before state.OnEnter() runs. PlayMaker can chain several
 // state entries within a single Unity Update() call - one event immediately causing another transition,
 // and so on - so polling Fsm.ActiveStateName once per rendered frame silently drops every intermediate
@@ -16,10 +16,13 @@ namespace FsmMaster;
 //
 // net35's PlayMaker build has no StateChanged field at all (confirmed against the real hk1221
 // PlayMaker.dll - see platform-inventory.md's PlayMaker surface delta table: it's a Silksong-only
-// addition). That TFM instead subscribes to FsmStateChangeBridge, which the HK1221 loader's own Harmony
-// postfix on Fsm.EnterState feeds - see that bridge's own comment for why Core can't hook Harmony
-// directly. Same per-instance, every-state-entered fidelity as the non-net35 path, just routed through
-// one process-wide event instead of a field on Fsm itself.
+// addition), and net472 is built once and shared by both hk1432 (whose PlayMaker build is identical to
+// hk1221's, no StateChanged) and hk1578 (which does have it) - a single Core.dll can't safely call a
+// field one of its two net472 loaders' actual PlayMaker.dll doesn't have. Both TFMs instead subscribe
+// to FsmStateChangeBridge, fed by each loader's own EnterState hook (a Harmony postfix on hk1221, a
+// MonoMod On.Fsm.EnterState hook on hk1432/hk1578) - see that bridge's own comment for why Core can't
+// hook either mechanism directly. Same per-instance, every-state-entered fidelity as the
+// StateChanged-field path, just routed through one process-wide event instead of a field on Fsm itself.
 //
 // Only ever tracks whichever FSMs FsmGraphOverlay is actually drawing this frame (EnsureTracked is
 // called once per DrawGraph pass, for the active tab plus any pinned tabs) - not every live FSM in the
@@ -32,7 +35,7 @@ internal sealed class FsmActiveStateTracker
     {
         public Fsm Instance = null!;
         public Action<FsmState> Handler = null!;
-#if NET35
+#if NET35 || NET472
         // Bridge-side handler, wired to only fire for this entry's own Instance - FsmStateChangeBridge
         // is a single process-wide event covering every live Fsm, not a per-instance one.
         public Action<Fsm, FsmState>? BridgeHandler;
@@ -72,7 +75,7 @@ internal sealed class FsmActiveStateTracker
             // a freshly-Awoken FSM (FsmTabManager.RebindAfterRefresh). The old instance's own
             // subscription would otherwise sit there forever, since nothing else ever tears it down
             // once its owning scene is gone.
-#if NET35
+#if NET35 || NET472
             FsmStateChangeBridge.StateEntered -= existing.BridgeHandler;
 #else
             existing.Instance.StateChanged -= existing.Handler;
@@ -81,7 +84,7 @@ internal sealed class FsmActiveStateTracker
         }
 
         var entry = new TrackedFsm { Instance = instance };
-#if NET35
+#if NET35 || NET472
         entry.BridgeHandler = (fsm, state) =>
         {
             if (ReferenceEquals(fsm, entry.Instance) && state != null)
@@ -115,7 +118,7 @@ internal sealed class FsmActiveStateTracker
             // last thing holding a reference to it) is dropped.
             if (entry.Instance.FsmComponent == null || !_visibleThisFrame.Contains(fsmKey))
             {
-#if NET35
+#if NET35 || NET472
                 FsmStateChangeBridge.StateEntered -= entry.BridgeHandler;
 #else
                 entry.Instance.StateChanged -= entry.Handler;
@@ -199,7 +202,7 @@ internal sealed class FsmActiveStateTracker
     {
         foreach (TrackedFsm entry in _tracked.Values)
         {
-#if NET35
+#if NET35 || NET472
             FsmStateChangeBridge.StateEntered -= entry.BridgeHandler;
 #else
             entry.Instance.StateChanged -= entry.Handler;

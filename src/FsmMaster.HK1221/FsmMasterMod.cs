@@ -36,7 +36,9 @@ public class FsmMasterMod : Mod<FsmMasterSaveSettings, FsmMasterGlobalSettings>,
         Log("FsmMaster initialized.");
     }
 
-    public override string GetVersion() => "hk1221v0.3.2";
+    // Generated at build time from this project's target prefix and $(Version), so a version bump in
+    // Directory.Build.props renames the release zip and this string together.
+    public override string GetVersion() => BuildInfo.ReleaseName;
 
     public override bool IsCurrent() => true;
 }

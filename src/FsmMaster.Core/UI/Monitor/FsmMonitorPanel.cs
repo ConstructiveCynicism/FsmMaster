@@ -89,6 +89,39 @@ internal sealed class FsmMonitorPanel : CanvasPanel
         };
     }
 
+    // The screen rect anything drawing behind this panel should treat it as occupying - the graph
+    // overlay keeps its own geometry out of it (see FsmGraphOverlay's occluder handling), since legacy
+    // OnGUI always composites on top of the uGUI canvas and would otherwise paint straight over this.
+    //
+    // Unlocked that's simply the whole panel, which has a solid background. Locked (minimal view) the
+    // background is cleared to transparent and the drag/resize handles are gone, so the only thing left
+    // to draw behind is the value rows themselves - reporting the whole panel there would punch a
+    // panel-sized hole in the graph over what is mostly empty screen. The rows are stacked contiguously
+    // from the top of the scroll content, so the block they occupy is a single rect: the content's own
+    // rect, clipped to the scroll viewport so rows scrolled out of view don't count.
+    public Rect ScreenRect
+    {
+        get
+        {
+            var panelRect = new Rect(Position.x, Position.y, Size.x, Size.y);
+            if (!_locked || _valueTexts.Count == 0 || _scrollView.Content == null)
+            {
+                return panelRect;
+            }
+
+            CanvasNode content = _scrollView.Content;
+            var contentRect = new Rect(content.Position.x, content.Position.y, content.Size.x, content.Size.y);
+            var viewportRect = new Rect(_scrollView.Position.x, _scrollView.Position.y, _scrollView.Size.x, _scrollView.Size.y);
+
+            float xMin = Mathf.Max(contentRect.xMin, viewportRect.xMin);
+            float yMin = Mathf.Max(contentRect.yMin, viewportRect.yMin);
+            float xMax = Mathf.Min(contentRect.xMax, viewportRect.xMax);
+            float yMax = Mathf.Min(contentRect.yMax, viewportRect.yMax);
+
+            return xMax > xMin && yMax > yMin ? Rect.MinMaxRect(xMin, yMin, xMax, yMax) : new Rect(panelRect.x, panelRect.y, 0f, 0f);
+        }
+    }
+
     public bool Locked
     {
         set

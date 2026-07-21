@@ -9,11 +9,21 @@ CLAUDE.md
 # referencing the Hollow Knight game assemblies. Copy LocalBuild.example.props to LocalBuild.props.
 LocalBuild.props
 
+# CI-only reference-assembly cache: fetch-hk-refs.sh clones the private FsmMaster-hk-refs stub
+# repo here and writes CIRefs.props pointing at it. Never used for local dev (LocalBuild.props
+# with a real game install takes precedence); regenerated fresh on every CI run.
+/.hk-refs/
+CIRefs.props
+
 # Thunderstore/manual-zip release packaging output (regenerated on Release build)
 thunderstore/temp/
 thunderstore/dist/
 thunderstore/build/
 thunderstore/manual/
+
+# Per-target manual-install zips (silk_x.y.z.zip, hk1221_x.y.z.zip, ...), written by each loader
+# project's CreateReleaseZip target
+/release/
 
 # Standard build output
 bin/

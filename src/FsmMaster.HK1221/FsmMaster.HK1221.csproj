@@ -10,6 +10,12 @@
          installs. -->
     <AssemblyName>FsmMaster</AssemblyName>
     <RootNamespace>FsmMaster</RootNamespace>
+    <!-- Release identity for this target: "hk1221_<version>" names the release zip and is what
+         GetVersion() reports. Optional per-target command-line overrides beat the shared
+         -p:Version= - see Directory.Build.targets. -->
+    <ModTargetPrefix>hk1221</ModTargetPrefix>
+    <ModTargetPrefix Condition="'$(HK1221Prefix)' != ''">$(HK1221Prefix)</ModTargetPrefix>
+    <ModVersion Condition="'$(HK1221Version)' != ''">$(HK1221Version)</ModVersion>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <EnableNETAnalyzers>True</EnableNETAnalyzers>
@@ -73,6 +79,21 @@
       <Binaries Include="$(TargetDir)/$(TargetName).pdb" />
     </ItemGroup>
     <Copy SourceFiles="@(Binaries)" DestinationFolder="$(HK1221ModsFolder)/" Condition="'$(HK1221ModsFolder)' != '' And Exists('$(HK1221ModsFolder)')" />
+  </Target>
+
+  <!-- Manual-install zip, laid out so its contents drop straight into the game's Managed/Mods folder.
+       Flat here, matching this loader's install layout - hk1432/hk1578 nest theirs under FsmMaster/.
+       No Thunderstore equivalent: this loader generation is installed by hand or through Scarab. -->
+  <Target Name="CreateReleaseZip" AfterTargets="ILRepacker" Condition="'$(Configuration)' == 'Release'">
+    <ItemGroup>
+      <ReleaseBinaries Include="$(TargetPath)" />
+      <ReleaseBinaries Include="$(TargetDir)/$(TargetName).pdb" />
+    </ItemGroup>
+    <RemoveDir Directories="$(IntermediateOutputPath)/archive" />
+    <Copy SourceFiles="@(ReleaseBinaries)" DestinationFolder="$(IntermediateOutputPath)/archive/" />
+    <MakeDir Directories="$(ReleaseOutputFolder)" />
+    <Delete Files="$(ReleaseOutputFolder)/$(ModReleaseName).zip" />
+    <ZipDirectory SourceDirectory="$(IntermediateOutputPath)/archive" DestinationFile="$(ReleaseOutputFolder)/$(ModReleaseName).zip" Overwrite="True" />
   </Target>
 
   <!-- ILRepack.targets in this same directory is auto-imported by ILRepack.Lib.MSBuild.Task's own

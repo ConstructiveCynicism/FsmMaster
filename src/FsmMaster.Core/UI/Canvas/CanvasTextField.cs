@@ -130,9 +130,10 @@ internal sealed class CanvasTextField : CanvasNode
         _inputField.caretColor = _ui.CaretColor;
         _inputField.caretWidth = (byte)Mathf.Max(1, UICommon.ScaleWidth(2));
 
-#if !NET35
-        // InputField.onSubmit doesn't exist on net35's older UnityEngine.UI.dll (confirmed against the
-        // real hk1221 build) - that TFM falls through to onEndEdit's own !_submittedThisEdit branch
+#if !NET35 && !NET472
+        // InputField.onSubmit doesn't exist on the older UnityEngine.UI.dll every HK1 game build ships
+        // (confirmed against the real hk1221 build; net472 covers hk1432/hk1578, which ship the same
+        // vintage UI package) - those TFMs fall through to onEndEdit's own !_submittedThisEdit branch
         // below for every commit, Enter-press included, matching this wrapper's pre-onSubmit behavior.
         _inputField.onSubmit.AddListener(text =>
         {

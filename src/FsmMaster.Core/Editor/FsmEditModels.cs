@@ -30,6 +30,17 @@ internal sealed class FsmEditSet
     public List<string> DisabledStates = new();
     public List<TransitionRetarget> TransitionRetargets = new();
     public List<SequencerOverride> SequencerOverrides = new();
+
+    // True once every override list has been emptied out again (EnableState/EnableTransition/
+    // RemoveSequencer undoing the only edit that was ever made for this FsmKey) - FsmEditManager prunes
+    // its _activeEdits entry once this goes true, rather than leaving a stale empty set that would keep
+    // reporting this FsmKey as "edited" (GetEditedFsmKeys) forever.
+    public bool IsEmpty =>
+        VariableOverrides.Count == 0
+        && ActionFieldOverrides.Count == 0
+        && DisabledStates.Count == 0
+        && TransitionRetargets.Count == 0
+        && SequencerOverrides.Count == 0;
 }
 
 // A live-edited value for a single FSM variable (or one array element of it).

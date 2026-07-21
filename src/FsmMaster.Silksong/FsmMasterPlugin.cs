@@ -137,7 +137,9 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
 
     private void Awake()
     {
-        Logger.LogInfo($"Plugin {Name} ({Id}) has loaded!");
+        // BuildInfo.ReleaseName ("silk_<version>") is generated at build time and matches the filename
+        // of the release this DLL came from, so a log excerpt is enough to identify the exact build.
+        Logger.LogInfo($"Plugin {Name} {BuildInfo.ReleaseName} ({Id}) has loaded!");
         _log = new BepInExLog(Logger);
 
         // Only FsmActivatedPatch, GameFileLoadedPatch, and FocusOnHoverSuppressionPatch are
@@ -215,7 +217,41 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
 
         BuildRightPanel();
 
+        TryUnlockUiInput();
+
         SceneManager.sceneLoaded += OnSceneLoaded;
+    }
+
+    // The mouse doesn't work at all - not just against this mod's own UI, but anywhere in the game -
+    // until the player has opened the pause menu once. InputHandler tracks this with its own
+    // acceptingInput field and UIManager.inputModule.allowMouseInput, both false at boot and both only
+    // ever flipped true by InputHandler.StartUIInput() - the exact method the game's own pause-menu
+    // code calls. Called here once instead of waiting for that first pause. This is a one-time nudge
+    // to shared state the game itself would set true anyway on first pause, not a value this plugin
+    // owns, so it's never undone: the game's own StopUIInput/StartUIInput calls keep managing it
+    // normally from here on regardless of this plugin's state.
+    //
+    // GameManager.instance can still be null this early (BepInEx's Awake fires before the game's own
+    // managers are guaranteed to exist), so this can't just run once in Awake - retried from Update
+    // every frame until it succeeds, since a skipped frame here has no other effect worth guarding
+    // against.
+    private bool _uiInputUnlocked;
+
+    private void TryUnlockUiInput()
+    {
+        if (_uiInputUnlocked)
+        {
+            return;
+        }
+
+        InputHandler? inputHandler = GameManager.instance?.inputHandler;
+        if (inputHandler == null)
+        {
+            return;
+        }
+
+        inputHandler.StartUIInput();
+        _uiInputUnlocked = true;
     }
 
     // First-run hint: opens the overlay and shows the toggle-hotkey hint the first time a save file
@@ -269,6 +305,11 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
     {
         _editManager?.PollPendingActivations();
         _debugModCompat?.PollPendingReload();
+
+        if (!_uiInputUnlocked)
+        {
+            TryUnlockUiInput();
+        }
 
         _graphOverlay?.Update();
 
@@ -412,13 +453,15 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
         }
 
         // Both panels are freely draggable/resizable now (see FsmRightPanel/FsmMonitorPanel's own
-        // resize handles) - the vignette needs the monitor panel's own current rect too, alongside the
+        // resize handles) - the overlay needs the monitor panel's own current rect too, alongside the
         // right panel's, so it can skip over wherever that panel actually is instead of assuming it
-        // only ever sits within the right panel's own docked strip (see FsmGraphOverlay.OnGUI).
+        // only ever sits within the right panel's own docked strip (see FsmGraphOverlay.OnGUI). The
+        // panel reports this itself rather than it being rebuilt from Position/Size here: in minimal
+        // view it shrinks to just the rows it's still showing (see FsmMonitorPanel.ScreenRect).
         Rect? monitorPanelScreenRect = null;
         if (_monitorPanel is { ActiveInHierarchy: true })
         {
-            monitorPanelScreenRect = new Rect(_monitorPanel.Position.x, _monitorPanel.Position.y, _monitorPanel.Size.x, _monitorPanel.Size.y);
+            monitorPanelScreenRect = _monitorPanel.ScreenRect;
         }
 
         // The Open dropdown (Scene/Object/FSM picker) isn't clipped to the right panel's own rect and

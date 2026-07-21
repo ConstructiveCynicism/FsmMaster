@@ -366,7 +366,13 @@ internal sealed class FsmRightPanel : CanvasPanel
     private void UndoActiveTab(FsmTabManager tabManager, FsmEditManager editManager, IFsmLog logger)
     {
         FsmTabState? active = tabManager.GetActive();
-        if (active?.Component == null)
+        // Only active == null (no tab open) bails here - unlike Save/Load above, this never touches
+        // active.Component, so a disconnected tab (Component null/IsLive false after its FSM's
+        // GameObject went away) must still be able to undo/reset by FsmKey alone. Gating on Component
+        // the same way Save/Load do left a disconnected tab's edits permanently un-undoable/un-resettable
+        // once its FSM disappeared - the active edit set (and this mod's "Fsm Edits Active" indicator)
+        // would then never clear for that FsmKey.
+        if (active == null)
         {
             logger.LogInfo("[FsmMaster] Undo: no active tab.");
             return;
@@ -388,7 +394,9 @@ internal sealed class FsmRightPanel : CanvasPanel
     private void ResetActiveTab(FsmTabManager tabManager, FsmEditManager editManager, IFsmLog logger)
     {
         FsmTabState? active = tabManager.GetActive();
-        if (active?.Component == null)
+        // See UndoActiveTab's comment above - Reset only needs active.FsmKey, so a disconnected tab
+        // must still be resettable.
+        if (active == null)
         {
             logger.LogInfo("[FsmMaster] Reset: no active tab.");
             return;

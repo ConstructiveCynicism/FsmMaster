@@ -15,8 +15,13 @@
     This is the version of your plugin as it would appear in-game and in a mod installer.
     It should follow the format major.minor.patch (semantic versioning). If you publish your mod
     as a library to NuGet, this version will also be used as the package version.
+
+    Every loader target derives its release identity from this - "<prefix>_<version>" (silk_0.3.2,
+    hk1221_0.3.2, ...) names both the release zip and the version the mod reports in-game; see
+    Directory.Build.targets. Pass -p:Version=x.y.z on the build command line to override it for a
+    single build without editing this file.
     -->
-    <Version>0.3.2</Version>
+    <Version>0.3.3</Version>
   </PropertyGroup>
 
   <!--
@@ -42,4 +47,14 @@
     <!-- hk1578 installs into its own subfolder (Mods/FsmMaster), unlike hk1221/hk1432 which are flat. -->
     <HK1578ModsFolder Condition="'$(HK1578Folder)' != ''">$(HK1578ManagedFolder)\Mods</HK1578ModsFolder>
   </PropertyGroup>
+
+  <!--
+  CI-only fallback: fetch-hk-refs.sh (run as a workflow step before `dotnet build`) clones the
+  private Refasmer-stripped reference-assembly stub repo and writes this file, setting whichever
+  HK*ManagedFolder above is still blank (i.e. no LocalBuild.props / real game install present) to
+  point at the stubs instead. Gitignored, absent for ordinary contributor builds - a fresh clone
+  with no local game installs and no CI token still builds Core + Silksong; the HK targets are
+  the only ones that need either a local install or this CI fallback to compile.
+  -->
+  <Import Condition="Exists('$(RepoRoot)CIRefs.props')" Project="$(RepoRoot)CIRefs.props" />
 </Project>

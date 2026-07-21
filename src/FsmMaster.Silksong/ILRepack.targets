@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Merges FsmMaster.Core.dll (a ProjectReference, so it lands in the output folder as its own file
+       on every build) into FsmMaster.dll so ScriptEngine only has to resolve types out of one assembly
+       on hot reload. Unlike hk1221's ILRepack.targets, this does NOT merge the other copy-local
+       dependencies (HarmonyX, Silksong.I18N) - BepInEx plugins aren't loaded flat with no isolation the
+       way the old Modding API's Mods folder is, and other installed plugins may share those assemblies,
+       so they stay as their own files. FsmMaster.dll is listed first so its own types stay public and
+       its assembly attributes are kept; Core gets internalized. -->
+  <Target Name="ILRepacker" AfterTargets="Build">
+    <ItemGroup>
+      <MergeAssemblies Include="$(TargetPath)" />
+      <MergeAssemblies Include="@(ReferenceCopyLocalPaths)" Condition="'%(ReferenceCopyLocalPaths.Filename)' == 'FsmMaster.Core' And '%(ReferenceCopyLocalPaths.Extension)' == '.dll'" />
+      <!-- FsmMaster.Core's own compile-only references (BepInEx.Core, UnityEngine.Modules,
+           Silksong.GameLibs, etc.) aren't copy-local, so ILRepack can't find them next to the merged
+           dll on disk - point it at every resolved reference's directory so it can still read the
+           attribute/type metadata it needs from Core without merging those assemblies in too. -->
+      <RepackLibraryPath Include="@(ReferencePath->'%(RootDir)%(Directory)')" />
+    </ItemGroup>
+    <ILRepack
+        Parallel="true"
+        DebugInfo="$(DebugSymbols)"
+        Internalize="true"
+        InputAssemblies="@(MergeAssemblies)"
+        LibraryPath="@(RepackLibraryPath)"
+        TargetKind="Dll"
+        OutputFile="$(TargetPath)"
+    />
+    <!-- The loose FsmMaster.Core.dll (and .pdb) MSBuild placed in the output directory as part of the
+         normal build is no longer needed once its contents are merged into FsmMaster.dll. -->
+    <Delete Files="$(TargetDir)/FsmMaster.Core.dll;$(TargetDir)/FsmMaster.Core.pdb" />
+  </Target>
+</Project>

@@ -1,0 +1,63 @@
+<Project>
+  <!--
+  Every loader project sets $(ModTargetPrefix) (silk / hk1221 / hk1432 / hk1578). Combined with the
+  shared $(Version) from Directory.Build.props, that gives each target a single release identity -
+  "<prefix>_<version>", e.g. silk_0.3.2 - used for both the release zip filename and the version string
+  the mod reports in-game and in the log. Projects that aren't a loader (FsmMaster.Core) leave the
+  prefix unset and skip everything below.
+
+  Both halves are overridable from the build command line, without editing any file:
+
+      -p:Version=0.4.0-rc1     applies to whichever targets that build covers (all of them for a
+                               solution build), so a coordinated release bump is one property.
+      -p:SilkVersion=0.4.1     per-target, and wins over -p:Version for that target only, so one
+      -p:HK1221Version=0.3.9   loader can ship a fix without renumbering the others. The matching
+                               properties are HK1432Version and HK1578Version.
+      -p:SilkPrefix=silk-beta  per-target prefix override, same naming scheme (HK1221Prefix, ...),
+                               for one-off builds that need a distinguishable zip/version string.
+
+  Each loader project reads its own two override properties (they have to be named there, since the
+  property name differs per target) and leaves $(ModVersion) unset when neither is passed; the
+  default below then falls back to the shared $(Version).
+  -->
+  <PropertyGroup Condition="'$(ModTargetPrefix)' != ''">
+    <ModVersion Condition="'$(ModVersion)' == ''">$(Version)</ModVersion>
+    <ModReleaseName>$(ModTargetPrefix)_$(ModVersion)</ModReleaseName>
+    <!-- Where CreateReleaseZip in each loader project drops its finished archive. -->
+    <ReleaseOutputFolder>$(RepoRoot)release</ReleaseOutputFolder>
+  </PropertyGroup>
+
+  <!--
+  Emits a BuildInfo class carrying the values above as compile-time constants, so the version string
+  lives in exactly one place (Directory.Build.props) instead of being hand-copied into each loader's
+  GetVersion()/log line, where it silently goes stale on a version bump.
+  -->
+  <Target Name="GenerateModBuildInfo"
+          BeforeTargets="BeforeCompile"
+          Condition="'$(ModTargetPrefix)' != ''">
+    <PropertyGroup>
+      <ModBuildInfoFile>$(IntermediateOutputPath)ModBuildInfo.g.cs</ModBuildInfoFile>
+    </PropertyGroup>
+    <ItemGroup>
+      <ModBuildInfoLine Include="// Generated during the build from Directory.Build.targets - do not edit." />
+      <ModBuildInfoLine Include="namespace FsmMaster%3B" />
+      <ModBuildInfoLine Include=" " />
+      <ModBuildInfoLine Include="internal static class BuildInfo" />
+      <ModBuildInfoLine Include="{" />
+      <ModBuildInfoLine Include="    public const string Prefix = &quot;$(ModTargetPrefix)&quot;%3B" />
+      <ModBuildInfoLine Include="    public const string Version = &quot;$(ModVersion)&quot;%3B" />
+      <ModBuildInfoLine Include=" " />
+      <ModBuildInfoLine Include="    // Prefix and version joined, e.g. silk_0.3.2 - matches this build's release zip filename." />
+      <ModBuildInfoLine Include="    public const string ReleaseName = &quot;$(ModReleaseName)&quot;%3B" />
+      <ModBuildInfoLine Include="}" />
+    </ItemGroup>
+    <WriteLinesToFile File="$(ModBuildInfoFile)"
+                      Lines="@(ModBuildInfoLine)"
+                      Overwrite="true"
+                      WriteOnlyWhenDifferent="true" />
+    <ItemGroup>
+      <Compile Include="$(ModBuildInfoFile)" />
+      <FileWrites Include="$(ModBuildInfoFile)" />
+    </ItemGroup>
+  </Target>
+</Project>

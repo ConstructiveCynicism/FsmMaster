@@ -190,6 +190,21 @@ internal sealed class FsmEditManager
     public FsmEditSet? GetActiveEditSet(string fsmKey) =>
         _activeEdits.TryGetValue(fsmKey, out FsmEditSet? set) ? set : null;
 
+    // Drops fsmKey's _activeEdits entry once every override list on it has been emptied back out -
+    // called after EnableState/EnableTransition/RemoveSequencer remove what may have been the only edit
+    // recorded for this key, so GetEditedFsmKeys (and anything reading it, e.g. FsmGraphOverlay's "Fsm
+    // Edits Active" indicator) stops reporting a key that no longer has any edit in effect. Ad-hoc
+    // SetVariable/SetActionField overrides also call this once their value has been dialed back to match
+    // the pristine one, so manually undoing an edit by hand (without the Reset button) clears the
+    // indicator - and the saved edit set - the same way Reset does.
+    private void PruneActiveEditSetIfEmpty(string fsmKey)
+    {
+        if (_activeEdits.TryGetValue(fsmKey, out FsmEditSet? set) && set.IsEmpty)
+        {
+            _activeEdits.Remove(fsmKey);
+        }
+    }
+
     // Records editSet as the active edit set for its FsmKey without touching any live Fsm - lets a caller
     // that knows what edits *should* be in effect for a key before any matching instance exists yet (e.g.
     // DebugModCompat priming a savestate's target edits before Silksong tears down and rebuilds the room)
@@ -548,21 +563,34 @@ internal sealed class FsmEditManager
         }
 
         FsmPristineSnapshot snapshot = GetOrCreateSnapshot(fsmKey);
-        if (!snapshot.OriginalValues.VariableOverrides.Exists(v => v.Name == ov.Name && v.ArrayIndex == -1))
+        VariableOverride? pristineEntry = snapshot.OriginalValues.VariableOverrides.Find(v => v.Name == ov.Name && v.ArrayIndex == -1);
+        if (pristineEntry == null)
         {
-            snapshot.OriginalValues.VariableOverrides.Add(new VariableOverride
+            pristineEntry = new VariableOverride
             {
                 VariableType = variable.VariableType.ToString(),
                 Name = ov.Name,
                 StringValue = FormatNamedVariable(variable),
-            });
+            };
+            snapshot.OriginalValues.VariableOverrides.Add(pristineEntry);
         }
 
         AssignNamedVariable(variable, ov.StringValue);
 
+        // Re-read the live value through the same canonical formatter the pristine snapshot was captured
+        // with (rather than string-comparing ov.StringValue directly), since a user-typed value can differ
+        // textually from FormatNamedVariable's output (e.g. "1.0" vs "1") while still being the same value.
+        // If the edit now matches pristine, drop it from the active set instead of recording it, so manually
+        // dialing a variable back to its original value clears the "Fsm Edits Active" indicator and the
+        // saved edit set the same way the Reset button does.
         FsmEditSet active = GetOrCreateActiveEditSet(fsmKey);
         active.VariableOverrides.RemoveAll(v => v.Name == ov.Name && v.ArrayIndex == -1);
-        active.VariableOverrides.Add(ov);
+        if (FormatNamedVariable(variable) != pristineEntry.StringValue)
+        {
+            active.VariableOverrides.Add(ov);
+        }
+
+        PruneActiveEditSetIfEmpty(fsmKey);
         BumpEditGeneration();
     }
 
@@ -593,22 +621,31 @@ internal sealed class FsmEditManager
         }
 
         FsmPristineSnapshot snapshot = GetOrCreateSnapshot(fsmKey);
-        if (!snapshot.OriginalValues.VariableOverrides.Exists(v => v.Name == ov.Name && v.ArrayIndex == ov.ArrayIndex))
+        VariableOverride? pristineEntry = snapshot.OriginalValues.VariableOverrides.Find(v => v.Name == ov.Name && v.ArrayIndex == ov.ArrayIndex);
+        if (pristineEntry == null)
         {
-            snapshot.OriginalValues.VariableOverrides.Add(new VariableOverride
+            pristineEntry = new VariableOverride
             {
                 VariableType = ov.VariableType,
                 Name = ov.Name,
                 ArrayIndex = ov.ArrayIndex,
                 StringValue = FormatArrayElement(array.ElementType, array.Get(ov.ArrayIndex)),
-            });
+            };
+            snapshot.OriginalValues.VariableOverrides.Add(pristineEntry);
         }
 
         AssignArrayElement(array, ov.ArrayIndex, ov.StringValue);
 
+        // See ApplyVariableOverride's matching comment - compares through the canonical formatter rather
+        // than ov.StringValue directly, so dialing an element back to its original value clears the edit.
         FsmEditSet active = GetOrCreateActiveEditSet(fsmKey);
         active.VariableOverrides.RemoveAll(v => v.Name == ov.Name && v.ArrayIndex == ov.ArrayIndex);
-        active.VariableOverrides.Add(ov);
+        if (FormatArrayElement(array.ElementType, array.Get(ov.ArrayIndex)) != pristineEntry.StringValue)
+        {
+            active.VariableOverrides.Add(ov);
+        }
+
+        PruneActiveEditSetIfEmpty(fsmKey);
         BumpEditGeneration();
     }
 
@@ -686,25 +723,35 @@ internal sealed class FsmEditManager
         }
 
         FsmPristineSnapshot snapshot = GetOrCreateSnapshot(fsmKey);
-        if (!snapshot.OriginalValues.ActionFieldOverrides.Exists(f =>
-                f.StateName == ov.StateName && f.ActionIndex == ov.ActionIndex && f.FieldName == ov.FieldName && f.ArrayIndex == -1))
+        ActionFieldOverride? pristineEntry = snapshot.OriginalValues.ActionFieldOverrides.Find(f =>
+            f.StateName == ov.StateName && f.ActionIndex == ov.ActionIndex && f.FieldName == ov.FieldName && f.ArrayIndex == -1);
+        if (pristineEntry == null)
         {
-            snapshot.OriginalValues.ActionFieldOverrides.Add(new ActionFieldOverride
+            pristineEntry = new ActionFieldOverride
             {
                 StateName = ov.StateName,
                 ActionIndex = ov.ActionIndex,
                 ExpectedActionTypeName = ov.ExpectedActionTypeName,
                 FieldName = ov.FieldName,
                 StringValue = formattedCurrent,
-            });
+            };
+            snapshot.OriginalValues.ActionFieldOverrides.Add(pristineEntry);
         }
 
         TryAssignFieldValue(action, field, currentValue, ov.StringValue);
 
+        // See ApplyVariableOverride's matching comment - re-format the live value through the same
+        // TryFormatValue path the pristine snapshot was captured with, so dialing a field back to its
+        // original value (by hand, without Reset) drops the edit instead of leaving a no-op override behind.
         FsmEditSet active = GetOrCreateActiveEditSet(fsmKey);
         active.ActionFieldOverrides.RemoveAll(f =>
             f.StateName == ov.StateName && f.ActionIndex == ov.ActionIndex && f.FieldName == ov.FieldName && f.ArrayIndex == -1);
-        active.ActionFieldOverrides.Add(ov);
+        if (!TryFormatValue(field.GetValue(action), out string formattedAfter) || formattedAfter != pristineEntry.StringValue)
+        {
+            active.ActionFieldOverrides.Add(ov);
+        }
+
+        PruneActiveEditSetIfEmpty(fsmKey);
         BumpEditGeneration();
     }
 
@@ -728,10 +775,11 @@ internal sealed class FsmEditManager
         }
 
         FsmPristineSnapshot snapshot = GetOrCreateSnapshot(fsmKey);
-        if (!snapshot.OriginalValues.ActionFieldOverrides.Exists(f =>
-                f.StateName == ov.StateName && f.ActionIndex == ov.ActionIndex && f.FieldName == ov.FieldName && f.ArrayIndex == ov.ArrayIndex))
+        ActionFieldOverride? pristineEntry = snapshot.OriginalValues.ActionFieldOverrides.Find(f =>
+            f.StateName == ov.StateName && f.ActionIndex == ov.ActionIndex && f.FieldName == ov.FieldName && f.ArrayIndex == ov.ArrayIndex);
+        if (pristineEntry == null)
         {
-            snapshot.OriginalValues.ActionFieldOverrides.Add(new ActionFieldOverride
+            pristineEntry = new ActionFieldOverride
             {
                 StateName = ov.StateName,
                 ActionIndex = ov.ActionIndex,
@@ -739,16 +787,23 @@ internal sealed class FsmEditManager
                 FieldName = ov.FieldName,
                 ArrayIndex = ov.ArrayIndex,
                 StringValue = formattedCurrent,
-            });
+            };
+            snapshot.OriginalValues.ActionFieldOverrides.Add(pristineEntry);
         }
 
         // Guaranteed a NamedVariable of a supported type by the TryFormatValue check above.
         AssignNamedVariable((NamedVariable)element, ov.StringValue);
 
+        // See ApplyVariableOverride's matching comment.
         FsmEditSet active = GetOrCreateActiveEditSet(fsmKey);
         active.ActionFieldOverrides.RemoveAll(f =>
             f.StateName == ov.StateName && f.ActionIndex == ov.ActionIndex && f.FieldName == ov.FieldName && f.ArrayIndex == ov.ArrayIndex);
-        active.ActionFieldOverrides.Add(ov);
+        if (!TryFormatValue(element, out string formattedAfter) || formattedAfter != pristineEntry.StringValue)
+        {
+            active.ActionFieldOverrides.Add(ov);
+        }
+
+        PruneActiveEditSetIfEmpty(fsmKey);
         BumpEditGeneration();
     }
 
@@ -850,6 +905,7 @@ internal sealed class FsmEditManager
             active.DisabledStates.Remove(stateName);
         }
 
+        PruneActiveEditSetIfEmpty(fsmKey);
         PushUndo(fsmKey, () => DisableState(fsmKey, stateName));
         BumpEditGeneration();
     }
@@ -1172,6 +1228,7 @@ internal sealed class FsmEditManager
             active.TransitionRetargets.RemoveAll(t => t.StateName == stateName && t.EventName == eventName);
         }
 
+        PruneActiveEditSetIfEmpty(fsmKey);
         PushUndo(fsmKey, () => DisableTransition(fsmKey, stateName, eventName));
         BumpEditGeneration();
     }
@@ -1393,6 +1450,7 @@ internal sealed class FsmEditManager
             active.SequencerOverrides.RemoveAll(s => s.StateName == stateName && s.ActionIndex == actionRank);
         }
 
+        PruneActiveEditSetIfEmpty(fsmKey);
         BumpEditGeneration();
     }
 

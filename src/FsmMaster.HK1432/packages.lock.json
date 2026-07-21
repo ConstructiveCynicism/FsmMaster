@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "dependencies": {
+    ".NETFramework,Version=v3.5": {
+      "ILRepack.Lib.MSBuild.Task": {
+        "type": "Direct",
+        "requested": "[2.0.34, )",
+        "resolved": "2.0.34",
+        "contentHash": "L8TGuOMXjjT9tHf55bruPBBxJ9y17dLTf27cxPox6hhbdxFNNe7nwKzgYw6r/DZOH8O5qRxKpLeW/y80Gz45cg=="
+      },
+      "Microsoft.NETFramework.ReferenceAssemblies": {
+        "type": "Direct",
+        "requested": "[1.0.3, )",
+        "resolved": "1.0.3",
+        "contentHash": "vUc9Npcs14QsyOD01tnv/m8sQUnGTGOw1BCmKcv77LBJY7OxhJ+zJF7UD/sCL3lYNFuqmQEVlkfS4Quif6FyYg==",
+        "dependencies": {
+          "Microsoft.NETFramework.ReferenceAssemblies.net35": "1.0.3"
+        }
+      },
+      "Microsoft.Unity.Analyzers": {
+        "type": "Direct",
+        "requested": "[1.25.0, )",
+        "resolved": "1.25.0",
+        "contentHash": "jOclVb2PVoOdKafuzt3bJ3BHkbjsfuAx+60yqP4zCAhlNa1rwn1Jt05qrmqJgmBY42S08hXbps9KA6QR2Z7aOA=="
+      },
+      "Microsoft.NETFramework.ReferenceAssemblies.net35": {
+        "type": "Transitive",
+        "resolved": "1.0.3",
+        "contentHash": "Mhbr13IGgsW4AHj50uAiVNMPWdvUPWePRsI4x1NiTkhHUc4rqi9XvY5xxBC4d56bJypQbxAZ8bPuZIpz+TjBVQ=="
+      },
+      "fsmmaster.core": {
+        "type": "Project"
+      }
+    }
+  }
+}

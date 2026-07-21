@@ -15,8 +15,22 @@ namespace FsmMaster;
 // actually go stale.
 internal sealed class FsmGraphOverlay
 {
+    // Toggles the "Fsm Edits Active" bottom-right HUD text drawn whenever any live FSM has at least
+    // one active edit (see _editManager.GetEditedFsmKeys) - on by default. Shared across every loader
+    // (Core is compiled into each), so flipping this from one place affects Silksong/hk1221/hk1432/
+    // hk1578 alike. No loader currently exposes a config entry to flip it; it's here for other mods
+    // with a BepInDependency on this one, and for ad-hoc debugging, to toggle at runtime.
+    public static bool ShowEditIndicator = true;
+
     private const float MinZoom = 0.1f;
-    private const float MaxZoom = 3f;
+
+    // The zoom ceiling has to scale with the screen, because the zoom needed to fit an FSM does too:
+    // fitting is canvasHeight / worldHeight, so the same FSM wants twice the zoom on a 1440p screen
+    // that it wants on a 720p one. A fixed ceiling therefore silently clips the fit zoom of small
+    // FSMs on large displays - the view lands pinned at the ceiling, and scrolling to zoom in does
+    // nothing because it is already there. Expressing the ceiling as a fraction of screen height
+    // keeps it proportional to the fit zoom at every resolution, so that can no longer happen.
+    private const float MaxTitleBarScreenFraction = 0.15f;
     private const float ZoomSpeed = 0.05f;
     private const float MinNodeWidth = 60f;
     private const float TitleBarHeight = 16f;
@@ -39,6 +53,10 @@ internal sealed class FsmGraphOverlay
     // Below this rendered point size (DynamicFontPointSize * _zoom) the graph's state-name/transition
     // labels are too small to read, so DrawCachedGraph skips its whole label pass - see that call site.
     private const float MinLegibleLabelPointSize = 5f;
+    // Upper zoom bound, derived from the screen rather than fixed - see MaxTitleBarScreenFraction.
+    // The floor keeps it sane if a loader reports a degenerate screen height during a resolution change.
+    private static float MaxZoom => Mathf.Max(Screen.height * MaxTitleBarScreenFraction / TitleBarHeight, 3f);
+
     private const float TransitionLineThickness = 3f;
     private const float ActiveTransitionLineThickness = 6f;
     private const float SelectedTransitionOutlineMargin = 3f;
@@ -81,6 +99,7 @@ internal sealed class FsmGraphOverlay
     private GUIStyle? _eventStyle;
     private GUIStyle? _globalEventStyle;
     private float _textStyleBuiltForZoom = -1f;
+    private GUIStyle? _editIndicatorStyle;
 
     private bool _isVisible;
     private bool _selectionUiVisible = true;
@@ -520,25 +539,37 @@ internal sealed class FsmGraphOverlay
     // extend past it (see FsmRightPanel.OpenDropdownScreenRect).
     public void OnGUI(FsmTabState? activeTab, Rect? rightPanelScreenRect, Rect? monitorPanelScreenRect, Rect? openDropdownScreenRect)
     {
+        // Drawn regardless of _isVisible/_snapshot - active edits stay applied to their live FSMs
+        // whether or not the graph overlay itself is currently open (see FsmEditManager._activeEdits),
+        // so this is meant as a standing reminder rather than something tied to the overlay's own
+        // toggle state.
+        if (ShowEditIndicator && _editManager.GetEditedFsmKeys().Count > 0)
+        {
+            DrawEditIndicator();
+        }
+
         if (!_isVisible || _snapshot == null)
         {
             return;
         }
 
         var canvasRect = new Rect(0f, 0f, Screen.width, Screen.height);
-        Rect interactiveRect = ComputeInteractiveRect(rightPanelScreenRect);
+
+        // Every HUD panel's current screen rect, plus the screen broken into the disjoint rects that no
+        // panel covers - the region the graph is free to draw into. Legacy OnGUI always composites on
+        // top of the uGUI canvas regardless of draw order, so anything the graph paints inside a panel's
+        // rect covers that panel; both are recomputed per event because the panels are freely draggable
+        // and resizable (see FsmRightPanel/FsmMonitorPanel's own drag/resize handles).
+        CollectHudOccluders(rightPanelScreenRect, monitorPanelScreenRect, openDropdownScreenRect);
+        SubtractRects(canvasRect, _hudOccluders, _graphClipRegions);
 
         // Semi-transparent dark fill, shown whenever the uGUI right panel itself is up (mirrors
         // _rightPanel.ActiveSelf in FsmMasterPlugin.Update, which is driven by these same two fields) -
-        // not just while the Open dropdown specifically is expanded. Both panels are now freely
-        // draggable/resizable (see FsmRightPanel/FsmMonitorPanel's own drag/resize handles), so this
-        // can no longer reuse interactiveRect's own "everything left of the panel" approximation - that
-        // was only ever correct because the panel used to always be docked flush against the screen's
-        // right edge, occupying the entire strip the approximation assumed. DrawVignette instead skips
-        // over each panel's own actual current rect, wherever it's been moved/resized to.
+        // not just while the Open dropdown specifically is expanded. Skips each panel's own rect for
+        // the same reason the graph does, and off the same region list.
         if (_selectionUiVisible)
         {
-            DrawVignette(rightPanelScreenRect, monitorPanelScreenRect, openDropdownScreenRect);
+            DrawVignette();
         }
 
         // Pinned tabs other than the active one draw first (so the active tab's own graph, drawn
@@ -559,7 +590,7 @@ internal sealed class FsmGraphOverlay
             FsmInfo? pinnedFsm = ResolveFsmInfo(tab.FsmKey);
             if (pinnedFsm != null)
             {
-                DrawGraph(pinnedFsm, tab, canvasRect, interactiveRect, interactive: false, dim: _selectionUiVisible);
+                DrawGraph(pinnedFsm, tab, canvasRect, interactive:false, dim: _selectionUiVisible);
             }
         }
 
@@ -571,7 +602,7 @@ internal sealed class FsmGraphOverlay
 
         if (activeFsm != null)
         {
-            DrawGraph(activeFsm, activeTab!, canvasRect, interactiveRect, interactive: true, dim: false);
+            DrawGraph(activeFsm, activeTab!, canvasRect, interactive:true, dim: false);
         }
 
         // Reconciles everything EnsureTracked/the StateChanged hook observed this frame - see
@@ -583,118 +614,108 @@ internal sealed class FsmGraphOverlay
         }
     }
 
-    // Excludes the uGUI right panel's own screen rect (a fixed, right-docked, full-height strip is a
-    // conservative approximation - the panel isn't always literally full-height, but this matches how
-    // the old IMGUI list panel's rect exclusion worked too) from the graph's pan/zoom/click-to-select
-    // input region, so a click on it never also pans the graph or selects a node underneath it. Also
-    // reused as a draw-time exclusion by DrawCachedGraph's own node/line culling, so the graph's own
-    // geometry never paints into the panel's screen region either - see its own comment for why. NOT
-    // reused by the vignette any more (see DrawVignette) - that approximation only held while the panel
-    // was always docked flush against the screen's own right edge.
-    private static Rect ComputeInteractiveRect(Rect? rightPanelScreenRect)
+    // The screen rects of every HUD panel currently up, and the disjoint rects of the screen left over
+    // once those are subtracted. Everything the overlay paints - graph chrome, transition lines, labels,
+    // the vignette - is confined to the leftover set, so none of it covers a panel.
+    // Both are reused across calls rather than freshly allocated: OnGUI (and everything it calls) runs
+    // once per IMGUI event - Layout, Repaint, every mouse/key event - not once per frame, so a fresh
+    // List<> here would allocate several times more often than the actual frame rate.
+    private readonly List<Rect> _hudOccluders = new(3);
+    private readonly List<Rect> _graphClipRegions = new(8);
+
+    private void CollectHudOccluders(Rect? rightPanelScreenRect, Rect? monitorPanelScreenRect, Rect? openDropdownScreenRect)
     {
-        float excludedFromX = rightPanelScreenRect?.x ?? Screen.width;
-        return new Rect(0f, 0f, Mathf.Max(0f, excludedFromX), Screen.height);
+        _hudOccluders.Clear();
+        if (rightPanelScreenRect.HasValue)
+        {
+            _hudOccluders.Add(rightPanelScreenRect.Value);
+        }
+
+        // The monitor panel is the one panel that survives the toggle-minimal-view hotkey, so it's the
+        // only one still on screen in a view whose whole point is an unobstructed graph. It reports a
+        // rect shrunk to just its value rows there rather than its full frame (see
+        // FsmMonitorPanel.ScreenRect), so the graph draws right up to the readout instead of leaving a
+        // panel-sized hole in itself - no special case is needed here.
+        if (monitorPanelScreenRect.HasValue)
+        {
+            _hudOccluders.Add(monitorPanelScreenRect.Value);
+        }
+
+        // The Open dropdown isn't clipped to the right panel's own rect and routinely extends past it
+        // (a resized-down panel, or a scene/object/FSM list tall enough to overflow), so the panel rect
+        // alone doesn't cover everywhere it can render.
+        if (openDropdownScreenRect.HasValue)
+        {
+            _hudOccluders.Add(openDropdownScreenRect.Value);
+        }
     }
 
-    // Darkens the whole screen except wherever a docked HUD panel currently sits. Both panels are
-    // freely draggable/resizable now (FsmRightPanel/FsmMonitorPanel), so a single "everything left of
-    // the panel" rect can no longer stand in for "everywhere the vignette should skip" - that only
-    // worked while both panels were permanently flush against the screen's right edge. IMGUI has no
-    // way to punch a literal hole out of an already-drawn box, so instead this rasterizes the screen
-    // into a grid using every panel rect's own edges as cut lines, then fills every cell whose center
-    // isn't inside either panel's rect - correct regardless of where the panels have been dragged to,
-    // whether they overlap, or whether only one of them is currently visible.
-    // Reused across calls instead of freshly allocated each time - OnGUI (and everything it calls,
-    // including this) runs once per IMGUI event (Layout, Repaint, every mouse/key event), not once per
-    // frame, so three fresh List<> allocations here happened several times more often than the actual
-    // frame rate. Only Repaint below produces any visible output, so that's also the only event worth
-    // paying for the list-building/sorting work at all.
-    private readonly List<Rect> _vignetteHolesBuffer = new(3);
-    private readonly List<float> _vignetteXCutsBuffer = new();
-    private readonly List<float> _vignetteYCutsBuffer = new();
+    // Breaks `region` into the disjoint rects covering everything in it that no hole covers. Each hole
+    // splits every surviving piece it overlaps into up to four smaller pieces (the bands above and
+    // below the overlap, then the strips left and right of it), so the result stays a set of plain
+    // rects - which is what both the GL viewport clip and IMGUI's clip groups can actually consume,
+    // neither having any notion of a hole. A single right-docked, full-height panel collapses to one
+    // piece, the same strip the old "everything left of the panel" approximation produced; a panel
+    // dragged anywhere else, or a second panel, is where the two diverge.
+    private static void SubtractRects(Rect region, List<Rect> holes, List<Rect> into)
+    {
+        into.Clear();
+        into.Add(region);
 
-    private void DrawVignette(Rect? rightPanelScreenRect, Rect? monitorPanelScreenRect, Rect? openDropdownScreenRect)
+        foreach (Rect hole in holes)
+        {
+            // Backwards so removing a piece can't disturb the indices of the ones still to be checked.
+            // Pieces appended by this same hole land past the starting index and are skipped, which is
+            // correct - they're already outside it.
+            for (int i = into.Count - 1; i >= 0; i--)
+            {
+                Rect piece = into[i];
+                if (!piece.Overlaps(hole))
+                {
+                    continue;
+                }
+
+                into.RemoveAt(i);
+
+                float xMin = Mathf.Max(piece.xMin, hole.xMin);
+                float xMax = Mathf.Min(piece.xMax, hole.xMax);
+                float yMin = Mathf.Max(piece.yMin, hole.yMin);
+                float yMax = Mathf.Min(piece.yMax, hole.yMax);
+
+                AddIfNotEmpty(into, piece.xMin, piece.yMin, piece.xMax, yMin);
+                AddIfNotEmpty(into, piece.xMin, yMax, piece.xMax, piece.yMax);
+                AddIfNotEmpty(into, piece.xMin, yMin, xMin, yMax);
+                AddIfNotEmpty(into, xMax, yMin, piece.xMax, yMax);
+            }
+        }
+    }
+
+    private static void AddIfNotEmpty(List<Rect> into, float xMin, float yMin, float xMax, float yMax)
+    {
+        if (xMax > xMin && yMax > yMin)
+        {
+            into.Add(Rect.MinMaxRect(xMin, yMin, xMax, yMax));
+        }
+    }
+
+    // Darkens the whole screen except wherever a HUD panel currently sits. IMGUI has no way to punch a
+    // hole out of an already-drawn box, so this fills the same subtracted region set everything else
+    // draws through - correct regardless of where the panels have been dragged to, whether they
+    // overlap, or whether only one of them is currently visible.
+    private void DrawVignette()
     {
         if (Event.current.type != EventType.Repaint)
         {
             return;
         }
 
-        List<Rect> holes = _vignetteHolesBuffer;
-        holes.Clear();
-        if (rightPanelScreenRect.HasValue)
-        {
-            holes.Add(rightPanelScreenRect.Value);
-        }
-
-        if (monitorPanelScreenRect.HasValue)
-        {
-            holes.Add(monitorPanelScreenRect.Value);
-        }
-
-        // The Open dropdown isn't clipped to the right panel's own rect and routinely extends past it
-        // (a resized-down panel, or a scene/object/FSM list tall enough to overflow) - without its own
-        // hole here, this vignette (legacy OnGUI, which always composites on top of the uGUI canvas
-        // regardless of z-order) paints over whatever part of the list sticks out past the panel.
-        if (openDropdownScreenRect.HasValue)
-        {
-            holes.Add(openDropdownScreenRect.Value);
-        }
-
         Color previousColor = GUI.color;
         GUI.color = _colors.VignetteColor.Value;
         try
         {
-            if (holes.Count == 0)
+            foreach (Rect region in _graphClipRegions)
             {
-                GUI.DrawTexture(new Rect(0f, 0f, Screen.width, Screen.height), Texture2D.whiteTexture);
-                return;
-            }
-
-            List<float> xCuts = _vignetteXCutsBuffer;
-            List<float> yCuts = _vignetteYCutsBuffer;
-            xCuts.Clear();
-            xCuts.Add(0f);
-            xCuts.Add(Screen.width);
-            yCuts.Clear();
-            yCuts.Add(0f);
-            yCuts.Add(Screen.height);
-            foreach (Rect hole in holes)
-            {
-                xCuts.Add(Mathf.Clamp(hole.xMin, 0f, Screen.width));
-                xCuts.Add(Mathf.Clamp(hole.xMax, 0f, Screen.width));
-                yCuts.Add(Mathf.Clamp(hole.yMin, 0f, Screen.height));
-                yCuts.Add(Mathf.Clamp(hole.yMax, 0f, Screen.height));
-            }
-
-            xCuts.Sort();
-            yCuts.Sort();
-
-            for (int i = 0; i < xCuts.Count - 1; i++)
-            {
-                float x0 = xCuts[i];
-                float x1 = xCuts[i + 1];
-                if (x1 - x0 <= 0f)
-                {
-                    continue;
-                }
-
-                for (int j = 0; j < yCuts.Count - 1; j++)
-                {
-                    float y0 = yCuts[j];
-                    float y1 = yCuts[j + 1];
-                    if (y1 - y0 <= 0f)
-                    {
-                        continue;
-                    }
-
-                    var cellCenter = new Vector2((x0 + x1) / 2f, (y0 + y1) / 2f);
-                    if (!IsInsideAny(cellCenter, holes))
-                    {
-                        GUI.DrawTexture(new Rect(x0, y0, x1 - x0, y1 - y0), Texture2D.whiteTexture);
-                    }
-                }
+                GUI.DrawTexture(region, Texture2D.whiteTexture);
             }
         }
         finally
@@ -716,9 +737,8 @@ internal sealed class FsmGraphOverlay
         return false;
     }
 
-    // Second guard alongside ComputeInteractiveRect's rect-subtraction: the Open dropdown can render
-    // outside the right panel's own base rect (e.g. if its row list grows tall enough to extend past
-    // the panel's bottom edge), so rect-subtraction alone can't account for it. Note this polls a
+    // Second guard alongside the HUD rect exclusion: uGUI content can render outside any rect reported
+    // to this class, so subtracting the reported rects alone can't account for all of it. Note this polls a
     // separate channel from CanvasScrollView/CanvasHorizontalScrollStrip's own direct
     // Input.mouseScrollDelta polling - a scroll-wheel gesture over one of those could still also
     // reach this method's ScrollWheel branch in HandlePanAndZoom if IsPointerOverGameObject somehow
@@ -726,6 +746,41 @@ internal sealed class FsmGraphOverlay
     // is worth watching for if a report of the graph zooming while scrolling a panel ever comes in.
     private static bool IsPointerOverUi() =>
         EventSystem.current != null && EventSystem.current.IsPointerOverGameObject();
+
+    private const float EditIndicatorFontSize = 14f;
+    private const float EditIndicatorMargin = 12f;
+    private const float EditIndicatorWidth = 220f;
+    private const float EditIndicatorHeight = 24f;
+
+    // Bottom-right "Fsm Edits Active" HUD text - built lazily/once, not zoom-dependent like
+    // _titleStyle/_eventStyle above, since it's a fixed-size screen-space overlay rather than part of
+    // the graph canvas itself.
+    private void DrawEditIndicator()
+    {
+        _dynamicFont ??= Font.CreateDynamicFontFromOSFont(DynamicFontNames, (int)DynamicFontPointSize);
+
+        if (_editIndicatorStyle == null)
+        {
+            _editIndicatorStyle = new GUIStyle
+            {
+                font = _dynamicFont,
+                fontSize = (int)EditIndicatorFontSize,
+                fontStyle = FontStyle.Bold,
+                alignment = TextAnchor.MiddleRight,
+                clipping = TextClipping.Clip,
+                wordWrap = false,
+            };
+            _editIndicatorStyle.normal.textColor = Color.white;
+        }
+
+        var rect = new Rect(
+            Screen.width - EditIndicatorWidth - EditIndicatorMargin,
+            Screen.height - EditIndicatorHeight - EditIndicatorMargin,
+            EditIndicatorWidth,
+            EditIndicatorHeight);
+
+        GUI.Label(rect, "Fsm Edits Active", _editIndicatorStyle);
+    }
 
     // Builds the title/event GUIStyles from a dynamic OS font. Gated on its own _zoom-only check
     // rather than the full layout cacheStale flag, since text styling depends only on zoom (font
@@ -865,7 +920,7 @@ internal sealed class FsmGraphOverlay
     // method). _currentCache is repointed at this FsmKey's own GraphLayoutCache for the duration of the
     // call, so every helper below (RebuildNodeLayoutCache, DrawCachedGraph, hit-testing, dragging)
     // keeps reading/writing through it exactly as it used to read/write the old singleton fields.
-    private void DrawGraph(FsmInfo fsm, FsmTabState tab, Rect canvasRect, Rect interactiveRect, bool interactive, bool dim)
+    private void DrawGraph(FsmInfo fsm, FsmTabState tab, Rect canvasRect, bool interactive, bool dim)
     {
         _currentCache = GetOrCreateLayoutCache(tab.FsmKey);
         _panWorldCenter = tab.PanWorldCenter;
@@ -929,7 +984,7 @@ internal sealed class FsmGraphOverlay
         // drawn via GUI calls local to this GUI.BeginGroup, so Unity's GUIClip stack silently adds
         // canvasRect's screen offset for them, but raw GL calls bypass GUIClip entirely - DrawLineBufferGL
         // needs the real screen-space offset to line its geometry up with those GUI-drawn nodes.
-        DrawCachedGraph(fsm, tab.FsmKey, canvasRect.position, interactiveRect, interactive, dim);
+        DrawCachedGraph(fsm, tab.FsmKey, canvasRect, interactive, dim);
 
         // A pinned-but-inactive tab's graph is a frozen ghost - it never pans/zooms/drags/selects on
         // its own, and only the active tab's own gestures should ever mutate _draggingTransition/
@@ -937,8 +992,8 @@ internal sealed class FsmGraphOverlay
         // graph can ever be interactive at a time).
         if (interactive)
         {
-            HandlePanAndZoom(interactiveRect);
-            HandleTransitionDrag(fsm, interactiveRect);
+            HandlePanAndZoom(canvasRect);
+            HandleTransitionDrag(fsm);
         }
 
         GUI.EndGroup();
@@ -1286,12 +1341,17 @@ internal sealed class FsmGraphOverlay
     // Renders one FSM's graph from its already-built layout cache: gathers line/chrome geometry into
     // GL batches, draws state/event labels, then (when interactive) hit-tests this frame's mouse-down
     // against transition action zones and node rects to drive click/drag handling.
-    private void DrawCachedGraph(FsmInfo fsm, string fsmKey, Vector2 canvasScreenOffset, Rect interactiveRect, bool interactive, bool dim)
+    private void DrawCachedGraph(FsmInfo fsm, string fsmKey, Rect canvasRect, bool interactive, bool dim)
     {
         if (_currentCache.NodeLayoutCache == null)
         {
             return;
         }
+
+        // The graph's GUI.BeginGroup is the full screen at the origin, so its local coordinates are
+        // screen coordinates and this offset is zero today - it's threaded through anyway because the
+        // raw GL paths bypass GUIClip entirely and would silently drift the moment that stops holding.
+        Vector2 canvasScreenOffset = canvasRect.position;
 
         // Read live, not cached - the active state changes every frame as the FSM runs, independent of
         // the layout cache (which only tracks pan/zoom/selection/canvas-size).
@@ -1312,14 +1372,12 @@ internal sealed class FsmGraphOverlay
             // all against precomputed rects (ScreenRect/CurveBounds/Rect), so this adds no per-frame
             // math beyond a Rect.Overlaps call per node/edge.
             //
-            // interactiveRect, not the full _currentCache.LayoutCacheCanvasRect, is what's actually used here: it's
-            // already screen minus the uGUI right panel's docked strip (see ComputeInteractiveRect), and
-            // reusing it also keeps the panel visually unobstructed. GUIClip can't help with that on its
-            // own - legacy OnGUI always composites on top of the uGUI Canvas regardless of nesting, and
-            // this method's node/line geometry is drawn via raw GL (DrawLineBufferGL/FlushChromeBufferGL),
-            // which bypasses GUIClip entirely - so the only way to keep it out of the panel's screen
-            // region is to never add it to those GL buffers in the first place.
-            Rect visibleRect = interactiveRect;
+            // Culled against the whole canvas, not against the HUD-free region: a shape straddling a
+            // panel's edge has to stay in the buffers so the part of it outside the panel still draws,
+            // and the clipping itself happens per region at flush time (see _graphClipRegions). Keeping
+            // the panels out of this key also means dragging one no longer invalidates the chrome and
+            // line caches, which the old panel-derived cull rect did on every frame of the drag.
+            Rect visibleRect = canvasRect;
 
             // Per-phase timing for the diagnostics summary (see GraphProfiler) - every read/Record below
             // is gated on this flag, so with diagnostics off the Repaint path is untouched. frameStart
@@ -1555,7 +1613,6 @@ internal sealed class FsmGraphOverlay
             long lineEmitStart = diag ? _profiler.Now() : 0L;
             DrawLineBufferGL(
                 canvasScreenOffset,
-                interactiveRect.width,
                 dim,
                 activeStateName,
                 visibleRect,
@@ -1569,13 +1626,14 @@ internal sealed class FsmGraphOverlay
             // node/pseudo chrome sits on top of the lines, matching the layering the old per-shape
             // GUI.DrawTexture calls also preserved.
             long chromeEmitStart = diag ? _profiler.Now() : 0L;
-            FlushChromeBufferGL(canvasScreenOffset, interactiveRect.width, dim);
+            FlushChromeBufferGL(canvasScreenOffset, dim);
 
             // The active/selected/fade highlight overlay, drawn on top of the cached base chrome mesh.
             // Kept as an immediate-mode GL batch rather than its own retained mesh: it covers only the few
             // highlighted nodes, so its vertex count is tiny, and it changes every frame (fades, active-
             // state moves), which is exactly the case a retained mesh doesn't help.
-            FlushDynamicChromeGL(canvasScreenOffset, interactiveRect.width, dim);
+            FlushDynamicChromeGL(canvasScreenOffset, dim);
+
             if (diag)
             {
                 _profiler.Record(GraphProfiler.Phase.ChromeEmit, chromeEmitStart);
@@ -1614,62 +1672,71 @@ internal sealed class FsmGraphOverlay
             // called, in call order. Re-walks the same cull checks rather than caching a visible-list,
             // since Rect.Overlaps is cheap and this keeps the two passes independent.
             //
-            // Nested in its own GUI.BeginGroup(interactiveRect): unlike the GL-drawn lines/chrome above
-            // (which needed the Viewport-based clip in ApplyClippedPixelMatrix, since raw GL bypasses
-            // GUIClip entirely), GUI.Label calls are ordinary IMGUI content and respect GUIClip like any
-            // other nested group - so a plain clip group is all that's needed here to keep a node's
-            // title/event text from bleeding onto the uGUI right panel the same way its chrome would.
-            GUI.BeginGroup(interactiveRect);
-
             // GUI.color multiplies whatever color a GUIStyle/GUI.Label call already specifies - cheaper
             // than threading dim through _titleStyle/_eventStyle/_globalEventStyle themselves, and reset
-            // to white right after this group so it never leaks into some other IMGUI content drawn
+            // to white right after the label pass so it never leaks into some other IMGUI content drawn
             // later this same event.
             Color previousGuiColor = GUI.color;
             GUI.color = dim ? new Color(1f, 1f, 1f, DimAlphaMultiplier) : Color.white;
 
-            if (_currentCache.GlobalPseudoNodeCache != null)
+            // One clip group per HUD-free region: unlike the GL-drawn lines/chrome above (which needed a
+            // real Viewport, since raw GL bypasses GUIClip entirely), GUI.Label calls are ordinary IMGUI
+            // content and respect GUIClip like any other nested group, so a plain group per region keeps
+            // a node's title/event text off the panels the same way the viewport keeps its chrome off.
+            // Iterating regions rather than drawing once and culling per label is what makes a label
+            // straddling a panel edge still draw its visible half. It doesn't multiply the label cost:
+            // each region only issues GUI.Labels for the nodes actually overlapping it, so a node is
+            // drawn once, twice only where it genuinely spans two regions - the per-region work for
+            // everything else is a Rect.Overlaps test.
+            foreach (Rect region in _graphClipRegions)
             {
-                foreach (GlobalPseudoNodeLayout pseudo in _currentCache.GlobalPseudoNodeCache)
+                Vector2 regionOffset = region.position;
+                GUI.BeginGroup(region);
+
+                if (_currentCache.GlobalPseudoNodeCache != null)
                 {
-                    if (!pseudo.Rect.Overlaps(visibleRect))
+                    foreach (GlobalPseudoNodeLayout pseudo in _currentCache.GlobalPseudoNodeCache)
+                    {
+                        if (!pseudo.Rect.Overlaps(region))
+                        {
+                            continue;
+                        }
+
+                        GUI.Label(Offset(pseudo.Rect, regionOffset), pseudo.EventName, _globalEventStyle);
+                    }
+                }
+
+                foreach (NodeLayout node in _currentCache.NodeLayoutCache.Values)
+                {
+                    if (!node.ScreenRect.Overlaps(region))
                     {
                         continue;
                     }
 
-                    GUI.Label(pseudo.Rect, pseudo.EventName, _globalEventStyle);
+                    // Default title text is white, switching to the fixed ActiveTitleTextColor (black,
+                    // matching ActiveTitleBackgroundColor's light blue - see the chrome pass above) only
+                    // for the active state's own name. Event/transition text stays this state's own
+                    // (desaturated) TransitionColors entry regardless of activity; only the state name
+                    // itself, its title/chrome background, its outline ring, and its outgoing lines (see
+                    // the chrome and line-color passes above) pick up the active styling. Both styles are
+                    // shared/mutable, so this only needs setting once per node right before its labels
+                    // draw, not rebuilt from scratch.
+                    bool nodeIsActive = !node.IsDisabled && activeStateName != null && node.Name == activeStateName;
+                    _titleStyle!.normal.textColor = node.IsDisabled ? _colors.DisabledTitleTextColor.Value : nodeIsActive ? _colors.ActiveTitleTextColor.Value : Color.white;
+                    _eventStyle!.normal.textColor = node.IsDisabled ? _colors.DisabledEventTextColor.Value : _colors.TransitionColors[node.ColorIndex].Value;
+
+                    GUI.Label(Offset(node.TitleRect, regionOffset), node.Name, _titleStyle);
+
+                    foreach (TransitionRow row in node.Rows)
+                    {
+                        GUI.Label(Offset(row.Rect, regionOffset), row.EventName, _eventStyle);
+                    }
                 }
-            }
 
-            foreach (NodeLayout node in _currentCache.NodeLayoutCache.Values)
-            {
-                if (!node.ScreenRect.Overlaps(visibleRect))
-                {
-                    continue;
-                }
-
-                // Default title text is white, switching to the fixed ActiveTitleTextColor (black,
-                // matching ActiveTitleBackgroundColor's light blue - see the chrome pass above) only
-                // for the active state's own name. Event/transition text stays this state's own
-                // (desaturated) TransitionColors entry regardless of activity; only the state name
-                // itself, its title/chrome background, its outline ring, and its outgoing lines (see
-                // the chrome and line-color passes above) pick up the active styling. Both styles are
-                // shared/mutable, so this only needs setting once per node right before its labels
-                // draw, not rebuilt from scratch.
-                bool nodeIsActive = !node.IsDisabled && activeStateName != null && node.Name == activeStateName;
-                _titleStyle!.normal.textColor = node.IsDisabled ? _colors.DisabledTitleTextColor.Value : nodeIsActive ? _colors.ActiveTitleTextColor.Value : Color.white;
-                _eventStyle!.normal.textColor = node.IsDisabled ? _colors.DisabledEventTextColor.Value : _colors.TransitionColors[node.ColorIndex].Value;
-
-                GUI.Label(node.TitleRect, node.Name, _titleStyle);
-
-                foreach (TransitionRow row in node.Rows)
-                {
-                    GUI.Label(row.Rect, row.EventName, _eventStyle);
-                }
+                GUI.EndGroup();
             }
 
             GUI.color = previousGuiColor;
-            GUI.EndGroup();
 
             if (diag)
             {
@@ -1678,13 +1745,11 @@ internal sealed class FsmGraphOverlay
             }
         }
 
-        // Gated on interactiveRect (not just node.ScreenRect) so a click on the uGUI right panel never
-        // also selects whatever node happens to render underneath it - legacy OnGUI always composites
-        // on top of the uGUI Canvas (regardless of draw order or Canvas sort order), so without this
-        // exclusion the graph would both visually cover the panel and steal its clicks. IsPointerOverUi
-        // is a second guard for uGUI content that can render outside that panel's own base rect (the
-        // Open dropdown) - see ComputeInteractiveRect's own comment for why rect-subtraction alone isn't
-        // enough for that case.
+        // Gated on the HUD panel rects (not just node.ScreenRect) so a click on one never also selects
+        // whatever node happens to render underneath it - legacy OnGUI always composites on top of the
+        // uGUI Canvas (regardless of draw order or Canvas sort order), so without this exclusion the
+        // graph would steal the panels' clicks. IsPointerOverUi is a second guard for uGUI content
+        // rendering outside any rect reported here.
         //
         // Both mouse buttons are handled here (not just button 0, like the old select-only version) -
         // priority order is action zone (a transition's row box or its connecting curve - arms a
@@ -1692,7 +1757,9 @@ internal sealed class FsmGraphOverlay
         // for button 1) > node, since an action zone sits on/near a node's title band and each
         // successive check is progressively less specific.
         if (interactive && Event.current.type == EventType.MouseDown
-            && interactiveRect.Contains(Event.current.mousePosition) && !IsPointerOverUi())
+            && canvasRect.Contains(Event.current.mousePosition)
+            && !IsInsideAny(Event.current.mousePosition, _hudOccluders)
+            && !IsPointerOverUi())
         {
             Vector2 mousePos = Event.current.mousePosition;
 
@@ -2065,7 +2132,7 @@ internal sealed class FsmGraphOverlay
     // Called every OnGUI pass alongside HandlePanAndZoom - a no-op unless a drag was armed by the
     // MouseDown handling above. MouseDown itself is handled there (not here), since it needs to run
     // inside the same hit-testing pass as the plain click handlers it takes priority over.
-    private void HandleTransitionDrag(FsmInfo fsm, Rect interactiveRect)
+    private void HandleTransitionDrag(FsmInfo fsm)
     {
         if (_draggingTransition == null)
         {
@@ -2557,8 +2624,8 @@ internal sealed class FsmGraphOverlay
     // graph overlay's Repaint path after the transition lines (see the PERF diagnostics above). Shares
     // the same material/pixel-matrix-offset approach as DrawLineBufferGL, drawn after it so chrome
     // sits on top of the lines.
-    // clipRightAbsolute is interactiveRect.width (screen minus the uGUI right panel's docked strip -
-    // see ApplyClippedPixelMatrix for why this needs a real Viewport clip, not just bounds culling).
+    // Drawn once per HUD-free screen region (see ApplyRegionPixelMatrix for why keeping this off the
+    // panels needs a real Viewport clip, not just bounds culling).
     // Pinned-but-inactive tabs (see FsmGraphOverlay.OnGUI) blend every color toward a neutral grey and
     // pull back alpha, applied here at flush time rather than baked into the gathered buffers - a pure
     // per-draw multiplier means the same cached ChromeVertexBuffer/LineDrawBuffer contents are correct
@@ -2594,7 +2661,7 @@ internal sealed class FsmGraphOverlay
     // frame (the common case: the layout and chrome cache are both valid) neither happens and the same
     // mesh is redrawn, which is what replaces the tens of thousands of per-vertex immediate-mode calls
     // this used to issue every Repaint on a large FSM.
-    private void FlushChromeBufferGL(Vector2 canvasScreenOffset, float clipRightAbsolute, bool dim)
+    private void FlushChromeBufferGL(Vector2 canvasScreenOffset, bool dim)
     {
         if (_currentCache.ChromeVertexBuffer.Count == 0)
         {
@@ -2619,14 +2686,24 @@ internal sealed class FsmGraphOverlay
             return;
         }
 
+        // The mesh holds the same absolute screen-space positions the GL.Vertex3 path fed directly, so it
+        // maps pixel-for-pixel under each region's matrix once MeshDrawMatrix cancels the camera view
+        // matrix DrawMeshNow would otherwise compose in. Redrawn once per HUD-free region rather than
+        // clipped once: a single viewport can only express one rect, and the whole mesh is re-submitted
+        // each time because there's no cheap way to know which triangles fall in which region - that's a
+        // handful of draw calls of already-uploaded geometry, against a region count that's 1 whenever
+        // the panels are docked at a screen edge.
+        Matrix4x4 meshMatrix = MeshDrawMatrix();
         GL.PushMatrix();
-        ApplyClippedPixelMatrix(canvasScreenOffset, clipRightAbsolute);
-        _glMaterial.SetPass(0);
 
-        // The mesh holds the same absolute screen-space positions the GL.Vertex3 path fed directly, so
-        // it draws under the identity model matrix within the same pixel-space projection/viewport clip
-        // ApplyClippedPixelMatrix just set - mapping pixel-for-pixel exactly as the old per-vertex path.
-        Graphics.DrawMeshNow(_currentCache.ChromeMesh, Matrix4x4.identity);
+        foreach (Rect region in _graphClipRegions)
+        {
+            // SetPass re-applied per region rather than hoisted: it's what hands the current matrix
+            // state to the shader, so a pass bound before the matrix changed wouldn't pick the new one up.
+            ApplyRegionPixelMatrix(canvasScreenOffset, region);
+            _glMaterial.SetPass(0);
+            Graphics.DrawMeshNow(_currentCache.ChromeMesh, meshMatrix);
+        }
 
         GL.PopMatrix();
         ResetGlViewport();
@@ -2688,7 +2765,7 @@ internal sealed class FsmGraphOverlay
     // rebuilt every frame, so immediate mode fits it better than a retained mesh would. GL.Color is
     // deduped per color run - a node's rings/title/rows are long same-color spans - exactly as the base
     // mesh bakes its own colors.
-    private void FlushDynamicChromeGL(Vector2 canvasScreenOffset, float clipRightAbsolute, bool dim)
+    private void FlushDynamicChromeGL(Vector2 canvasScreenOffset, bool dim)
     {
         if (_dynamicChromeBuffer.Count == 0)
         {
@@ -2702,54 +2779,75 @@ internal sealed class FsmGraphOverlay
         }
 
         GL.PushMatrix();
-        ApplyClippedPixelMatrix(canvasScreenOffset, clipRightAbsolute);
-        _glMaterial.SetPass(0);
 
-        GL.Begin(GL.TRIANGLES);
-        bool hasColor = false;
-        Color lastColor = default;
-        foreach ((Vector2 position, Color color) in _dynamicChromeBuffer)
+        // Re-issued per HUD-free region, like the mesh batches - affordable here for the same reason
+        // this batch stays immediate-mode at all: it only ever covers the handful of highlighted nodes.
+        foreach (Rect region in _graphClipRegions)
         {
-            if (!hasColor || color != lastColor)
-            {
-                GL.Color(ApplyDim(color, dim));
-                lastColor = color;
-                hasColor = true;
-            }
+            ApplyRegionPixelMatrix(canvasScreenOffset, region);
+            _glMaterial.SetPass(0);
 
-            GL.Vertex3(position.x, position.y, 0f);
+            GL.Begin(GL.TRIANGLES);
+            bool hasColor = false;
+            Color lastColor = default;
+            foreach ((Vector2 position, Color color) in _dynamicChromeBuffer)
+            {
+                if (!hasColor || color != lastColor)
+                {
+                    GL.Color(ApplyDim(color, dim));
+                    lastColor = color;
+                    hasColor = true;
+                }
+
+                GL.Vertex3(position.x, position.y, 0f);
+            }
+            GL.End();
         }
-        GL.End();
 
         GL.PopMatrix();
         ResetGlViewport();
     }
 
-    // Restricts subsequent GL drawing to absolute screen-space x in [0, clipRightAbsolute) (always the
-    // full screen height - the uGUI panel this exists to avoid drawing under is always docked with a
-    // full-height exclusion strip, see ComputeInteractiveRect). Bounds-culling individual shapes (see
-    // the visibleRect checks in DrawCachedGraph) only skips shapes ENTIRELY outside that region - a
-    // transition curve or node straddling the boundary would still have the portion past it rendered,
-    // since raw GL bypasses Unity's GUIClip stack entirely (unlike GUI.Label/GUI.DrawTexture, which
-    // GUI.BeginGroup already clips). A real Viewport is the closest thing to a scissor rect available
-    // here: narrowing GL.Viewport alone would just squash everything already inside it into the smaller
-    // area (per Unity's own docs on GL.Viewport), so LoadPixelMatrix's right bound is narrowed to
-    // exactly match the new Viewport width - the visible portion still maps pixel-for-pixel as before,
-    // while anything past clipRightAbsolute now falls outside the projection's NDC range and is
-    // discarded by ordinary GPU clipping instead of being stretched into view.
-    //
-    // Viewport is global GL state, not part of the PushMatrix/PopMatrix stack this sits inside of - the
-    // caller must pair this with ResetGlViewport once its GL.Begin/End block is done, or every other GL
-    // consumer this frame (and into the next) would inherit this narrowed viewport.
-    private static void ApplyClippedPixelMatrix(Vector2 canvasScreenOffset, float clipRightAbsolute)
+    // Object matrix for Graphics.DrawMeshNow. Immediate-mode GL.Vertex3 goes through the modelview that
+    // GL.LoadPixelMatrix leaves as identity, but DrawMeshNow composes the rendering camera's view matrix
+    // in on top of it, which lands the mesh a fixed screen distance from where the same vertices land in
+    // immediate mode. Passing that view matrix's inverse as the object matrix cancels it exactly, leaving
+    // only the pixel projection. Camera.current is whatever camera is mid-render when OnGUI runs, so it
+    // can legitimately be null (nothing to cancel) and can differ between scenes - the correction has to
+    // be read per draw rather than cached.
+    private static Matrix4x4 MeshDrawMatrix()
     {
-        GL.Viewport(new Rect(0f, 0f, clipRightAbsolute, Screen.height));
-        GL.LoadPixelMatrix(
-            -canvasScreenOffset.x,
-            clipRightAbsolute - canvasScreenOffset.x,
-            Screen.height - canvasScreenOffset.y,
-            -canvasScreenOffset.y);
+        Camera? current = Camera.current;
+        return current == null ? Matrix4x4.identity : current.worldToCameraMatrix.inverse;
     }
+
+    // Restricts subsequent GL drawing to one HUD-free screen region, mapped pixel-for-pixel. Bounds-
+    // culling individual shapes at gather time can't do this job: it only skips shapes ENTIRELY outside
+    // the region, and a transition curve or node straddling a panel's edge would still have the portion
+    // over the panel rendered, since raw GL bypasses Unity's GUIClip stack entirely (unlike GUI.Label/
+    // GUI.DrawTexture, which GUI.BeginGroup clips). A real Viewport is the closest thing to a scissor
+    // rect available here: narrowing GL.Viewport alone would just squash everything into the smaller
+    // area (per Unity's own docs on GL.Viewport), so LoadPixelMatrix's bounds are narrowed to exactly
+    // match it - the visible portion still maps pixel-for-pixel, while anything outside the region falls
+    // outside the projection's NDC range and is discarded by ordinary GPU clipping instead of being
+    // stretched into view.
+    //
+    // GL.Viewport's rect is bottom-up, unlike the top-left-origin screen rects everything else here uses.
+    // Viewport is also global GL state, not part of the PushMatrix/PopMatrix stack the callers wrap this
+    // in - each must pair its final call with ResetGlViewport, or every other GL consumer this frame
+    // (and into the next) would inherit whichever narrowed viewport was left set.
+    private static void ApplyRegionPixelMatrix(Vector2 canvasScreenOffset, Rect region)
+    {
+        GL.Viewport(new Rect(region.x, Screen.height - region.yMax, region.width, region.height));
+        GL.LoadPixelMatrix(
+            region.xMin - canvasScreenOffset.x,
+            region.xMax - canvasScreenOffset.x,
+            region.yMax - canvasScreenOffset.y,
+            region.yMin - canvasScreenOffset.y);
+    }
+
+    private static Rect Offset(Rect rect, Vector2 offset) =>
+        new(rect.x - offset.x, rect.y - offset.y, rect.width, rect.height);
 
     private static void ResetGlViewport()
     {
@@ -2793,13 +2891,13 @@ internal sealed class FsmGraphOverlay
     // renders shifted from the nodes by that offset (this was the reported "lines never line up with
     // the nodes" bug: constant in screen pixels, so more noticeable relative to small zoomed-out nodes
     // and easy to mistake for "fixed by zooming in" when large zoomed-in nodes happen to still overlap it).
-    // clipRightAbsolute is interactiveRect.width (screen minus the uGUI right panel's docked strip -
-    // see ApplyClippedPixelMatrix for why this needs a real Viewport clip, not just bounds culling).
+    // Drawn once per HUD-free screen region (see ApplyRegionPixelMatrix for why keeping this off the
+    // panels needs a real Viewport clip, not just bounds culling).
     // Reused identity index buffer for the line mesh - like the chrome mesh's, but kept as an int[] since
     // MeshTopology (Lines vs Triangles) is chosen per style and only Mesh.SetIndices takes a topology.
     private int[] _lineIndexArray = ArrayPolyfill.Empty<int>();
 
-    private void DrawLineBufferGL(Vector2 canvasScreenOffset, float clipRightAbsolute, bool dim, string? activeStateName, Rect visibleRect, bool dragPreviewActive)
+    private void DrawLineBufferGL(Vector2 canvasScreenOffset, bool dim, string? activeStateName, Rect visibleRect, bool dragPreviewActive)
     {
         if (_currentCache.LineDrawBuffer.Count == 0)
         {
@@ -2904,10 +3002,16 @@ internal sealed class FsmGraphOverlay
             return;
         }
 
+        Matrix4x4 meshMatrix = MeshDrawMatrix();
         GL.PushMatrix();
-        ApplyClippedPixelMatrix(canvasScreenOffset, clipRightAbsolute);
-        _glMaterial.SetPass(0);
-        Graphics.DrawMeshNow(_currentCache.LineMesh, Matrix4x4.identity);
+
+        foreach (Rect region in _graphClipRegions)
+        {
+            ApplyRegionPixelMatrix(canvasScreenOffset, region);
+            _glMaterial.SetPass(0);
+            Graphics.DrawMeshNow(_currentCache.LineMesh, meshMatrix);
+        }
+
         GL.PopMatrix();
         ResetGlViewport();
     }

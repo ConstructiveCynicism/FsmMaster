@@ -10,6 +10,13 @@
          installs. -->
     <AssemblyName>FsmMaster</AssemblyName>
     <RootNamespace>FsmMaster</RootNamespace>
+    <!-- Release identity for this target: "silk_<version>" names the release zip and is the version
+         string the plugin reports in-game. Both halves take an optional per-target command-line
+         override (-p:SilkVersion=/-p:SilkPrefix=), which beats the shared -p:Version= - see
+         Directory.Build.targets. -->
+    <ModTargetPrefix>silk</ModTargetPrefix>
+    <ModTargetPrefix Condition="'$(SilkPrefix)' != ''">$(SilkPrefix)</ModTargetPrefix>
+    <ModVersion Condition="'$(SilkVersion)' != ''">$(SilkVersion)</ModVersion>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <EnableNETAnalyzers>True</EnableNETAnalyzers>
@@ -45,6 +52,9 @@
          user's own DebugMod plugin supplies this assembly at runtime, so it must not be copied into
          FsmMaster's own output folder. -->
     <PackageReference Include="Silksong.DebugMod" Version="1.1.0" IncludeAssets="compile" />
+    <!-- Dev-time only - merges FsmMaster.Core.dll into FsmMaster.dll at build time (see
+         ILRepack.targets) so ScriptEngine hot-reload only has to resolve one assembly. -->
+    <PackageReference Include="ILRepack.Lib.MSBuild.Task" Version="2.0.34" PrivateAssets="all" />
   </ItemGroup>
 
   <ItemGroup>
@@ -63,7 +73,7 @@
     <CopyDestinationFolder Condition="'$(Configuration)' == 'Debug' And '$(SilksongScriptsFolder)' != ''">$(SilksongScriptsFolder)/</CopyDestinationFolder>
   </PropertyGroup>
 
-  <Target Name="CopyToPluginsFolder" AfterTargets="PostBuildEvent">
+  <Target Name="CopyToPluginsFolder" AfterTargets="ILRepacker">
     <ItemGroup>
       <Binaries Include="$(TargetPath)" />
       <Binaries Include="$(TargetDir)/$(TargetName).pdb" />
@@ -74,7 +84,7 @@
   <!-- Release packaging: builds the Thunderstore package and a manual-install zip, both
        bundling Silksong.ModList the same way DebugMod's release process does. Gated to
        Release so hot-reload debug builds during live gameplay stay fast and offline. -->
-  <Target Name="PackageThunderstoreMod" AfterTargets="PostBuildEvent" Condition="'$(Configuration)' == 'Release'">
+  <Target Name="PackageThunderstoreMod" AfterTargets="ILRepacker" Condition="'$(Configuration)' == 'Release'">
     <ItemGroup>
       <ThunderstoreBinaries Include="$(TargetPath)" LocalDir="/" PackDir="/plugins" />
       <ThunderstoreBinaries Include="$(TargetDir)/$(TargetName).pdb" LocalDir="/" PackDir="/plugins" />
@@ -86,10 +96,12 @@
     <MakeDir Directories="$(ThunderstoreDir)/temp" />
     <Copy SourceFiles="@(ThunderstoreBinaries)" DestinationFolder="$(ThunderstoreDir)/temp/%(ThunderstoreBinaries.PackDir)" />
     <Exec Command="dotnet tool restore" WorkingDirectory="$(RepoRoot)" />
-    <Exec Command="dotnet tcli build --config-path &quot;$(ThunderstoreDir)/thunderstore.toml&quot; --package-name &quot;$(AssemblyTitle)&quot; --package-version $(Version)" StandardOutputImportance="High" StandardErrorImportance="High" WorkingDirectory="$(RepoRoot)" />
+    <!-- The Thunderstore package keeps its own stable identity (FsmMaster) - the prefixed release name
+         is for the downloadable zip, not for the package listing existing installs update from. -->
+    <Exec Command="dotnet tcli build --config-path &quot;$(ThunderstoreDir)/thunderstore.toml&quot; --package-name &quot;$(AssemblyTitle)&quot; --package-version $(ModVersion)" StandardOutputImportance="High" StandardErrorImportance="High" WorkingDirectory="$(RepoRoot)" />
   </Target>
 
-  <Target Name="CreateReleaseZip" AfterTargets="PostBuildEvent" Condition="'$(Configuration)' == 'Release'">
+  <Target Name="CreateReleaseZip" AfterTargets="ILRepacker" Condition="'$(Configuration)' == 'Release'">
     <ItemGroup>
       <ReleaseBinaries Include="$(TargetPath)" LocalDir="/" />
       <ReleaseBinaries Include="$(TargetDir)/$(TargetName).pdb" LocalDir="/" />
@@ -113,8 +125,11 @@
     <Unzip SourceFiles="$(IntermediateOutputPath)/Silksong.FsmUtil.$(FsmUtilVersion).zip" DestinationFolder="$(IntermediateOutputPath)/archive/Silksong.FsmUtil" />
     <DownloadFile Condition="!Exists('$(IntermediateOutputPath)/Silksong.FsmUtil.$(FsmUtilVersion).LICENSE')" SourceUrl="$(FsmUtilLicenseUrl)" DestinationFolder="$(IntermediateOutputPath)" DestinationFileName="Silksong.FsmUtil.$(FsmUtilVersion).LICENSE" />
     <Copy SourceFiles="$(IntermediateOutputPath)/Silksong.FsmUtil.$(FsmUtilVersion).LICENSE" DestinationFiles="$(IntermediateOutputPath)/archive/Silksong.FsmUtil/LICENSE" />
-    <MakeDir Directories="$(ThunderstoreDir)/manual" />
-    <Delete Files="$(ThunderstoreDir)/manual/$(TargetName)_MANUAL.zip" />
-    <ZipDirectory SourceDirectory="$(IntermediateOutputPath)/archive" DestinationFile="$(ThunderstoreDir)/manual/$(TargetName)_MANUAL.zip" Overwrite="True" />
+    <MakeDir Directories="$(ReleaseOutputFolder)" />
+    <Delete Files="$(ReleaseOutputFolder)/$(ModReleaseName).zip" />
+    <ZipDirectory SourceDirectory="$(IntermediateOutputPath)/archive" DestinationFile="$(ReleaseOutputFolder)/$(ModReleaseName).zip" Overwrite="True" />
   </Target>
+
+  <!-- ILRepack.targets in this same directory is auto-imported by ILRepack.Lib.MSBuild.Task's own
+       .targets (via its $(ILRepackTargetsFile) convention) - no explicit <Import> needed here. -->
 </Project>

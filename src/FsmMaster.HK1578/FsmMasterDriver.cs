@@ -1,8 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Reflection;
-using HarmonyLib;
 using HutongGames.PlayMaker;
 using InControl;
 using UnityEngine;
@@ -12,19 +9,18 @@ using UnityEngine.UI;
 
 namespace FsmMaster;
 
-// The old Modding API's Mod<,> base isn't a MonoBehaviour and gets exactly one Initialize() call
-// with no per-frame callback of its own - this component, created from FsmMasterMod.Initialize on a
-// DontDestroyOnLoad GameObject, is what actually hosts Update()/OnGUI() for the rest of the mod's
+// Modding.Mod (this loader generation's base) isn't a MonoBehaviour and gets exactly one Initialize()
+// call with no per-frame callback of its own - this component, created from FsmMasterMod.Initialize on
+// a DontDestroyOnLoad GameObject, is what actually hosts Update()/OnGUI() for the rest of the mod's
 // lifetime. This is also the composition root: it owns the edit manager, tab manager, graph overlay,
-// and the uGUI right/monitor panels, and drives their per-frame Update/OnGUI wiring - the equivalent
-// of what FsmMasterPlugin itself does directly on the Silksong loader, moved onto a dedicated
-// MonoBehaviour here since Mod<,> has nowhere for Awake/Update/OnGUI to live.
+// and the uGUI right/monitor panels, and drives their per-frame Update/OnGUI wiring - same role as the
+// hk1221 loader's own FsmMasterDriver, ported to MonoMod On.* hooks instead of Harmony patches.
 internal class FsmMasterDriver : MonoBehaviour
 {
-    // Read by FsmActivatedPatch (a static Harmony patch, which can't reach an instance's own fields)
-    // to reconcile/reapply edits the moment an FSM activates. Set in Awake - there's no OnDestroy to
-    // clear it from, matching every other static handle on this loader (Harmony patches installed once
-    // and never unpatched; see BRANCH_OVERVIEW.md's no-hot-reload lifecycle note).
+    // Read by FsmActivationPatches.OnFsmPreprocess (a static hook, which can't reach an instance's own
+    // fields) to reconcile/reapply edits the moment an FSM activates. Set in Awake - there's no
+    // OnDestroy to clear it from, matching every other static handle on this loader (hooks installed
+    // once and never removed; this loader generation has no hot-reload).
     internal static FsmMasterDriver? Instance { get; private set; }
 
     internal FsmEditManager? EditManager { get; private set; }
@@ -50,30 +46,24 @@ internal class FsmMasterDriver : MonoBehaviour
     private int _rightPanelSubtreeVersion = -1;
     private int _monitorPanelSubtreeVersion = -1;
 
-    // FsmStateEnteredPatch is installed/uninstalled on demand rather than for the process's whole
-    // lifetime like every other patch on this loader - see that patch's own comment for why (a
-    // confirmed-in-testing game-breaking issue from leaving a Fsm.EnterState hook permanently active).
-    // Tracks whether it's currently installed so Patch/Unpatch is only ever called on an actual
-    // visibility change, not every frame - mirrors the Silksong loader's own
-    // _cursorPatchInstalled/PatchCursorOverride pattern.
-    private bool _stateTrackingPatchInstalled;
+    // OnFsmEnterState is installed/uninstalled on demand rather than for the process's whole lifetime
+    // like every other hook on this loader - mirrors hk1221's own FsmStateEnteredPatch on-demand
+    // pattern (a confirmed-in-testing game-breaking issue there from leaving a Fsm.EnterState hook
+    // permanently active while nothing consumed it - the same caution applies here even though this
+    // loader generation hasn't independently reproduced that failure, since the hot path itself -
+    // firing on every state transition of every live FSM - is identical). Tracks whether it's currently
+    // installed so += / -= is only ever called on an actual visibility change, not every frame.
+    private bool _stateTrackingHookInstalled;
 
-    private static readonly MethodInfo EnterStateMethod = AccessTools.Method(typeof(Fsm), "EnterState", new[] { typeof(FsmState) });
-    private static readonly HarmonyMethod StateEnteredPostfix = new(typeof(FsmStateEnteredPatch), nameof(FsmStateEnteredPatch.Postfix));
+    private static void PatchStateTracking() => On.HutongGames.PlayMaker.Fsm.EnterState += FsmActivationPatches.OnFsmEnterState;
 
-    private static void PatchStateTracking() => FsmMasterMod.HarmonyInstance?.Patch(EnterStateMethod, postfix: StateEnteredPostfix);
-
-    private static void UnpatchStateTracking()
-    {
-        Harmony? harmony = FsmMasterMod.HarmonyInstance;
-        harmony?.Unpatch(EnterStateMethod, HarmonyPatchType.Postfix, harmony.Id);
-    }
+    private static void UnpatchStateTracking() => On.HutongGames.PlayMaker.Fsm.EnterState -= FsmActivationPatches.OnFsmEnterState;
 
     private void Awake()
     {
         Instance = this;
 
-        _settings = FsmMasterMod.Instance!.GlobalSettings;
+        _settings = FsmMasterMod.Settings;
         _log = new ModLog(FsmMasterMod.Instance!.Log, FsmMasterMod.Instance!.LogWarn, FsmMasterMod.Instance!.LogError);
 
         EditManager = new FsmEditManager(_log);
@@ -85,8 +75,8 @@ internal class FsmMasterDriver : MonoBehaviour
             _tabManager,
             new KeyCodeHotkey(() => _settings.ToggleOverlayHotkey),
             new KeyCodeHotkey(() => _settings.ToggleMinimalViewHotkey),
-            new HK1221GraphColorConfig(_settings),
-            new HK1221GraphPerformanceConfig(_settings));
+            new FsmMasterGraphColorConfig(_settings),
+            new FsmMasterGraphPerformanceConfig(_settings));
 
         // Fully qualified rather than relying on `using UnityEngine.SceneManagement;` - Assembly-CSharp.dll
         // declares its own global-namespace SceneManager class (a Team Cherry gameplay type unrelated to
@@ -102,15 +92,11 @@ internal class FsmMasterDriver : MonoBehaviour
 
         BuildRightPanel();
 
-        // The overlay's uGUI panels weren't clickable at all until the player paused once (confirmed in
-        // testing) - InControlInputModule (the EventSystem's active input module on this game, per
-        // FocusOnHoverSuppressionPatch's own ProcessMove patch) evidently doesn't dispatch pointer events
-        // while InControl.InputManager.enabled is false, and this loader never observed anything that
-        // would set it true before the game's own pause-menu code first did so. CanvasTextField's own
-        // TrySetInputLocked already manipulates this same flag reflectively (Core has no compile-time
-        // InControl.dll reference on Silksong), toggled false<->true per text-field focus; this is the
-        // startup-time equivalent, direct rather than reflective since this loader does have InControl.dll
-        // at compile time.
+        // Same InControl input-module gap the hk1221 loader hit on this same game engine generation -
+        // the overlay's uGUI panels aren't clickable until the player pauses once, since
+        // InControlInputModule evidently doesn't dispatch pointer events while
+        // InControl.InputManager.Enabled is false and nothing else sets it true before that. Forced on
+        // at startup rather than waiting for the game's own pause-menu code to do it.
         InputManager.Enabled = true;
 
         UnityEngine.SceneManagement.SceneManager.sceneLoaded += OnSceneLoaded;
@@ -124,27 +110,32 @@ internal class FsmMasterDriver : MonoBehaviour
         _graphOverlay?.Update();
 
         // Mirrors the graph overlay's own toggle-overlay hotkey state onto ForceCursorVisiblePatch's
-        // static flag - see that patch's own comment for why this loader can leave the postfix
-        // permanently installed rather than patching it in/out on demand.
+        // static flag - see that patch's own comment for why this loader can leave the hook permanently
+        // installed rather than patching it in/out on demand.
         ForceCursorVisiblePatch.ForceVisible = _graphOverlay?.IsVisible ?? false;
 
-        // InControlInputModule.allowMouseInput starts false and stays false until the player pauses once
-        // (confirmed via reflection dump comparison: it was the only field that differed between a
-        // pre-pause and post-pause click, everything else on the module was identical) - false suppresses
-        // its own click/hover dispatch entirely, even though the underlying GraphicRaycaster/RaycastAll
-        // machinery works correctly the whole time (that's why the click always resolved to the right
-        // button by name, but nothing ever fired). Forced true here rather than waiting for HK1's own
-        // pause menu to set it, and only while the overlay is open.
-        if ((_graphOverlay?.IsVisible ?? false) && EventSystem.current?.currentInputModule is InControlInputModule inControlInputModule)
+        // hk1221's own FsmMasterDriver.Update fix (forcing InControlInputModule.allowMouseInput) doesn't
+        // apply here: decompiling this loader's Assembly-CSharp showed UIManager.inputModule is actually
+        // typed InControl.HollowKnightInputModule, which derives from UnityEngine.EventSystems'
+        // StandaloneInputModule directly rather than from InControlInputModule at all - the
+        // "EventSystem.current.currentInputModule is InControlInputModule" cast this used to do could
+        // never succeed, so the block never ran. InputHandler.StopUIInput()/StartUIInput() (confirmed by
+        // decompiling every call site in Assembly-CSharp) toggle this same allowMouseInput field on and
+        // off constantly during ordinary gameplay - dialogue prompts, tutorate popups, the pause menu
+        // itself - so a one-time unlock at startup (Silksong's own approach, which only ever needed to
+        // flip the equivalent field once because nothing else in Silksong's InputHandler ever clears it
+        // again) isn't enough here either. Forced true every frame the overlay is open instead, mirroring
+        // hk1221's per-frame approach but against the field the game's UIManager actually exposes.
+        if ((_graphOverlay?.IsVisible ?? false) && UIManager.instance?.inputModule != null)
         {
-            inControlInputModule.allowMouseInput = true;
+            UIManager.instance.inputModule.allowMouseInput = true;
         }
 
-        // Only patched in while the overlay is actually open - see _stateTrackingPatchInstalled's own
-        // comment. Compared against the previous frame's state so Patch/Unpatch is only ever called on
-        // an actual visibility change, not every frame.
+        // Only hooked in while the overlay is actually open - see _stateTrackingHookInstalled's own
+        // comment. Compared against the previous frame's state so += / -= is only ever called on an
+        // actual visibility change, not every frame.
         bool overlayVisible = _graphOverlay?.IsVisible ?? false;
-        if (overlayVisible != _stateTrackingPatchInstalled)
+        if (overlayVisible != _stateTrackingHookInstalled)
         {
             if (overlayVisible)
             {
@@ -155,7 +146,7 @@ internal class FsmMasterDriver : MonoBehaviour
                 UnpatchStateTracking();
             }
 
-            _stateTrackingPatchInstalled = overlayVisible;
+            _stateTrackingHookInstalled = overlayVisible;
         }
 
         if (_rightPanel != null)
@@ -276,8 +267,7 @@ internal class FsmMasterDriver : MonoBehaviour
     // Builds the right-side uGUI panel's Canvas/EventSystem/widget tree. Reuses an EventSystem already
     // present in the scene if one exists - HK1's own InControlInputModule (see CanvasTextField.cs) is
     // already running as a persistent, scene-independent component, so this fallback creation path is
-    // expected to never actually trigger in practice, unlike the Silksong-era version's own "unverified
-    // assumption" about this.
+    // expected to never actually trigger in practice.
     private void BuildRightPanel()
     {
         if (FindObjectOfType<EventSystem>() == null)
@@ -301,7 +291,7 @@ internal class FsmMasterDriver : MonoBehaviour
             _variableTracker!,
             () => _graphOverlay?.CurrentSnapshot,
             _log!,
-            new HK1221PanelLayoutConfig(
+            new FsmMasterPanelLayoutConfig(
                 () => _settings!.RightPanelPosition, v => _settings!.RightPanelPosition = v,
                 () => _settings!.RightPanelSize, v => _settings!.RightPanelSize = v),
             new FieldConfigValue<bool>(() => _settings!.AutoLoadLastConfiguration, v => _settings!.AutoLoadLastConfiguration = v),
@@ -318,7 +308,7 @@ internal class FsmMasterDriver : MonoBehaviour
         _monitorPanel = new FsmMonitorPanel(
             _uiCommon,
             _variableTracker!,
-            new HK1221PanelLayoutConfig(
+            new FsmMasterPanelLayoutConfig(
                 () => _settings!.MonitorPanelPosition, v => _settings!.MonitorPanelPosition = v,
                 () => _settings!.MonitorPanelSize, v => _settings!.MonitorPanelSize = v));
         _monitorPanel.ActiveSelf = false;
@@ -342,34 +332,45 @@ internal class FsmMasterDriver : MonoBehaviour
         _tabManager?.RebindAfterRefresh(groups);
     }
 
-    // FindObjectsOfType<T>() has no includeInactive overload on this Unity version (confirmed via
-    // reflection), unlike the Silksong-era FindObjectsByType(..., FindObjectsInactive.Include, ...) call
-    // this replaces - an FSM whose owning GameObject starts out inactive (common for enemies/objects that
-    // only enable themselves once a trigger/cutscene/state check fires) would otherwise never appear in
-    // the graph overlay at all. Resources.FindObjectsOfTypeAll<T>() (confirmed via reflection, already
-    // used the same way by UICommon.cs for Font lookups) does include inactive objects, but also matches
+    // FindObjectsOfType<T>() has no includeInactive overload on this Unity version, same as hk1221 -
+    // an FSM whose owning GameObject starts out inactive (common for enemies/objects that only enable
+    // themselves once a trigger/cutscene/state check fires) would otherwise never appear in the graph
+    // overlay at all. Resources.FindObjectsOfTypeAll<T>() includes inactive objects, but also matches
     // objects that were never instantiated into any loaded scene at all - a prefab template sitting in
     // memory, for instance.
     //
-    // gameObject.scene.IsValid() alone was tried as the "only real, live objects" filter (matching what
-    // FindObjectsOfType already guaranteed) but turned out to false-negative on this build for a large
-    // class of genuinely live, persistent objects - confirmed via FsmActivatedPatch diagnostic logging:
-    // charm-slot and Hunter's Journal UI template FSMs (hundreds of them, e.g. "Charm SpellDamageUp
-    // (Clone)") report an invalid scene here despite having already run Awake()/Preprocess() for real.
-    // Fsm.Preprocessed is a more reliable signal for "this is a real, live instance, not an unplaced
-    // prefab asset" - Preprocess() (see FsmActivatedPatch) only ever runs from a component's own
-    // Awake()/Init() path, which a prefab asset sitting unused in memory never receives. Kept alongside
-    // scene.IsValid() (not replacing it) so a freshly-instantiated-but-not-yet-Preprocessed object still
-    // matches via the scene check.
-    private static PlayMakerFSM[] FindAllPlayMakerFsms() =>
-        Resources.FindObjectsOfTypeAll<PlayMakerFSM>().Where(fsm => fsm.gameObject.scene.IsValid() || fsm.Fsm.Preprocessed).ToArray();
+    // gameObject.scene.IsValid() alone false-negatives on a large class of genuinely live, persistent
+    // objects on this engine generation (confirmed on hk1221's identical Unity version via
+    // FsmActivatedPatch diagnostic logging - charm-slot and Hunter's Journal UI template FSMs report an
+    // invalid scene despite having already run Awake()/Preprocess() for real). Fsm.Preprocessed is kept
+    // alongside scene.IsValid() (not replacing it) for the same reason: a freshly-instantiated-but-not-
+    // yet-Preprocessed object still needs to match via the scene check.
+    // Not a LINQ .Where(...) - Enumerable.Where's Func<TSource,bool> predicate is one of the closed
+    // generic instantiations missing from hk1432's stripped mscorlib.dll (see ConfigGetter<T>'s own
+    // comment in Config/FieldConfigValue.cs for the full story), and unlike FieldConfigValue's own
+    // delegates this one can't be swapped for an FsmMaster-owned type - Where's signature is fixed by
+    // System.Core. A plain filtering loop sidesteps needing that instantiation at all.
+    private static PlayMakerFSM[] FindAllPlayMakerFsms()
+    {
+        PlayMakerFSM[] all = Resources.FindObjectsOfTypeAll<PlayMakerFSM>();
+        var matching = new List<PlayMakerFSM>(all.Length);
+        foreach (PlayMakerFSM fsm in all)
+        {
+            if (fsm.gameObject.scene.IsValid() || fsm.Fsm.Preprocessed)
+            {
+                matching.Add(fsm);
+            }
+        }
 
-    // Called from DebugModSavestateCompat.PollLoadingTransition once SaveState.loadingSavestate
-    // transitions from true to false, with exactly the edit sets that savestate captured (null/empty if it
-    // never saved any FsmMaster data at all). Rescans live FSMs the same way OnSceneLoaded does - a
-    // same-room savestate load doesn't necessarily destroy and recreate every FSM's owning GameObject, so
-    // FsmActivatedPatch's own postfix (which only fires from a fresh Fsm.Preprocess()) can't be relied on
-    // alone to reapply anything onto a live instance that survived the load unchanged.
+        return matching.ToArray();
+    }
+
+    // Called from DebugModSavestateCompat.PollLoadingTransition once the DebugMod savestate load it's
+    // watching finishes, with exactly the edit sets that savestate captured (null/empty if it never
+    // saved any FsmMaster data at all). Rescans live FSMs the same way OnSceneLoaded does - a same-room
+    // savestate load doesn't necessarily destroy and recreate every FSM's owning GameObject, so
+    // FsmActivationPatches.OnFsmPreprocess (which only fires from a fresh Fsm.Preprocess()) can't be
+    // relied on alone to reapply anything onto a live instance that survived the load unchanged.
     //
     // A savestate load fully replaces this scene's FSM edits with exactly what it captured, rather than
     // only ever adding to whatever's currently active: every currently-edited key snapshotEditSets doesn't
@@ -436,7 +437,13 @@ internal class FsmMasterDriver : MonoBehaviour
         var instancesByKey = new Dictionary<string, List<Fsm>>();
         foreach (KeyValuePair<string, List<PlayMakerFSM>> group in groups)
         {
-            instancesByKey[group.Key] = group.Value.Select(c => c.Fsm).ToList();
+            var fsms = new List<Fsm>(group.Value.Count);
+            foreach (PlayMakerFSM component in group.Value)
+            {
+                fsms.Add(component.Fsm);
+            }
+
+            instancesByKey[group.Key] = fsms;
         }
         EditManager.ReplaceLiveInstances(instancesByKey);
 

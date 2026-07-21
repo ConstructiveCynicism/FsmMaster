@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "dependencies": {
+    ".NETFramework,Version=v4.7.2": {
+      "ILRepack.Lib.MSBuild.Task": {
+        "type": "Direct",
+        "requested": "[2.0.34, )",
+        "resolved": "2.0.34",
+        "contentHash": "L8TGuOMXjjT9tHf55bruPBBxJ9y17dLTf27cxPox6hhbdxFNNe7nwKzgYw6r/DZOH8O5qRxKpLeW/y80Gz45cg=="
+      },
+      "Microsoft.Unity.Analyzers": {
+        "type": "Direct",
+        "requested": "[1.25.0, )",
+        "resolved": "1.25.0",
+        "contentHash": "jOclVb2PVoOdKafuzt3bJ3BHkbjsfuAx+60yqP4zCAhlNa1rwn1Jt05qrmqJgmBY42S08hXbps9KA6QR2Z7aOA=="
+      },
+      "fsmmaster.core": {
+        "type": "Project"
+      }
+    }
+  }
+}
