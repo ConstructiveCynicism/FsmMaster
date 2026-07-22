@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 using System.Runtime.CompilerServices;
 
 // Core's types stay internal (as they were before the Core/loader split) rather than widening to

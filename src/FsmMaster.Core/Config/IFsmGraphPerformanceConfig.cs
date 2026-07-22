@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 namespace FsmMaster;
 
 // How transition lines are drawn - see FsmGraphOverlay.DrawLineBufferGL. Thick is the default,

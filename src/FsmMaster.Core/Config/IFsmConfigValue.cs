@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 namespace FsmMaster;
 
 // A single loader-managed setting value. The Silksong loader backs this with a BepInEx

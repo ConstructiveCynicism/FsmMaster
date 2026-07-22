@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 namespace FsmMaster;
 
 // Duck-typed metadata block BepInEx.ConfigurationManager reads via reflection off a ConfigDescription's

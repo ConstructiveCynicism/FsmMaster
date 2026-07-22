@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.SceneManagement;

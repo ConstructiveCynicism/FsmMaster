@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 namespace FsmMaster;
 
 // Loader-agnostic logging sink. The Silksong loader backs this with BepInEx's ManualLogSource; other

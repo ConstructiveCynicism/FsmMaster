@@ -9,6 +9,7 @@
        Machine-local install paths (HK1432ManagedFolder/HK1432ModsFolder) come from LocalBuild.props via
        Directory.Build.props; absent on CI, so the game references and deploy target below are guarded. -->
   <PropertyGroup>
+    <PackageLicenseExpression>EUPL-1.2</PackageLicenseExpression>
     <!-- net35, not net472: hk1432's Unity ships the Mono 2.0/.NET 3.5 class library profile (its
          mscorlib is metadata version v2.0.50727 and its System.Core.dll is the 3.5 one). On that
          profile System.Action, Action<T1,T2>, every Func<...>, HashSet<T> and Enumerable live in
@@ -172,6 +173,8 @@
     <RemoveDir Directories="$(IntermediateOutputPath)/archive" />
     <Copy SourceFiles="@(ReleaseBinaries)" DestinationFolder="$(IntermediateOutputPath)/archive/FsmMaster/" />
     <Copy SourceFiles="$(RepoRoot)README.md" DestinationFolder="$(IntermediateOutputPath)/archive/" />
+    <Copy SourceFiles="$(RepoRoot)LICENSE" DestinationFolder="$(IntermediateOutputPath)/archive/" />
+    <Copy SourceFiles="$(RepoRoot)NOTICE" DestinationFolder="$(IntermediateOutputPath)/archive/" />
     <MakeDir Directories="$(ReleaseOutputFolder)" />
     <Delete Files="$(ReleaseOutputFolder)/$(ModReleaseName).zip" />
     <ZipDirectory SourceDirectory="$(IntermediateOutputPath)/archive" DestinationFile="$(ReleaseOutputFolder)/$(ModReleaseName).zip" Overwrite="True" />

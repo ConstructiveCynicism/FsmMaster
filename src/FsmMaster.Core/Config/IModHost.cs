@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 namespace FsmMaster;
 
 // What a loader provides beyond config values: logging, where this mod may persist its own files, and

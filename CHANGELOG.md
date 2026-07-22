@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Licensing correction: `PlayMakerFsmOps.cs` in FsmMaster.Core is a trimmed-down
+  port of [Silksong.FsmUtil](https://github.com/silksong-modding/Silksong.FsmUtil)
+  (EUPL-1.2, © silksong-modding); prior releases shipped it under MIT without the
+  required EUPL notices. FsmMaster is now licensed as a whole under the EUPL-1.2,
+  with attribution restored in `NOTICE`, per-file SPDX headers, and the README.
+
 ## v0.3.5
 
 - Added support for Hollow Knight 1.2.2.1, 1.4.3.2, and 1.5.78, alongside the

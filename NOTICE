@@ -1,0 +1,11 @@
+FsmMaster
+Copyright (c) 2026 ConstructiveCynicism
+Licensed under the EUPL-1.2.
+
+This product includes code derived from Silksong.FsmUtil
+Copyright (c) silksong-modding
+Licensed under the EUPL-1.2 - https://github.com/silksong-modding/Silksong.FsmUtil
+The derived code has been modified by ConstructiveCynicism since 2026-07-20.
+
+Graph layout and FSM visualization conventions inspired by FSMExpress (nesrak1).
+Built on Silksong.DebugMod's savestate system.

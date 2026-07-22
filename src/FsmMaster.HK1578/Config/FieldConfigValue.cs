@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 namespace FsmMaster;
 
 // Deliberately not System.Func<T>/System.Action<T>: hk1432's shipped mscorlib.dll is a managed-stripping

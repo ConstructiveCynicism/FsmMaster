@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 using Modding;
 using Modding.Menu;
 using Modding.Menu.Config;

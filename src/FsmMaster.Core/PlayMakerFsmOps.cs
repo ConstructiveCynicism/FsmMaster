@@ -1,11 +1,14 @@
+// SPDX-License-Identifier: EUPL-1.2
+// Portions derived from Silksong.FsmUtil, Copyright (c) silksong-modding, licensed under the EUPL-1.2.
+// Modifications Copyright (c) 2026 ConstructiveCynicism. Modified since 2026-07-20.
 using System;
 using HutongGames.PlayMaker;
 
 namespace FsmMaster;
 
-// Stand-in for the Silksong.FsmUtil extension methods this project used to pull in from NuGet.
-// Implements exactly the state/transition/action operations FsmMaster actually calls - nothing from
-// FsmUtil's variable helpers, GetAction/ReplaceAction/RemoveState families, or lambda-based helpers.
+// Trimmed-down port of the Silksong.FsmUtil extension methods this project used to pull in from
+// NuGet - only the state/transition/action operations FsmMaster actually calls, with the
+// PlayMakerFSM-typed overloads and generic array helpers dropped. See the SPDX header above.
 // Shared across every loader (including net35 targets with no FsmUtil package of their own) so the
 // edit layer never depends on a platform-specific NuGet package for basic FSM graph mutation.
 internal static class PlayMakerFsmOps

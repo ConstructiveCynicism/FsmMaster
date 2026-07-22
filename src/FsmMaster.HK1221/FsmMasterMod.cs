@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 using HarmonyLib;
 using Modding;
 using UnityEngine;

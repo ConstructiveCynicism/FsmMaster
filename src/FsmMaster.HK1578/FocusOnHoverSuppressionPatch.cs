@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 #if !HK1315
 using System;
 using InControl;

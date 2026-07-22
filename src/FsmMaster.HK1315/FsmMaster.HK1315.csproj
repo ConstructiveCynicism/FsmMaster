@@ -13,6 +13,7 @@
        it), so the game references and deploy target below are guarded the same way the other three
        loaders' are. -->
   <PropertyGroup>
+    <PackageLicenseExpression>EUPL-1.2</PackageLicenseExpression>
     <!-- net35, not net472: hk1315's mscorlib metadata version is v2.0.50727 (checked directly against
          agent-context/hk1315/Managed/mscorlib.dll) - the same Mono 2.0/.NET 3.5 class library profile
          as hk1221/hk1432, not hk1578's v4.0.30319. See FsmMaster.HK1432.csproj's own comment for why
@@ -143,6 +144,8 @@
     <RemoveDir Directories="$(IntermediateOutputPath)/archive" />
     <Copy SourceFiles="@(ReleaseBinaries)" DestinationFolder="$(IntermediateOutputPath)/archive/FsmMaster/" />
     <Copy SourceFiles="$(RepoRoot)README.md" DestinationFolder="$(IntermediateOutputPath)/archive/" />
+    <Copy SourceFiles="$(RepoRoot)LICENSE" DestinationFolder="$(IntermediateOutputPath)/archive/" />
+    <Copy SourceFiles="$(RepoRoot)NOTICE" DestinationFolder="$(IntermediateOutputPath)/archive/" />
     <MakeDir Directories="$(ReleaseOutputFolder)" />
     <Delete Files="$(ReleaseOutputFolder)/$(ModReleaseName).zip" />
     <ZipDirectory SourceDirectory="$(IntermediateOutputPath)/archive" DestinationFile="$(ReleaseOutputFolder)/$(ModReleaseName).zip" Overwrite="True" />

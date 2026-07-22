@@ -102,9 +102,13 @@ If Silksong.ModList is not installed, FsmMaster will silently fail to load.
 ## Credits
 
 - Core development - ConstructiveCynicism
+- FSM edit helpers derived from [Silksong.FsmUtil](https://github.com/silksong-modding/Silksong.FsmUtil) - silksong-modding (EUPL-1.2)
 - Graph layout and FSM visualization conventions inspired by [FSMExpress](https://github.com/nesrak1/FSMExpress) - nesrak1
 - Built on DebugMod's savestate system - [Silksong.DebugMod](https://github.com/hk-speedrunning/Silksong.DebugMod) / [HollowKnight.DebugMod](https://github.com/TheMulhima/HollowKnight.DebugMod)
 
 ## License
 
-[MIT](LICENSE)
+FsmMaster contains code derived from [Silksong.FsmUtil](https://github.com/silksong-modding/Silksong.FsmUtil)
+(© silksong-modding, EUPL-1.2) and is licensed as a whole under the
+**[EUPL-1.2](LICENSE)**. See `NOTICE` and per-file SPDX headers
+for attribution details.

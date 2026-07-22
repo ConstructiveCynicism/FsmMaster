@@ -3,6 +3,7 @@
        via Directory.Build.props; absent on CI, so the game references and deploy target below are
        guarded. -->
   <PropertyGroup>
+    <PackageLicenseExpression>EUPL-1.2</PackageLicenseExpression>
     <TargetFramework>net472</TargetFramework>
     <AssemblyName>FsmMaster</AssemblyName>
     <RootNamespace>FsmMaster</RootNamespace>
@@ -147,6 +148,8 @@
     <RemoveDir Directories="$(IntermediateOutputPath)/archive" />
     <Copy SourceFiles="@(ReleaseBinaries)" DestinationFolder="$(IntermediateOutputPath)/archive/FsmMaster/" />
     <Copy SourceFiles="$(RepoRoot)README.md" DestinationFolder="$(IntermediateOutputPath)/archive/" />
+    <Copy SourceFiles="$(RepoRoot)LICENSE" DestinationFolder="$(IntermediateOutputPath)/archive/" />
+    <Copy SourceFiles="$(RepoRoot)NOTICE" DestinationFolder="$(IntermediateOutputPath)/archive/" />
     <MakeDir Directories="$(ReleaseOutputFolder)" />
     <Delete Files="$(ReleaseOutputFolder)/$(ModReleaseName).zip" />
     <ZipDirectory SourceDirectory="$(IntermediateOutputPath)/archive" DestinationFile="$(ReleaseOutputFolder)/$(ModReleaseName).zip" Overwrite="True" />

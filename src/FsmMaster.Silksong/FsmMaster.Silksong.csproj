@@ -3,6 +3,7 @@
        from LocalBuild.props via Directory.Build.props; absent on CI, so the deploy target below is
        guarded on the install folder existing. -->
   <PropertyGroup>
+    <PackageLicenseExpression>EUPL-1.2</PackageLicenseExpression>
     <TargetFramework>netstandard2.1</TargetFramework>
     <!-- Keeps the shipped output identical to pre-restructure master (FsmMaster.dll, not
          FsmMaster.Silksong.dll) - the project file itself is named after the loader for clarity in the
@@ -116,6 +117,8 @@
     <DownloadFile Condition="!Exists('$(IntermediateOutputPath)/Silksong.Modlist.$(ModlistVersion).zip')" SourceUrl="$(ModlistUrl)" DestinationFolder="$(IntermediateOutputPath)" DestinationFileName="Silksong.Modlist.$(ModlistVersion).zip" />
     <Unzip SourceFiles="$(IntermediateOutputPath)/Silksong.Modlist.$(ModlistVersion).zip" DestinationFolder="$(IntermediateOutputPath)/archive/Silksong.Modlist" />
     <Copy SourceFiles="$(RepoRoot)README.md" DestinationFolder="$(IntermediateOutputPath)/archive/" />
+    <Copy SourceFiles="$(RepoRoot)LICENSE" DestinationFolder="$(IntermediateOutputPath)/archive/" />
+    <Copy SourceFiles="$(RepoRoot)NOTICE" DestinationFolder="$(IntermediateOutputPath)/archive/" />
     <MakeDir Directories="$(ReleaseOutputFolder)" />
     <Delete Files="$(ReleaseOutputFolder)/$(ModReleaseName).zip" />
     <ZipDirectory SourceDirectory="$(IntermediateOutputPath)/archive" DestinationFile="$(ReleaseOutputFolder)/$(ModReleaseName).zip" Overwrite="True" />

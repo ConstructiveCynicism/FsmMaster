@@ -19,6 +19,10 @@
 
     <!-- Shortens and anonymizes paths in debug symbols relative to the project directory. Breakpoints will not work, however. -->
     <PathMap Condition="'$(Configuration)' == 'Release'">$(MSBuildProjectDirectory)=/</PathMap>
+
+    <!-- Incorporates code derived from Silksong.FsmUtil (EUPL-1.2, (c) silksong-modding) - see
+         PlayMakerFsmOps.cs and repo-root NOTICE. -->
+    <PackageLicenseExpression>EUPL-1.2</PackageLicenseExpression>
   </PropertyGroup>
   <ItemGroup Condition="'$(TargetFramework)' == 'net35'">
     <!-- Provides net35 reference assemblies for the SDK-style build - see hk1221's own historical

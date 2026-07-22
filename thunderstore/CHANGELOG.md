@@ -1,5 +1,11 @@
 ## Changelog
 
+### Unreleased
+
+- Licensing correction: FsmMaster is now licensed as a whole under the EUPL-1.2
+  (previously MIT), with FsmUtil attribution restored. See the repository's
+  `NOTICE` file for details.
+
 ### v0.3.5
 
 - Performance overhaul for the graph overlay
