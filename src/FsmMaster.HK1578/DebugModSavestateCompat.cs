@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using Modding;
 using MonoMod.RuntimeDetour;
 using UnityEngine;
 
@@ -88,24 +89,19 @@ internal static class DebugModSavestateCompat
 
     internal static void TryHook()
     {
-        // Not FirstOrDefault(...) - see ConfigGetter<T>'s comment in Config/FieldConfigValue.cs: LINQ's
-        // Func<TSource,bool> predicate is one of the closed generic instantiations missing from
-        // hk1432's stripped mscorlib.dll, and this runs unconditionally from Initialize() whether or
-        // not DebugMod is even installed.
-        Assembly? debugModAssembly = null;
-        foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
-        {
-            if (assembly.GetName().Name == "DebugMod")
-            {
-                debugModAssembly = assembly;
-                break;
-            }
-        }
-
-        if (debugModAssembly == null)
+        // ModHooks.GetMod resolves against ModLoader.ModInstanceNameMap, which this loader generation
+        // populates for every loaded mod regardless of whether it declared FsmMaster as a dependency -
+        // this runs unconditionally from Initialize() whether or not DebugMod is even installed, and
+        // GetMod returns null rather than throwing when it isn't. hk1221's own ModHooks/ModLoader have
+        // neither GetMod nor a name-map dictionary, so that loader still scans
+        // AppDomain.CurrentDomain.GetAssemblies() by name instead - see its own DebugModSavestateCompat.cs.
+        IMod? debugMod = ModHooks.GetMod("DebugMod");
+        if (debugMod == null)
         {
             return;
         }
+
+        Assembly debugModAssembly = debugMod.GetType().Assembly;
 
         Type? saveStateType = debugModAssembly.GetType("DebugMod.SaveState");
         Type? saveStateManagerType = debugModAssembly.GetType("DebugMod.SaveStateManager");

@@ -11,6 +11,8 @@ the Modding API's own mod settings menu (Hollow Knight 1.3.1.5/1.4.3.2/1.5.78);
 on Hollow Knight 1.2.2.1, whose Modding API predates in-game settings menus,
 rebind by editing the mod's saved settings file directly.
 
+Source code and latest release available at [FsmMaster Github Repository](https://github.com/ConstructiveCynicism/FsmMaster)
+
 For any questions or bug reports, please join the [Modding Discord](https://discord.gg/F6Y5TeFQ8j) or [Speedrunning Discord](https://discord.gg/3JtHPsBjHD).
 
 ---
@@ -107,8 +109,15 @@ If Silksong.ModList is not installed, FsmMaster will silently fail to load.
 - Built on DebugMod's savestate system - [Silksong.DebugMod](https://github.com/hk-speedrunning/Silksong.DebugMod) / [HollowKnight.DebugMod](https://github.com/TheMulhima/HollowKnight.DebugMod)
 
 ## License
+FsmMaster
+Copyright (c) 2026 ConstructiveCynicism
+Licensed under the **[EUPL-1.2](LICENSE)**.
 
-FsmMaster contains code derived from [Silksong.FsmUtil](https://github.com/silksong-modding/Silksong.FsmUtil)
-(© silksong-modding, EUPL-1.2) and is licensed as a whole under the
-**[EUPL-1.2](LICENSE)**. See `NOTICE` and per-file SPDX headers
-for attribution details.
+This product includes code derived from Silksong.FsmUtil
+Copyright (c) silksong-modding
+Licensed under the EUPL-1.2 - https://github.com/silksong-modding/Silksong.FsmUtil
+The derived code has been modified by ConstructiveCynicism since 2026-07-20.
+
+Graph layout and FSM visualization conventions inspired by FSMExpress (nesrak1).
+Built on Silksong.DebugMod's savestate system.
+

@@ -163,18 +163,23 @@
     <Copy SourceFiles="@(Binaries)" DestinationFolder="$(HK1432ModsFolder)/FsmMaster/" Condition="'$(HK1432ModsFolder)' != '' And Exists('$(HK1432ModsFolder)')" />
   </Target>
 
-  <!-- Manual-install zip, laid out so its contents drop straight into the game's Managed/Mods folder -
-       nested under FsmMaster/ to match this loader generation's own-folder install layout. -->
   <Target Name="CreateReleaseZip" AfterTargets="ILRepacker" Condition="'$(Configuration)' == 'Release'">
     <ItemGroup>
       <ReleaseBinaries Include="$(TargetPath)" />
       <ReleaseBinaries Include="$(TargetDir)/$(TargetName).pdb" />
     </ItemGroup>
+    <!-- Property-scoped to this target (not a top-level PropertyGroup) because it has to read
+         $(IntermediateOutputPath) after the SDK appends the per-TFM suffix (net472/net35/...) -
+         a top-level PropertyGroup evaluates before that suffix exists and silently resolves to a
+         drive-rooted path instead. -->
+    <PropertyGroup>
+      <ReleaseZipBinariesDir Condition="'$(GITHUB_ACTIONS)' == 'true'">$(IntermediateOutputPath)/archive/</ReleaseZipBinariesDir>
+      <ReleaseZipBinariesDir Condition="'$(ReleaseZipBinariesDir)' == ''">$(IntermediateOutputPath)/archive/FsmMaster/</ReleaseZipBinariesDir>
+    </PropertyGroup>
     <RemoveDir Directories="$(IntermediateOutputPath)/archive" />
-    <Copy SourceFiles="@(ReleaseBinaries)" DestinationFolder="$(IntermediateOutputPath)/archive/FsmMaster/" />
+    <Copy SourceFiles="@(ReleaseBinaries)" DestinationFolder="$(ReleaseZipBinariesDir)" />
     <Copy SourceFiles="$(RepoRoot)README.md" DestinationFolder="$(IntermediateOutputPath)/archive/" />
     <Copy SourceFiles="$(RepoRoot)LICENSE" DestinationFolder="$(IntermediateOutputPath)/archive/" />
-    <Copy SourceFiles="$(RepoRoot)NOTICE" DestinationFolder="$(IntermediateOutputPath)/archive/" />
     <MakeDir Directories="$(ReleaseOutputFolder)" />
     <Delete Files="$(ReleaseOutputFolder)/$(ModReleaseName).zip" />
     <ZipDirectory SourceDirectory="$(IntermediateOutputPath)/archive" DestinationFile="$(ReleaseOutputFolder)/$(ModReleaseName).zip" Overwrite="True" />
