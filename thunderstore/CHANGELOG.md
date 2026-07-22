@@ -1,5 +1,9 @@
 ## Changelog
 
+### v0.3.5
+
+- Performance overhaul for the graph overlay
+
 ### v0.3.2
 
 - Fixed dependency issues with Debug Mod and FsmUtil

@@ -15,6 +15,11 @@ LocalBuild.props
 /.hk-refs/
 CIRefs.props
 
+# CI-only scratch solution: build.yml generates this when hk1315's reference-assembly stubs aren't
+# available yet, to build every other target without failing the whole run on one unresolvable
+# reference. Never used for local dev - build FsmMaster.sln directly.
+FsmMaster.CI.sln
+
 # Thunderstore/manual-zip release packaging output (regenerated on Release build)
 thunderstore/temp/
 thunderstore/dist/

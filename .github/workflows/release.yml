@@ -45,7 +45,7 @@ jobs:
         run: |
           TAG="$GITHUB_REF_NAME"
           VERSION="${TAG#v}"
-          ALL="silksong hk1221 hk1432 hk1578"
+          ALL="silksong hk1221 hk1315 hk1432 hk1578"
 
           # release.sh writes "platforms: <names>" into the annotated tag message. Read it from
           # the API rather than the checkout, so this does not depend on the tag object having
@@ -89,6 +89,7 @@ jobs:
             case "$platform" in
               silksong) project=src/FsmMaster.Silksong/FsmMaster.Silksong.csproj; prefix=silk ;;
               hk1221)   project=src/FsmMaster.HK1221/FsmMaster.HK1221.csproj;     prefix=hk1221 ;;
+              hk1315)   project=src/FsmMaster.HK1315/FsmMaster.HK1315.csproj;     prefix=hk1315 ;;
               hk1432)   project=src/FsmMaster.HK1432/FsmMaster.HK1432.csproj;     prefix=hk1432 ;;
               hk1578)   project=src/FsmMaster.HK1578/FsmMaster.HK1578.csproj;     prefix=hk1578 ;;
             esac

@@ -1,3 +1,4 @@
+#if !HK1315
 using System;
 using InControl;
 
@@ -50,3 +51,12 @@ internal static class FocusOnHoverSuppressionPatch
         }
     }
 }
+#endif
+// HK1315: excluded rather than guarded internally - confirmed by a real build against
+// agent-context/hk1315/Managed/MMHOOK_Assembly-CSharp.dll that this loader generation's HookGen pass
+// never generated a hook for HollowKnightInputModule.ProcessMove on this game version (0 hits for
+// "HollowKnightInputModule" in that MMHOOK assembly, vs. 1 hit for the unrelated base class
+// InControlInputModule) - On.InControl.HollowKnightInputModule doesn't exist as a type at all here, so
+// this is a real per-version gap, not a config issue. The focus-suppression feature is simply
+// unavailable on hk1315 until someone confirms what UIManager.inputModule's actual runtime type is on
+// 1.3.1.5 and whether a working hook exists for it.

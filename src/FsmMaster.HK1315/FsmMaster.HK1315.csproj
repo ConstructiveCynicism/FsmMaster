@@ -1,0 +1,153 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Thin twin of FsmMaster.HK1578, same as FsmMaster.HK1432 - hk1315 uses the same modern loader
+       generation as hk1432/hk1578 (Mod/IGlobalSettings/ICustomMenuMod, MonoMod HookGen, no HarmonyX;
+       confirmed by grepping IGlobalSettings/ILocalSettings/ICustomMenuMod/ModHooks/OnLoadGlobal strings
+       out of the real Assembly-CSharp.dll in agent-context/hk1315/Managed, since no reference DebugMod
+       source exists for this target the way it does for the other three). No source of its own: every
+       .cs file below is the real FsmMaster.HK1578 source, compiled a third time against hk1315's own
+       Managed folder.
+
+       Machine-local install paths (HK1315ManagedFolder/HK1315ModsFolder) come from LocalBuild.props via
+       Directory.Build.props; absent on CI until the private FsmMaster-hk-refs stub repo grows an
+       hk1315/ folder (see fetch-hk-refs.sh's HK1315_REFS_AVAILABLE check and build.yml's handling of
+       it), so the game references and deploy target below are guarded the same way the other three
+       loaders' are. -->
+  <PropertyGroup>
+    <!-- net35, not net472: hk1315's mscorlib metadata version is v2.0.50727 (checked directly against
+         agent-context/hk1315/Managed/mscorlib.dll) - the same Mono 2.0/.NET 3.5 class library profile
+         as hk1221/hk1432, not hk1578's v4.0.30319. See FsmMaster.HK1432.csproj's own comment for why
+         that means net35 rather than net472 here too (System.Action/Func/HashSet/Enumerable living in
+         System.Core.dll instead of mscorlib). -->
+    <TargetFramework>net35</TargetFramework>
+    <AssemblyName>FsmMaster</AssemblyName>
+    <RootNamespace>FsmMaster</RootNamespace>
+    <!-- Release identity for this target: "hk1315_<version>" names the release zip and is what
+         GetVersion() reports. Optional per-target command-line overrides beat the shared
+         -p:Version= - see Directory.Build.targets. -->
+    <ModTargetPrefix>hk1315</ModTargetPrefix>
+    <ModTargetPrefix Condition="'$(HK1315Prefix)' != ''">$(HK1315Prefix)</ModTargetPrefix>
+    <ModVersion Condition="'$(HK1315Version)' != ''">$(HK1315Version)</ModVersion>
+    <!-- Unlike hk1432, hk1315's Assembly-CSharp has no Modding.Utils.Net472Interop.Action<T> type at
+         all (checked: zero hits for "Net472Interop" in agent-context/hk1315/Managed/Assembly-CSharp.dll)
+         - so this target must NOT define HK1432 and must take FsmMasterMod.cs's plain System.Action<T>
+         #else branch for CancelDelegate, the same branch hk1578 takes, even though hk1315 shares
+         hk1432's net35 runtime otherwise. Not yet confirmed in-game whether that branch is actually
+         safe on hk1315's old Mono runtime the way it is on hk1578's net472 one, or whether it needs a
+         wrapper type of its own that doesn't exist yet - flagging rather than guessing, see the
+         CancelDelegate comment in FsmMasterMod.cs and the integration plan's HK1315 section. -->
+    <DefineConstants>$(DefineConstants);HK1315</DefineConstants>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <EnableNETAnalyzers>True</EnableNETAnalyzers>
+    <AnalysisMode>recommended</AnalysisMode>
+    <!-- MSB3245: IDE design-time builds sometimes evaluate this project before LocalBuild.props'
+         machine-local HK1315Folder is available, producing a spurious "could not resolve reference"
+         for every UnityEngine.*Module - a real `dotnet build` from the command line resolves them fine
+         once the local install path is set. -->
+    <NoWarn>$(NoWarn);MSB3270;MSB3245</NoWarn>
+
+    <RestorePackagesWithLockFile>True</RestorePackagesWithLockFile>
+    <RestoreLockedMode Condition="'$(CI)' == 'true'">True</RestoreLockedMode>
+
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/ConstructiveCynicism/FsmMaster</RepositoryUrl>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\FsmMaster.Core\FsmMaster.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Provides net35 reference assemblies for the SDK-style build, so no .NET Framework 3.5
+         targeting pack has to be installed. -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Unity.Analyzers" Version="1.25.0" PrivateAssets="all" />
+    <!-- Dev-time only - merges FsmMaster.Core.dll into FsmMaster.dll at build time (see
+         ILRepack.targets) so the Mods folder only has to carry one assembly for this mod. -->
+    <PackageReference Include="ILRepack.Lib.MSBuild.Task" Version="2.0.34" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="**/*.cs" />
+    <Compile Include="..\FsmMaster.HK1578\**\*.cs" Exclude="..\FsmMaster.HK1578\bin\**\*.cs;..\FsmMaster.HK1578\obj\**\*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Unlike hk1432/hk1578, hk1315's Unity engine still ships one monolithic UnityEngine.dll rather
+         than the split UnityEngine.*Module.dll set - confirmed directly against
+         agent-context/hk1315/Managed, which has no *Module.dll files at all, the same shape as
+         hk1221's Managed folder. Every UnityEngine.* type the borrowed hk1578 source references lives
+         inside this one assembly on this engine version, so only it needs referencing (no per-module
+         Reference entries the way FsmMaster.HK1432.csproj has). -->
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(HK1315ManagedFolder)/Assembly-CSharp.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(HK1315ManagedFolder)/UnityEngine.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(HK1315ManagedFolder)/UnityEngine.UI.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="PlayMaker">
+      <HintPath>$(HK1315ManagedFolder)/PlayMaker.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="MMHOOK_Assembly-CSharp">
+      <HintPath>$(HK1315ManagedFolder)/MMHOOK_Assembly-CSharp.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="MMHOOK_PlayMaker">
+      <HintPath>$(HK1315ManagedFolder)/MMHOOK_PlayMaker.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="MonoMod.RuntimeDetour">
+      <HintPath>$(HK1315ManagedFolder)/MonoMod.RuntimeDetour.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="MonoMod.Utils">
+      <HintPath>$(HK1315ManagedFolder)/MonoMod.Utils.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Mono.Cecil">
+      <HintPath>$(HK1315ManagedFolder)/Mono.Cecil.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(HK1315ManagedFolder)/Newtonsoft.Json.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="$(RepoRoot)README.md" Pack="True" PackagePath="README.md" />
+  </ItemGroup>
+
+  <!-- Own-folder install, unlike hk1221's flat Mods/FsmMaster.dll - see the integration plan's target
+       matrix: this loader generation isolates each mod's dependencies under Mods/<ModName>/. -->
+  <Target Name="CopyToModsFolder" AfterTargets="ILRepacker">
+    <ItemGroup>
+      <Binaries Include="$(TargetPath)" />
+      <Binaries Include="$(TargetDir)/$(TargetName).pdb" />
+    </ItemGroup>
+    <Copy SourceFiles="@(Binaries)" DestinationFolder="$(HK1315ModsFolder)/FsmMaster/" Condition="'$(HK1315ModsFolder)' != '' And Exists('$(HK1315ModsFolder)')" />
+  </Target>
+
+  <!-- Manual-install zip, laid out so its contents drop straight into the game's Managed/Mods folder -
+       nested under FsmMaster/ to match this loader generation's own-folder install layout. -->
+  <Target Name="CreateReleaseZip" AfterTargets="ILRepacker" Condition="'$(Configuration)' == 'Release'">
+    <ItemGroup>
+      <ReleaseBinaries Include="$(TargetPath)" />
+      <ReleaseBinaries Include="$(TargetDir)/$(TargetName).pdb" />
+    </ItemGroup>
+    <RemoveDir Directories="$(IntermediateOutputPath)/archive" />
+    <Copy SourceFiles="@(ReleaseBinaries)" DestinationFolder="$(IntermediateOutputPath)/archive/FsmMaster/" />
+    <Copy SourceFiles="$(RepoRoot)README.md" DestinationFolder="$(IntermediateOutputPath)/archive/" />
+    <MakeDir Directories="$(ReleaseOutputFolder)" />
+    <Delete Files="$(ReleaseOutputFolder)/$(ModReleaseName).zip" />
+    <ZipDirectory SourceDirectory="$(IntermediateOutputPath)/archive" DestinationFile="$(ReleaseOutputFolder)/$(ModReleaseName).zip" Overwrite="True" />
+  </Target>
+
+  <!-- ILRepack.targets in this same directory is auto-imported by ILRepack.Lib.MSBuild.Task's own
+       .targets (via its $(ILRepackTargetsFile) convention) - no explicit <Import> needed here. -->
+</Project>

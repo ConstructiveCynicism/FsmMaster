@@ -5,6 +5,14 @@ using UnityEngine;
 using UnityEngine.UI;
 #if HK1432
 using CancelDelegate = Modding.Utils.Net472Interop.Action<UnityEngine.UI.MenuSelectable>;
+#elif HK1315
+// hk1315 has no Modding.Utils.Net472Interop type at all (checked: zero hits for "Net472Interop" in
+// agent-context/hk1315/Managed/Assembly-CSharp.dll) - it has its own differently-named equivalent
+// instead, found only by letting the build fail and reading the real CS0029 target type: this game
+// version's HorizontalOptionConfig.CancelAction wants Shims.NET.System.Action<T>, not
+// Modding.Utils.Net472Interop.Action<T> or plain System.Action<T>. A third genuine variant, not a
+// guess - confirmed present via a "Shims.NET" string hit in the same Assembly-CSharp.dll.
+using CancelDelegate = Shims.NET.System.Action<UnityEngine.UI.MenuSelectable>;
 #else
 using CancelDelegate = System.Action<UnityEngine.UI.MenuSelectable>;
 #endif
@@ -32,7 +40,12 @@ public class FsmMasterMod : Mod, IGlobalSettings<FsmMasterGlobalSettings>, ICust
 
         On.HutongGames.PlayMaker.Fsm.Preprocess += FsmActivationPatches.OnFsmPreprocess;
         ModHooks.CursorHook += FsmActivationPatches.OnCursorHook;
+#if !HK1315
+        // See the #if !HK1315 block in FocusOnHoverSuppressionPatch.cs - this game version's HookGen
+        // pass never generated a hook for HollowKnightInputModule.ProcessMove, so the type doesn't
+        // exist as On.InControl.HollowKnightInputModule here at all.
         On.InControl.HollowKnightInputModule.ProcessMove += FocusOnHoverSuppressionPatch.OnProcessMove;
+#endif
         DebugModSavestateCompat.TryHook();
 
         var driverObject = new GameObject("FsmMasterDriver");

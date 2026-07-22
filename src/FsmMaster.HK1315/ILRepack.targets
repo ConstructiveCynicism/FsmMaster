@@ -8,7 +8,7 @@
        theirs in the output folder to merge or delete. FsmMaster.dll is listed first so its own types
        stay public and its assembly attributes are kept; Core gets internalized.
 
-       Same file as FsmMaster.HK1315's and FsmMaster.HK1578's copies - kept as its own file rather than
+       Same file as FsmMaster.HK1432's and FsmMaster.HK1578's copies - kept as its own file rather than
        shared, since ILRepack.Lib.MSBuild.Task discovers this targets file by convention from each
        project's own directory (see the csproj's closing comment), not via the wildcard Compile Include
        this thin twin otherwise uses for its .cs source. -->

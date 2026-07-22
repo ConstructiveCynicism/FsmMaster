@@ -36,7 +36,11 @@
     <Nullable>enable</Nullable>
     <EnableNETAnalyzers>True</EnableNETAnalyzers>
     <AnalysisMode>recommended</AnalysisMode>
-    <NoWarn>$(NoWarn);MSB3270</NoWarn>
+    <!-- MSB3245: IDE design-time builds sometimes evaluate this project before LocalBuild.props'
+         machine-local HK1432Folder is available, producing a spurious "could not resolve reference"
+         for every UnityEngine.*Module - a real `dotnet build` from the command line resolves them fine
+         once the local install path is set. -->
+    <NoWarn>$(NoWarn);MSB3270;MSB3245</NoWarn>
 
     <RestorePackagesWithLockFile>True</RestorePackagesWithLockFile>
     <RestoreLockedMode Condition="'$(CI)' == 'true'">True</RestoreLockedMode>
@@ -167,6 +171,7 @@
     </ItemGroup>
     <RemoveDir Directories="$(IntermediateOutputPath)/archive" />
     <Copy SourceFiles="@(ReleaseBinaries)" DestinationFolder="$(IntermediateOutputPath)/archive/FsmMaster/" />
+    <Copy SourceFiles="$(RepoRoot)README.md" DestinationFolder="$(IntermediateOutputPath)/archive/" />
     <MakeDir Directories="$(ReleaseOutputFolder)" />
     <Delete Files="$(ReleaseOutputFolder)/$(ModReleaseName).zip" />
     <ZipDirectory SourceDirectory="$(IntermediateOutputPath)/archive" DestinationFile="$(ReleaseOutputFolder)/$(ModReleaseName).zip" Overwrite="True" />

@@ -91,6 +91,7 @@
     </ItemGroup>
     <RemoveDir Directories="$(IntermediateOutputPath)/archive" />
     <Copy SourceFiles="@(ReleaseBinaries)" DestinationFolder="$(IntermediateOutputPath)/archive/" />
+    <Copy SourceFiles="$(RepoRoot)README.md" DestinationFolder="$(IntermediateOutputPath)/archive/" />
     <MakeDir Directories="$(ReleaseOutputFolder)" />
     <Delete Files="$(ReleaseOutputFolder)/$(ModReleaseName).zip" />
     <ZipDirectory SourceDirectory="$(IntermediateOutputPath)/archive" DestinationFile="$(ReleaseOutputFolder)/$(ModReleaseName).zip" Overwrite="True" />

@@ -46,11 +46,19 @@ jobs:
 
       - name: Select build scope
         run: |
-          if [ -f CIRefs.props ]; then
-            echo "BUILD_TARGET=FsmMaster.sln" >> "$GITHUB_ENV"
-          else
-            echo "::warning::No Hollow Knight reference assemblies available - building the Silksong target only. The HK1221/HK1432/HK1578 targets are not validated by this run."
+          if [ ! -f CIRefs.props ]; then
+            echo "::warning::No Hollow Knight reference assemblies available - building the Silksong target only. The HK1221/HK1315/HK1432/HK1578 targets are not validated by this run."
             echo "BUILD_TARGET=src/FsmMaster.Silksong/FsmMaster.Silksong.csproj" >> "$GITHUB_ENV"
+          elif [ "${HK1315_REFS_AVAILABLE:-false}" != "true" ]; then
+            # hk1315's stubs don't exist yet in the private refs repo (see fetch-hk-refs.sh) - drop
+            # it from a scratch copy of the solution rather than failing every PR on an unresolvable
+            # reference until that catches up. Every other target still builds and validates normally.
+            echo "::warning::No hk1315 reference assemblies available yet - building every other target, HK1315 is not validated by this run."
+            cp FsmMaster.sln FsmMaster.CI.sln
+            dotnet sln FsmMaster.CI.sln remove src/FsmMaster.HK1315/FsmMaster.HK1315.csproj
+            echo "BUILD_TARGET=FsmMaster.CI.sln" >> "$GITHUB_ENV"
+          else
+            echo "BUILD_TARGET=FsmMaster.sln" >> "$GITHUB_ENV"
           fi
 
       - name: Restore

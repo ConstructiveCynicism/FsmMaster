@@ -15,7 +15,7 @@
 # existing tag, or a dirty working tree aborts without creating anything.
 set -euo pipefail
 
-ALL_PLATFORMS="silksong hk1221 hk1432 hk1578"
+ALL_PLATFORMS="silksong hk1221 hk1315 hk1432 hk1578"
 REMOTE="${RELEASE_REMOTE:-origin}"
 
 usage() {

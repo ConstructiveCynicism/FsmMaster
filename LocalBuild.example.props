@@ -14,6 +14,7 @@
 
     <!-- Hollow Knight installs (Managed/Mods layout). Blank = target not deployed locally. -->
     <HK1221Folder></HK1221Folder>
+    <HK1315Folder></HK1315Folder>
     <HK1432Folder></HK1432Folder>
     <HK1578Folder>C:\Program Files (x86)\Steam\steamapps\common\Hollow Knight</HK1578Folder>
   </PropertyGroup>

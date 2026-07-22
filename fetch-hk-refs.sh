@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # CI-only helper: fetches the private Refasmer-stripped reference-assembly stubs for
-# hk1221/hk1432/hk1578 (see ConstructiveCynicism/FsmMaster-hk-refs) and writes CIRefs.props
+# hk1221/hk1315/hk1432/hk1578 (see ConstructiveCynicism/FsmMaster-hk-refs) and writes CIRefs.props
 # pointing HK*ManagedFolder at them. This is the CI analogue of a contributor's LocalBuild.props
 # pointing at a real local game install - see Directory.Build.props, which imports whichever one
 # is present and only falls back to CIRefs.props for whichever HK*ManagedFolder is still unset.
@@ -31,6 +31,22 @@ if [ ! -d "$REFS_DIR" ]; then
   fi
 fi
 
+# hk1315 stubs haven't been generated into the private repo yet (unlike hk1221/hk1432/hk1578).
+# Check for the subfolder before the cygpath conversion below and tell the calling workflow step
+# via GITHUB_ENV, so build.yml/release.yml can drop FsmMaster.HK1315 from what they build instead
+# of failing the whole run on hundreds of CS0246s once the project references a HintPath that
+# doesn't exist. Harmless no-op outside CI (GITHUB_ENV unset) and once the stub repo catches up
+# (this just stops writing "false" and the caller's check goes the other way).
+if [ -d "$REFS_DIR/hk1315" ]; then
+  HK1315_REFS_AVAILABLE=true
+else
+  HK1315_REFS_AVAILABLE=false
+  echo "fetch-hk-refs: $REFS_REPO has no hk1315/ folder yet - HK1315 will be skipped."
+fi
+if [ -n "${GITHUB_ENV:-}" ]; then
+  echo "HK1315_REFS_AVAILABLE=$HK1315_REFS_AVAILABLE" >> "$GITHUB_ENV"
+fi
+
 # MSBuild needs a native path. Under Git Bash/MSYS (which is what the Windows CI runners use for
 # a bash step) $REFS_DIR is a POSIX-style path like /d/a/repo/.hk-refs, which MSBuild silently
 # fails to resolve - it emits MSB3245 "could not locate the assembly" warnings and then hundreds
@@ -46,6 +62,13 @@ cat > "$REPO_ROOT/CIRefs.props" <<EOF
     <HK1221ManagedFolder Condition="'\$(HK1221ManagedFolder)' == ''">$REFS_DIR/hk1221</HK1221ManagedFolder>
     <HK1432ManagedFolder Condition="'\$(HK1432ManagedFolder)' == ''">$REFS_DIR/hk1432</HK1432ManagedFolder>
     <HK1578ManagedFolder Condition="'\$(HK1578ManagedFolder)' == ''">$REFS_DIR/hk1578</HK1578ManagedFolder>
+EOF
+if [ "$HK1315_REFS_AVAILABLE" = "true" ]; then
+  cat >> "$REPO_ROOT/CIRefs.props" <<EOF
+    <HK1315ManagedFolder Condition="'\$(HK1315ManagedFolder)' == ''">$REFS_DIR/hk1315</HK1315ManagedFolder>
+EOF
+fi
+cat >> "$REPO_ROOT/CIRefs.props" <<EOF
   </PropertyGroup>
 </Project>
 EOF

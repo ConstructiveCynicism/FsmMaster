@@ -22,6 +22,11 @@
     single build without editing this file.
     -->
     <Version>0.3.5</Version>
+    <!-- Otherwise the SDK appends "+<git-sha>" to AssemblyInformationalVersion (visible as
+         FileVersionInfo.ProductVersion) since RepositoryUrl is set above and this is a git
+         checkout - every release must report plain major.minor.patch, not a build-metadata
+         suffix. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 
   <!--
@@ -39,6 +44,13 @@
 
     <HK1221ManagedFolder Condition="'$(HK1221Folder)' != ''">$(HK1221Folder)\hollow_knight_Data\Managed</HK1221ManagedFolder>
     <HK1221ModsFolder Condition="'$(HK1221Folder)' != ''">$(HK1221ManagedFolder)\Mods</HK1221ModsFolder>
+
+    <HK1315ManagedFolder Condition="'$(HK1315Folder)' != ''">$(HK1315Folder)\hollow_knight_Data\Managed</HK1315ManagedFolder>
+    <!-- hk1315 installs into its own subfolder (Mods/FsmMaster), like hk1432/hk1578 - see
+         FsmMaster.HK1315.csproj's own comment for why this loader generation isolates each mod's
+         dependencies under Mods/<ModName>/ despite sharing hk1221's monolithic UnityEngine.dll/PlayMaker
+         build. -->
+    <HK1315ModsFolder Condition="'$(HK1315Folder)' != ''">$(HK1315ManagedFolder)\Mods</HK1315ModsFolder>
 
     <HK1432ManagedFolder Condition="'$(HK1432Folder)' != ''">$(HK1432Folder)\hollow_knight_Data\Managed</HK1432ManagedFolder>
     <HK1432ModsFolder Condition="'$(HK1432Folder)' != ''">$(HK1432ManagedFolder)\Mods</HK1432ModsFolder>
