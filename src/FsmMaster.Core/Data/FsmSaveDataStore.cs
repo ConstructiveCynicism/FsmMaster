@@ -8,6 +8,31 @@ using UnityEngine;
 
 namespace FsmMaster;
 
+// Scene-name lookup used everywhere a save/load path gets built from a live scene. Mod-added/custom
+// scenes (a randomizer's generated room, a debug/test scene assembled at runtime) have been seen to not
+// follow the standard level-scene naming this mod otherwise assumes, and - unlike the already-handled
+// null case (Scene.name queried before the initial scene finishes loading, see FsmMasterPlugin.Awake) -
+// aren't guaranteed to even return cleanly when queried. Routes every caller through one place so an
+// errored lookup consistently falls back to the literal "unknown" scene name rather than each call site
+// guessing its own fallback (or, worse, letting the exception propagate out of a save/load button click).
+internal static class FsmSceneNaming
+{
+    internal const string UnknownSceneName = "unknown";
+
+    public static string GetSafeSceneName(Func<string?> getName, IFsmLog? logger = null)
+    {
+        try
+        {
+            return getName() ?? string.Empty;
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning($"[FsmMaster] Failed to read scene name for a save/load path; using '{UnknownSceneName}': {ex.Message}");
+            return UnknownSceneName;
+        }
+    }
+}
+
 // Persists FSM edits as JSON, one file per (scene, FsmKey, save name) triple under a per-scene, per-FsmKey
 // subfolder - so a single FsmKey can hold several independently named configurations (e.g. "aggressive" vs
 // "passive" variants of the same enemy FSM) rather than exactly one save overwriting itself every time. Uses

@@ -38,7 +38,7 @@ internal static class FocusOnHoverSuppressionPatch
         }
         catch (Exception ex)
         {
-            FsmMasterMod.Instance?.LogError($"FocusOnHoverSuppressionPatch.Prefix threw: {ex}");
+            FsmMaster.Instance?.LogError($"FocusOnHoverSuppressionPatch.Prefix threw: {ex}");
         }
     }
 
@@ -51,7 +51,7 @@ internal static class FocusOnHoverSuppressionPatch
         }
         catch (Exception ex)
         {
-            FsmMasterMod.Instance?.LogError($"FocusOnHoverSuppressionPatch.Postfix threw: {ex}");
+            FsmMaster.Instance?.LogError($"FocusOnHoverSuppressionPatch.Postfix threw: {ex}");
         }
     }
 }

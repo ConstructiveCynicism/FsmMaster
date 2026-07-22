@@ -270,7 +270,7 @@ internal sealed class FsmRightPanel : CanvasPanel
             return;
         }
 
-        string sceneName = active.Component.gameObject.scene.name;
+        string sceneName = FsmSceneNaming.GetSafeSceneName(() => active.Component.gameObject.scene.name, logger);
         string defaultName = FsmSaveDataStore.GetLastChosenSaveName(sceneName, active.FsmKey) ?? "";
         _saveDialog.Show(sceneName, active.FsmKey, defaultName);
     }
@@ -284,7 +284,7 @@ internal sealed class FsmRightPanel : CanvasPanel
             return;
         }
 
-        string sceneName = active.Component.gameObject.scene.name;
+        string sceneName = FsmSceneNaming.GetSafeSceneName(() => active.Component.gameObject.scene.name, logger);
         _loadDialog.Show(sceneName, active.FsmKey);
     }
 

@@ -70,7 +70,7 @@ internal static class DebugModSavestateCompat
         Type? saveStateManagerType = debugModAssembly.GetType("DebugMod.SaveStateManager");
         if (saveStateType == null || saveStateManagerType == null)
         {
-            FsmMasterMod.Instance?.LogWarn("DebugMod detected but its SaveState/SaveStateManager types could not be resolved; savestate integration disabled.");
+            FsmMaster.Instance?.LogWarn("DebugMod detected but its SaveState/SaveStateManager types could not be resolved; savestate integration disabled.");
             return;
         }
 
@@ -83,7 +83,7 @@ internal static class DebugModSavestateCompat
 
         if (_pathField == null || _loadingSavestateField == null || saveToFile == null || loadFromFile == null || saveTempState == null || loadTempState == null)
         {
-            FsmMasterMod.Instance?.LogWarn("DebugMod detected but its savestate API surface didn't match what FsmMaster expects; savestate integration disabled.");
+            FsmMaster.Instance?.LogWarn("DebugMod detected but its savestate API surface didn't match what FsmMaster expects; savestate integration disabled.");
             return;
         }
 
@@ -93,7 +93,7 @@ internal static class DebugModSavestateCompat
         harmony.Patch(loadTempState, postfix: new HarmonyMethod(typeof(DebugModSavestateCompat), nameof(PostfixLoadTempState)));
 
         _hooked = true;
-        FsmMasterMod.Instance?.Log("FsmMaster detected DebugMod - hooking savestate save/load to persist active FSM edits.");
+        FsmMaster.Instance?.Log("FsmMaster detected DebugMod - hooking savestate save/load to persist active FSM edits.");
     }
 
     // Called once per frame from FsmMasterDriver.Update(). SaveState.loadingSavestate is DebugMod's own
@@ -149,12 +149,12 @@ internal static class DebugModSavestateCompat
             File.WriteAllText(directory + "savestate" + __0 + SidecarSuffix, FsmSaveDataStore.SerializeEditSets(activeEdits));
             if (activeEdits.Count > 0)
             {
-                FsmMasterMod.Instance?.Log($"FsmMaster saved {activeEdits.Count} active FSM edit set(s) into savestate slot {__0}.");
+                FsmMaster.Instance?.Log($"FsmMaster saved {activeEdits.Count} active FSM edit set(s) into savestate slot {__0}.");
             }
         }
         catch (Exception ex)
         {
-            FsmMasterMod.Instance?.LogWarn($"Failed to save FSM edits into DebugMod savestate slot {__0}: {ex.Message}");
+            FsmMaster.Instance?.LogWarn($"Failed to save FSM edits into DebugMod savestate slot {__0}: {ex.Message}");
         }
     }
 
@@ -180,7 +180,7 @@ internal static class DebugModSavestateCompat
         {
             _pendingFileLoadInstance = null;
             _pendingFileLoadEditSets = null;
-            FsmMasterMod.Instance?.LogWarn($"Failed to read FSM edits from DebugMod savestate slot {__0}: {ex.Message}");
+            FsmMaster.Instance?.LogWarn($"Failed to read FSM edits from DebugMod savestate slot {__0}: {ex.Message}");
         }
     }
 
@@ -206,7 +206,7 @@ internal static class DebugModSavestateCompat
         }
         catch (Exception ex)
         {
-            FsmMasterMod.Instance?.LogWarn($"Failed to stash FSM edits into DebugMod quickslot: {ex.Message}");
+            FsmMaster.Instance?.LogWarn($"Failed to stash FSM edits into DebugMod quickslot: {ex.Message}");
         }
     }
 

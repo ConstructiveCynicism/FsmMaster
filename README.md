@@ -85,12 +85,6 @@ For any questions or bug reports, please join the [Modding Discord](https://disc
 | Hollow Knight 1.3.1.5 | — (manual only) | [FsmMaster-hk1315.zip](https://github.com/ConstructiveCynicism/FsmMaster/releases/latest/download/FsmMaster-hk1315.zip) | `hollow_knight_Data/Managed/Mods/` |
 | Hollow Knight 1.2.2.1 | — (manual only) | [FsmMaster-hk1221.zip](https://github.com/ConstructiveCynicism/FsmMaster/releases/latest/download/FsmMaster-hk1221.zip) | `hollow_knight_Data/Managed/Mods/` |
 
-Manual installs: unzip and drop the contents at the "Install to" path (each zip
-is already laid out to match - for hk1221 that's a single `FsmMaster.dll` at
-the zip root, the rest ship a `FsmMaster/` folder). All five HK targets need
-their platform's [Modding API](https://github.com/hk-modding/api) installed
-first, same as any other mod for that build.
-
 > [!IMPORTANT]
 > For moderation reasons, the Silksong version requires [Silksong.ModList](https://github.com/silksong-modding/Silksong.ModList) to be installed. This mod is included in the Silksong release download.
 If Silksong.ModList is not installed, FsmMaster will silently fail to load.
@@ -109,9 +103,9 @@ If Silksong.ModList is not installed, FsmMaster will silently fail to load.
 - Built on DebugMod's savestate system - [Silksong.DebugMod](https://github.com/hk-speedrunning/Silksong.DebugMod) / [HollowKnight.DebugMod](https://github.com/TheMulhima/HollowKnight.DebugMod)
 
 ## License
-FsmMaster
-Copyright (c) 2026 ConstructiveCynicism
-Licensed under the **[EUPL-1.2](LICENSE)**.
+> FsmMaster
+> Copyright (c) 2026 ConstructiveCynicism
+> Licensed under the **[EUPL-1.2](LICENSE)**.
 
 This product includes code derived from Silksong.FsmUtil
 Copyright (c) silksong-modding

@@ -51,7 +51,7 @@ internal static class FsmActivatedPatch
         }
         catch (Exception ex)
         {
-            FsmMasterMod.Instance?.LogError($"FsmActivatedPatch threw: {ex}");
+            FsmMaster.Instance?.LogError($"FsmActivatedPatch threw: {ex}");
         }
     }
 }
@@ -123,7 +123,7 @@ internal static class FsmStateEnteredPatch
         }
         catch (Exception ex)
         {
-            FsmMasterMod.Instance?.LogError($"FsmStateEnteredPatch threw: Fsm={__instance?.Name}, State={state?.Name}, Exception={ex}");
+            FsmMaster.Instance?.LogError($"FsmStateEnteredPatch threw: Fsm={__instance?.Name}, State={state?.Name}, Exception={ex}");
         }
     }
 }

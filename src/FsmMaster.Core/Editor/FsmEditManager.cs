@@ -188,6 +188,11 @@ internal sealed class FsmEditManager
     // Every FsmKey with at least one edit currently in effect this session.
     public ICollection<string> GetEditedFsmKeys() => _activeEdits.Keys;
 
+    // Every FsmEditSet with at least one edit currently in effect this session - the data behind each
+    // loader's public GetActiveEdits() API (see e.g. FsmMasterPlugin.GetActiveEdits on Silksong), which
+    // hands the result to FsmSaveDataStore.SerializeEditSets to turn it into JSON for other mods.
+    public List<FsmEditSet> GetAllActiveEditSets() => new(_activeEdits.Values);
+
     public FsmEditSet? GetActiveEditSet(string fsmKey) =>
         _activeEdits.TryGetValue(fsmKey, out FsmEditSet? set) ? set : null;
 
@@ -221,7 +226,7 @@ internal sealed class FsmEditManager
     {
         if (!_liveInstances.TryGetValue(editSet.FsmKey, out List<Fsm>? instances) || instances.Count == 0)
         {
-            _logger.LogWarning($"[FsmMaster] No live instances found for fsm key '{editSet.FsmKey}'; skipping edit set.");
+            _logger.LogWarning($"[FsmMaster] Fsm key '{editSet.FsmKey}' is disconnected (no live instances in the current scene); skipping edit set.");
             return;
         }
 
@@ -265,6 +270,10 @@ internal sealed class FsmEditManager
                 InstallSequencer(editSet.FsmKey, fsm, seq);
             }
         }
+
+        _logger.LogInfo($"[FsmMaster] Applied edit set for fsm key '{editSet.FsmKey}' to {instances.Count} live instance(s): "
+            + $"{variableOverrides.Length} variable, {actionFieldOverrides.Length} action-field, {disabledStates.Length} disabled-state, "
+            + $"{transitionRetargets.Length} transition, {sequencerOverrides.Length} sequencer override(s).");
     }
 
     // Restores every live instance of fsmKey to its pristine snapshot and drops all edit/undo bookkeeping

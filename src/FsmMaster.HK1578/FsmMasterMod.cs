@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: EUPL-1.2
+using System.Collections.Generic;
 using Modding;
 using Modding.Menu;
 using Modding.Menu.Config;
@@ -28,9 +29,51 @@ public class FsmMasterMod : Mod, IGlobalSettings<FsmMasterGlobalSettings>, ICust
 
     internal static FsmMasterGlobalSettings Settings => _settings;
 
+    // Mod's default name (when no name is passed to its constructor) reflects the class name
+    // (FsmMasterMod) into the mod list - pass the display name explicitly instead.
+    public FsmMasterMod() : base("FsmMaster")
+    {
+    }
+
     public void OnLoadGlobal(FsmMasterGlobalSettings settings) => _settings = settings;
 
     public FsmMasterGlobalSettings OnSaveGlobal() => _settings;
+
+#region API
+    // =========================================================================================
+    // Public API for other mods
+    // =========================================================================================
+
+    /// <summary>
+    /// Returns every FSM edit currently in effect this session as a JSON string, in the same format as files/savestate data
+    /// </summary>
+    /// <returns>A JSON string describing every active edit set. Empty/no edits still returns valid JSON.</returns>
+    public static string GetActiveEdits()
+    {
+        List<FsmEditSet> activeEditSets = FsmMasterDriver.Instance?.EditManager?.GetAllActiveEditSets()
+            ?? new List<FsmEditSet>();
+        return FsmSaveDataStore.SerializeEditSets(activeEditSets);
+    }
+
+    /// <summary>
+    /// Shows or hides the small "Fsm Edits Active" indicator the graph overlay draws in the
+    /// bottom-right corner whenever at least one FSM has an edit in effect. On by default.
+    /// </summary>
+    public static bool ShowEditIndicator
+    {
+        get => FsmGraphOverlay.ShowEditIndicator;
+        set => FsmGraphOverlay.ShowEditIndicator = value;
+    }
+
+    /// <summary>
+    /// Whether FsmMaster should show UI and hint the toggle hotkey
+    /// </summary>
+    public static bool FirstRunComplete
+    {
+        get => Settings.FirstRunComplete;
+        set => Settings.FirstRunComplete = value;
+    }
+#endregion
 
     // No ILocalSettings<T> here - FsmMaster has no per-save data of its own (FsmMasterSaveSettings on
     // the hk1221 loader is an empty placeholder for the same reason), unlike DebugMod's own

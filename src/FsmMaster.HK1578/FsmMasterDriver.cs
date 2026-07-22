@@ -83,7 +83,9 @@ internal class FsmMasterDriver : MonoBehaviour
         // declares its own global-namespace SceneManager class (a Team Cherry gameplay type unrelated to
         // Unity's), which silently wins over the using-imported one for an unqualified reference (a
         // type in the global namespace always beats one brought in by `using`, with no ambiguity error).
-        string sceneName = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name ?? string.Empty;
+        // Routed through FsmSceneNaming so a custom/mod-added scene that errors on .name (not just
+        // returns null) still resolves to something FsmSaveDataStore's path building can use.
+        string sceneName = FsmSceneNaming.GetSafeSceneName(() => UnityEngine.SceneManagement.SceneManager.GetActiveScene().name, _log);
 
         PlayMakerFSM[] fsms = FindAllPlayMakerFsms();
 
@@ -318,14 +320,15 @@ internal class FsmMasterDriver : MonoBehaviour
 
     private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
     {
+        string loadedSceneName = FsmSceneNaming.GetSafeSceneName(() => scene.name, _log);
         PlayMakerFSM[] fsms = FindAllPlayMakerFsms();
-        Dictionary<string, List<PlayMakerFSM>> groups = ApplyPersistedEditsForScene(scene.name, fsms);
+        Dictionary<string, List<PlayMakerFSM>> groups = ApplyPersistedEditsForScene(loadedSceneName, fsms);
 
         // The overlay's own snapshot goes stale on every scene load - PlayMakerFSM instances from the
         // previous scene are destroyed and need re-collecting. Uses UnityEngine.SceneManagement.SceneManager.GetActiveScene().name
         // (matching Awake), not the loaded `scene` parameter, since that's what RefreshSnapshot's own
         // FsmDataCollector.CollectSnapshot call has always keyed its snapshot by.
-        _graphOverlay?.RefreshSnapshot(UnityEngine.SceneManagement.SceneManager.GetActiveScene().name ?? string.Empty, fsms);
+        _graphOverlay?.RefreshSnapshot(FsmSceneNaming.GetSafeSceneName(() => UnityEngine.SceneManagement.SceneManager.GetActiveScene().name, _log), fsms);
 
         // Re-resolves every open tab's live PlayMakerFSM by FsmKey against the groups just computed
         // above - a tab whose FSM isn't present here gets marked not-live (kept open as a placeholder)
@@ -386,7 +389,7 @@ internal class FsmMasterDriver : MonoBehaviour
             return;
         }
 
-        string sceneName = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name ?? string.Empty;
+        string sceneName = FsmSceneNaming.GetSafeSceneName(() => UnityEngine.SceneManagement.SceneManager.GetActiveScene().name, _log);
         PlayMakerFSM[] fsms = FindAllPlayMakerFsms();
         Dictionary<string, List<PlayMakerFSM>> groups = ApplyPersistedEditsForScene(sceneName, fsms);
         _graphOverlay.RefreshSnapshot(sceneName, fsms);
