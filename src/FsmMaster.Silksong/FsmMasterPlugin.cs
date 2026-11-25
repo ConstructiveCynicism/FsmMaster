@@ -202,7 +202,12 @@ public partial class FsmMasterPlugin : BaseUnityPlugin
             return;
         }
 
-        InputHandler? inputHandler = GameManager.instance?.inputHandler;
+        var gm = GameManager.SilentInstance;
+        if (gm == null)
+        {
+            return;
+        }
+        InputHandler? inputHandler = gm.inputHandler;
         if (inputHandler == null)
         {
             return;
